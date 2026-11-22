@@ -577,7 +577,7 @@ def stage_compare(ctx: dict) -> dict:
         if r.get("appd_caption_m2") not in ("", None):
             cap = float(r["appd_caption_m2"])
             af, ac = float(r["wall_face_area_m2"]), float(r["centreline_area_m2"])
-            okf, okc = cmp.within(af, cap, cmp.CAPTION_PCT, AB_M2), cmp.within(ac, cap, cmp.CAPTION_PCT, AB_M2)
+            okf, okc = cmp.within(af, cap, cmp.CAPTION_PCT, cmp.AB_M2), cmp.within(ac, cap, cmp.CAPTION_PCT, cmp.AB_M2)
             appd_rows.append({"storey": key, "room_id": rid, "room_tag": r["room_tag"], "appd_annotation_index": r["appd_annotation_index"], "appd_caption_m2": cap,
                               "a_wall_face_m2": af, "a_centreline_m2": ac, "error_face_pct": round(100.0 * (af - cap) / cap, 2),
                               "error_centreline_pct": round(100.0 * (ac - cap) / cap, 2), "face_within_2pct_or_0.3m2": "yes" if okf else "no",
