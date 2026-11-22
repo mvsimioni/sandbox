@@ -19,6 +19,13 @@ output directory:
 * ``slide_info.json``: slide size and per-slide counts;
 * ``sidecar_manifest.json``: source hash, files written, counts and checks.
 
+Coordinate frames.  Every shape record carries ``emu`` (the box exactly as
+stored on the shape: slide space for top-level shapes, the parent group's
+child space inside a group, named by ``emu_frame``), ``emu_slide`` and ``pt``
+(the same box in slide space after every enclosing group's scale, offset,
+rotation and flip have been applied; ``pt`` is EMU / 12700), ``rotation``
+(the shape's own value) and ``rotation_slide`` (composed with the groups).
+
 The run is idempotent: when the manifest in the output directory records the
 same source SHA-256 and module version and every listed file exists, nothing
 is rewritten unless ``--force`` is given.  The source file is only read.
@@ -36,6 +43,7 @@ import os
 import posixpath
 import re
 import sys
+import math
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,7 +75,7 @@ except ModuleNotFoundError:  # run as a plain script from inside src/
     from state import Progress  # type: ignore[no-redef]
 
 MODULE_NAME = "sidecar_pptx"
-MODULE_VERSION = "1.0.0"
+MODULE_VERSION = "1.1.0"
 EMU_PER_PT: float = 12700.0
 LEGACY_POS_PER_PT: float = 8.0
 """PowerPoint writes legacy comment positions in eighths of a point."""
@@ -87,7 +95,15 @@ _LEGACY_COMMENT_RE = re.compile(r"^ppt/comments/comment\d*\.xml$", re.IGNORECASE
 _SLIDE_PART_RE = re.compile(r"^ppt/slides/slide(\d+)\.xml$", re.IGNORECASE)
 _SLIDE_RELS_RE = re.compile(r"^ppt/slides/_rels/slide(\d+)\.xml\.rels$", re.IGNORECASE)
 _MEDIA_RE = re.compile(r"^ppt/media/[^/]+$", re.IGNORECASE)
-_IMAGE_EXTS = frozenset({"png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "emf", "wmf", "svg", "webp"})
+_IMAGE_EXTS = frozenset({"png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "emf", "wmf", "svg", "webp", "wdp", "ico"})
+_CONTENT_TYPE_EXT: Dict[str, str] = {
+    "image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/gif": "gif", "image/bmp": "bmp",
+    "image/tiff": "tiff", "image/x-emf": "emf", "image/emf": "emf", "image/x-wmf": "wmf", "image/wmf": "wmf",
+    "image/svg+xml": "svg", "image/webp": "webp", "image/vnd.ms-photo": "wdp", "image/x-icon": "ico",
+}
+"""Extension per OPC content type of an image part (the package metadata, not a Pillow probe)."""
+ParseErrors = List[Dict[str, str]]
+"""Where package parts that failed to parse are recorded: ``{"part", "error"}`` rows."""
 _NUMERIC_RE = re.compile(r"(?<![A-Za-z0-9_])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|(?<![A-Za-z0-9_])[-+]?\.\d+")
 
 
@@ -126,14 +142,31 @@ def _localname(element: Any) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
-def _parse_xml(data: bytes) -> Optional[Any]:
-    """Parse XML bytes with lxml, returning ``None`` when malformed."""
+def _parse_xml(data: bytes, part: str = "", errors: Optional[ParseErrors] = None) -> Optional[Any]:
+    """Parse XML bytes with lxml; ``None`` when malformed, recording the failure in ``errors`` when given.
+
+    Nothing downstream may treat a part that failed to parse as empty without
+    leaving a trace, so callers that read package parts pass their error list.
+    """
     from lxml import etree
 
     try:
         return etree.fromstring(data)
-    except etree.XMLSyntaxError:
+    except (etree.XMLSyntaxError, ValueError) as exc:
+        if errors is not None:
+            errors.append({"part": part, "error": str(exc)[:200]})
         return None
+
+
+def _read_part_xml(archive: zipfile.ZipFile, part: str, errors: Optional[ParseErrors] = None) -> Optional[Any]:
+    """Read and parse one package part; missing or unreadable parts are recorded in ``errors``."""
+    try:
+        data = archive.read(part)
+    except (KeyError, zipfile.BadZipFile, OSError) as exc:
+        if errors is not None:
+            errors.append({"part": part, "error": f"cannot read part: {exc}"[:200]})
+        return None
+    return _parse_xml(data, part, errors)
 
 
 def _resolve_part(base_dir: str, target: str) -> str:
@@ -144,11 +177,12 @@ def _resolve_part(base_dir: str, target: str) -> str:
     return posixpath.normpath(posixpath.join(base_dir, target))
 
 
-def _rels_targets(archive: zipfile.ZipFile, rels_name: str, base_dir: str) -> List[Tuple[str, str, str]]:
+def _rels_targets(archive: zipfile.ZipFile, rels_name: str, base_dir: str,
+                  errors: Optional[ParseErrors] = None) -> List[Tuple[str, str, str]]:
     """``(rId, type, resolved target)`` for every relationship in ``rels_name`` (empty when missing)."""
     if rels_name not in archive.namelist():
         return []
-    root = _parse_xml(archive.read(rels_name))
+    root = _read_part_xml(archive, rels_name, errors)
     if root is None:
         return []
     out: List[Tuple[str, str, str]] = []

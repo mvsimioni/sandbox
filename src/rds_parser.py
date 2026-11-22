@@ -62,9 +62,9 @@ ANNOT_COLUMNS = ["rel_path", "dept_no", "page", "room_code", "annot_type", "bbox
 SUMMARY_COLUMNS = [
     "rel_path", "dept_no", "status", "room_count", "room_code", "room_name", "department", "area_m2",
     "occupancy", "occupancy_staff", "occupancy_patients", "occupancy_visitors", "hours", "temperature",
-    "humidity", "pressure", "ach", "acmv_notes", "equipment_count", "services_item_count", "revision", "date",
+    "humidity", "pressure", "ach", "acmv_notes", "equipment_count", "services_item_count", "revision", "date", "date_annotation",
     "print_date", "layout_id", "layout_pages", "fields_found", "fields_expected", "coverage_pct",
-    "unmatched_labels", "missing_labels", "annotation_count", "pages", "note",
+    "unmatched_labels", "missing_labels", "qty_summary_check", "annotation_count", "pages", "note",
 ]
 
 
@@ -1222,6 +1222,41 @@ def _count_rows(room: Room, table: str, placeholders: Sequence[str]) -> int:
     return n
 
 
+_QTY_TABLES = ("engineering_services", "it", "security_systems", "medical_equipment", "standard_component_groups", "ffe_items")
+
+
+def quantity_check(room: Room) -> Tuple[int, int]:
+    """Cross-check of the table parse: ``(codes that reconcile, codes in the quantity summary)``.
+
+    The "Quantity Summary - Engineering Services in Room" page must equal the quantities of
+    the same code summed over every component table of the sheet; a dropped row, a wrong
+    column or a mis-split pane shows up as a mismatch.
+    """
+    def table_rows(table: str) -> Dict[str, Dict[str, str]]:
+        rows: Dict[str, Dict[str, str]] = defaultdict(dict)
+        for f in room.fields:
+            if f.section == table and f.row:
+                rows[f.row][f.key.split(".", 1)[1]] = f.value
+        return rows
+
+    def qty(text: str) -> int:
+        digits = re.sub(r"\D", "", text or "")
+        return int(digits) if digits else 0
+
+    listed: Dict[str, int] = defaultdict(int)
+    for table in _QTY_TABLES:
+        for cells in table_rows(table).values():
+            code = cells.get("code", "").strip()
+            if code:
+                listed[code] += qty(cells.get("qty", ""))
+    summary: Dict[str, int] = defaultdict(int)
+    for cells in table_rows("quantity_summary").values():
+        code = cells.get("code", "").strip()
+        if code:
+            summary[code] += qty(cells.get("total_room_qty", ""))
+    return sum(1 for code, n in summary.items() if listed.get(code) == n), len(summary)
+
+
 _OCC = {
     "staff": re.compile(r"(\d+)\s*(?:x\s*)?staff|staff\s*[:=]?\s*(\d+)", re.IGNORECASE),
     "patients": re.compile(r"(\d+)\s*(?:x\s*)?patients?|patients?\s*[:=]?\s*(\d+)", re.IGNORECASE),
@@ -1262,6 +1297,8 @@ def room_summary(room: Room, layouts: Dict[str, Any], manifest_dept: str = "") -
         "unmatched_labels": "; ".join(sorted({u.label for u in room.unmatched if u.kind in ("unmatched_label", "unknown_page") and u.label})),
         "missing_labels": "; ".join(sorted({u.label for u in room.unmatched if u.kind in ("missing_label", "unparsed_table") and u.label})),
     }
+    good, listed = quantity_check(room)
+    out["qty_summary_check"] = "%d/%d" % (good, listed)
     for who, pat in _OCC.items():
         m = pat.search(occ or "")
         out["occupancy_" + who] = (m.group(1) or m.group(2)) if m else ""
@@ -1340,11 +1377,14 @@ def run(manifest: Path | str, depts: Optional[Sequence[str]] = None, layouts_pat
                                "bbox": fmt_bbox(an["rect"]), "content": an["content"], "overlaps_field": an["overlaps_field"], "author": an["author"], "subject": an.get("subject", ""), "created": an.get("created", "")})
         dept_name = row.get("dept_name", "")
         per_room = [room_summary(r, layouts, dept_name) for r in fr.rooms]
+        for rs, room in zip(per_room, fr.rooms):
+            # a reviewer's typed correction over the printed issue date is kept apart from the printed value
+            rs["date_annotation"] = " | ".join(a["content"] for a in fr.annotations if a["page"] in room.pages and a["overlaps_field"] == "issue_date" and a["content"])
         for i, rs in enumerate(per_room, 1):
             room_rows.append({"room_index": i, "rel_path": rel, "dept_no": dept, "layout_id": "DRF1", "annotation_count": sum(1 for a in fr.annotations if a["room_code"] == rs["room_code"]), **{k: v for k, v in rs.items()}})
         agg: Dict[str, Any] = {}
         for col in ("room_code", "room_name", "department", "area_m2", "occupancy", "occupancy_staff", "occupancy_patients", "occupancy_visitors",
-                    "hours", "temperature", "humidity", "pressure", "ach", "acmv_notes", "revision", "date", "print_date"):
+                    "hours", "temperature", "humidity", "pressure", "ach", "acmv_notes", "revision", "date", "date_annotation", "print_date"):
             vals = [rs[col] for rs in per_room]
             agg[col] = vals[0] if len(set(vals)) == 1 else " | ".join(vals)
         total_expected = sum(r.expected for r in fr.rooms)
@@ -1357,6 +1397,7 @@ def run(manifest: Path | str, depts: Optional[Sequence[str]] = None, layouts_pat
             "coverage_pct": ("%.1f" % (100.0 * total_found / total_expected)) if total_expected else "",
             "unmatched_labels": "; ".join(sorted({u.label for r in fr.rooms for u in r.unmatched if u.kind in ("unmatched_label", "unknown_page") and u.label})),
             "missing_labels": "; ".join(sorted({u.label for r in fr.rooms for u in r.unmatched if u.kind in ("missing_label", "unparsed_table") and u.label})),
+            "qty_summary_check": "%d/%d" % (sum(int(rs["qty_summary_check"].split("/")[0]) for rs in per_room), sum(int(rs["qty_summary_check"].split("/")[1]) for rs in per_room)),
             "annotation_count": len(fr.annotations), "pages": fr.page_count,
             "note": "" if len(fr.rooms) == 1 else "%d rooms in one PDF; per-room values joined with ' | ' in room order (see rds_rooms.csv)" % len(fr.rooms),
         })
@@ -1382,8 +1423,8 @@ def run(manifest: Path | str, depts: Optional[Sequence[str]] = None, layouts_pat
 def _room_cols() -> List[str]:
     cols = ["room_index", "rel_path", "dept_no", "layout_id", "room_code", "room_name", "department", "area_m2", "occupancy", "occupancy_staff",
             "occupancy_patients", "occupancy_visitors", "hours", "temperature", "humidity", "pressure", "ach", "acmv_notes", "equipment_count",
-            "services_item_count", "revision", "date", "print_date", "fields_found", "fields_expected", "coverage_pct", "unmatched_labels",
-            "missing_labels", "annotation_count"]
+            "services_item_count", "revision", "date", "date_annotation", "print_date", "fields_found", "fields_expected", "coverage_pct", "unmatched_labels",
+            "missing_labels", "qty_summary_check", "annotation_count"]
     return cols
 
 

@@ -433,3 +433,19 @@ def test_shipped_templates_are_consistent() -> None:
         for tbl in lay.get("tables", []):
             assert tbl.get("columns") or tbl.get("columns_ref") in data["column_sets"]
     assert rp.snake("Auto / Manual") == "auto_manual"
+
+
+def test_quantity_summary_cross_check() -> None:
+    """The summary page must equal the per-code quantities summed over the component tables."""
+    def cell(section: str, row: str, col: str, value: str) -> rp.FieldRec:
+        return rp.FieldRec(1, "X", col, "%s.%s" % (section, col), value, None, None, 1.0, "t", section=section, row=row)
+
+    room = rp.Room(index=1)
+    room.fields = [
+        cell("engineering_services", "1", "code", "ELBO-020"), cell("engineering_services", "1", "qty", "2"),
+        cell("medical_equipment", "1", "code", "ELBO-020"), cell("medical_equipment", "1", "qty", "1"),   # sub item counts too
+        cell("engineering_services", "2", "code", "LIFX-029"), cell("engineering_services", "2", "qty", "2"),
+        cell("quantity_summary", "1", "code", "ELBO-020"), cell("quantity_summary", "1", "total_room_qty", "3"),
+        cell("quantity_summary", "2", "code", "LIFX-029"), cell("quantity_summary", "2", "total_room_qty", "5"),   # wrong on purpose
+    ]
+    assert rp.quantity_check(room) == (1, 2)
