@@ -1,0 +1,1 @@
+AIGH pipeline synthetic fixture: the quick brown fox jumps over the lazy dog.

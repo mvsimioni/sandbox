@@ -1,0 +1,109 @@
+# AIGH IP ACMV pipeline: project configuration (reconstructed from the brief, Rev D, 22 Nov 2026).
+# Values marked CONFIRM are defaults from Section 11 of the brief, pending Marcus's approval at Gate 0.
+project:
+  name: AIGH redevelopment, Contract 2, Inpatient (IP) building, ACMV
+  brief: AIGH_IP_ACMV_Claude_Code_Prompt.md (Rev D)   # appendices A-E not received; see out/qa/decisions_needed.md
+  language: en-GB
+  units: {airflow: L/s, pressure: Pa, power: kW, density: W/m2, area: m2, temperature: degC}
+
+drive:
+  parent_folder: AH IP Documents
+  folders:
+    dd_signoff: {id: 18NCSJUCe_M5RZBgFxtPUi2MwWnSaSlaR, role: source, access: read-only}
+    template:   {id: 12CQxjaEmdhiJRcZfTT9PWTChwkF_6bJw, role: samples, access: read-only}
+    basis:      {id: 16MjqlMneq1h6Zu4IaZ5cRA-HL0H79-zK, role: basis, access: read-only}
+    markdown:   {id: 1LM7Days62cbiHH81n31WOPq9AwKKuHK9, role: upload-target, access: write (copy only)}
+  rclone_remotes:
+    source: {name: aigh_src, scope: drive.readonly}
+    markdown: {name: aigh_md, scope: drive, root_folder_id: 1LM7Days62cbiHH81n31WOPq9AwKKuHK9}
+  transport: connector      # connector | rclone. rclone needs a credential path Marcus has not yet chosen (decisions_needed D-001)
+  exclude: ["*.zip"]
+  listing_interval_minutes: 15   # two listings; a changed department is "unstable"
+
+paths:
+  source: data/source
+  markdown: out/markdown
+  sidecar: out/sidecar
+  registers: out/registers
+  zoning: out/zoning
+  loads: out/loads
+  schematics: out/schematics
+  qa: out/qa
+  state: state
+  logs: logs
+
+pilot:
+  departments: ["30 - Pharmacy", "26 - Diagnostic Imaging", "42 - Data Centre"]   # change if the inventory shows better matches
+  schematic_sheet: IP-BH-05010
+  gold_set_size: 60
+  bluebeam_rooms: 10
+
+precedence:   # Section 11 item 2, CONFIRM
+  stages: [DD Closure, AH sign off with comments, Submitted]
+  within_stage: latest dated revision
+  rfi_overrides_booklet: true
+  zoning_source: later dated document governs; every difference listed
+  mot_nsc: latest corrigendum governs
+  stray_folders: {governs: "29 - Lab", compare_by_hash: ["__29 - Lab", "__29 - Lab"]}
+
+tolerances:
+  area_vs_soa: {agree_pct: 3, agree_m2: 0.5, minor_pct: 10}
+  method_a_vs_b: {pct: 2, m2: 0.3, min_share: 0.95}
+  gold_bluebeam: {pct: 1, m2: 0.2}
+  calibration: {residual_mm: 50, scale_pct: 0.5, north_deg: 2}
+  opening_vs_plan_mm: 100
+  vision_glazing_both_share: 0.95
+  numeric_recall: 0.995
+  zoning_confidence: {min: 0.9, area_share: 0.98, majority_share: 0.80}
+  recompute_pct: 0.5
+  balance: {pct: 1, lps: 10}
+  known_answer_m3h: 0.2
+
+defaults_to_confirm:   # Section 11, every value CONFIRM
+  duct_leakage_pct: 10
+  outdoor_air_rule: {max_share_of_ahu_supply_pct: 5, min_fraction_drop_pp: 5}
+  schematic_update_rule: {increase_pct: 5, increase_lps: 10, reduce_without_approval: false}
+  area_used: measured_when_outside_tolerance   # alternative: larger_of_two
+  occupancy_fallback_table: "SS 553:2016 Table 2 (as the Rev A example used)"
+  second_measurement_method: SAM   # fallback: region_growing (SAM weight hosts are blocked here, D-004)
+  zoning_granularity: one merged zone per AHU per storey; duty/standby pair is one zone
+
+pressure_method:   # Section 8.3, Marcus's method
+  airtightness_m3h_per_m2_at_50pa: 2.5
+  tighter_room_m3h_per_m2_at_50pa: 1.0
+  flow_exponent: {n: 0.65, range: [0.50, 0.75]}
+  discharge_coefficient: 0.6
+  air_density_kg_m3: 1.2
+  reference_space_pa: 0
+  applies_at_or_beyond_pa: 5
+  door_gap_cm2: {hinged_sealed: 15, sliding_sealed: 10, bed_width_sealed: 20, shaft_access_sealed: 10}
+  unsealed_gap_mm: {sides_top: 3, bottom: 10}
+  ratio: {fail_below: 1.0, verify_below: 1.2}
+
+workbook:
+  fonts: {body: Arial, mono: Consolas}
+  sizes: {title: 18, section: 12, header: 10, body: 10, note: 8}
+  file_name: "AIGH_C2_D{nn}_{Department}_Thermal_Load_Calc_RevA.xlsx"
+  common_areas_file: AIGH_C2_D00_Common_Areas_Thermal_Load_Calc_RevA.xlsx
+  master_summary: AHU_master_summary.xlsx
+  print: {paper: A3, orientation: landscape}
+  banned_functions: [XLOOKUP, FILTER, UNIQUE, SORT, SEQUENCE]
+
+zoning:
+  output: out/zoning/AIGH_IP_AHU_Zoning_Consolidated.pdf
+  fill_opacity: 0.35
+  reserved_colour: pure red (review mark-ups only)
+  rooms_layer: "Rooms (measured)"
+
+models:   # baseline tiers, Section 4.2; the allocation specialist confirms from measurements
+  scripts: no model
+  tile_reader: {model: haiku, effort: low}
+  pipeline_code: {model: sonnet, effort: high}
+  dept_extractor: {model: sonnet, effort: medium}
+  workbook_builder: {model: sonnet, effort: medium}
+  acmv_engineer: {model: opus, effort: high}
+  envelope_analyst: {model: opus, effort: xhigh}
+  schematic_engineer: {model: opus, effort: high}
+  verifier: {model: opus, effort: high}
+  council: {model: opus, effort: xhigh}
+  chair: {model: fable, effort: high}

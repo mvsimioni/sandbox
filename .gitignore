@@ -1,0 +1,13 @@
+data/
+out/markdown/
+out/sidecar/
+out/zoning/*.pdf
+out/loads/*.xlsx
+logs/
+__pycache__/
+*.pyc
+.venv/
+*.zip
+state/drive_listing/
+state/listings/
+state/*.jsonl
