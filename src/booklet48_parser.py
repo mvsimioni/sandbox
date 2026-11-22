@@ -770,8 +770,34 @@ def vision_page_rows(entry: Dict[str, Any], box: Tuple[float, float, float, floa
     """Rows of ``parse_criteria_page`` shape from a ``vision_rows`` entry; ``box`` is the page image."""
     cols = entry["cols"]
     return [{"cells": dict(zip(cols, cells)), "box": box, "marks": [], "note_refs": [], "mode": "",
-             "mode_from_caption": False, "no_pressure": False, "blank_row": False, "pressure_words": [], "vision": True}
+             "mode_from_caption": False, "no_pressure": False, "blank_row": False, "pressure_words": [], "vision": True,
+             "zone": entry.get("department_column", "")}
             for cells in entry["rows"]]
+
+
+def department_cells(dept_words: Sequence[Word], rects: Sequence[Tuple[float, float, float, float]],
+                     edge: float, room_x0: float) -> List[Tuple[float, float, str]]:
+    """Merged DEPARTMENT cells of a table (Pharmacy p4: ``LEVEL B2 - PHARM`` over nine rows, ``B 1`` over the last one).
+
+    The text is rotated (reads bottom to top, wrapped lines run left to right).  Each filled rectangle left of the room
+    column that holds such words is one cell; ``(y0, y1, text)`` is its extent and its text as printed (a wrap of one
+    or two characters per line is closed up: ``B`` / ``1`` reads ``B1``).  No rectangle, no zone."""
+    out: List[Tuple[float, float, str]] = []
+    cells = [r for r in rects if r[2] <= room_x0 + 1.0 and r[0] < edge and r[3] - r[1] > 20.0]
+    for r in sorted(cells, key=lambda r: r[1]):
+        ws = [w for w in dept_words if r[0] <= w.cx <= r[2] and r[1] <= w.cy <= r[3]]
+        if not ws:
+            continue
+        lines: List[List[Word]] = []
+        for w in sorted(ws, key=lambda w: w.x0):
+            if lines and abs(w.cx - lines[-1][0].cx) <= 0.5 * max(w.x1 - w.x0, 1.0):
+                lines[-1].append(w)
+            else:
+                lines.append([w])
+        texts = [" ".join(w.text for w in sorted(ln, key=lambda w: -w.y1)) for ln in lines]
+        sep = "" if all(len(t) <= 2 for t in texts) else " "
+        out.append((r[1], r[3], clean(sep.join(texts))))
+    return out
 
 
 def parse_criteria_page(words: List[Word], page_h: float, page_w: float,
@@ -848,12 +874,15 @@ def parse_criteria_page(words: List[Word], page_h: float, page_w: float,
             return [], [], table_part, failures
 
     room_x0 = cols.clusters.get("room", (0.0, 0.0))[0]
+    dept_zones: List[Tuple[float, float, str]] = []
     dept_hdr = [w for w in words if w.text.upper() == "DEPARTMENT" and w.y1 <= cols.header_bottom + 1.0
                 and w.x0 < 650 and w.cx < room_x0]
     if dept_hdr:     # a DEPARTMENT column of vertical merged text ('LEVEL B2 - PHARM') left of the room column is not row text
         edge = (dept_hdr[0].cx + room_x0) / 2.0
         note_y = find_notes_top(words, cols.header_bottom, page_h)         # the note under the table is not department text
-        words = [w for w in words if not (w.cx < edge and cols.header_bottom - 0.5 <= w.y0 < note_y - 0.5)]
+        dept_words = [w for w in words if w.cx < edge and cols.header_bottom - 0.5 <= w.y0 < note_y - 0.5]
+        dept_zones = department_cells(dept_words, rects or [], edge, room_x0)
+        words = [w for w in words if w not in dept_words]
     notes_top = find_notes_top(words, cols.header_bottom, page_h)
     footer_top = page_h       # the footer stamp and page number are already out of ``words`` (see footer_furniture)
     body = [w for w in words if w.y0 >= cols.header_bottom - 0.5 and w.y0 < min(notes_top, footer_top) - 0.5
@@ -1003,6 +1032,7 @@ def parse_criteria_page(words: List[Word], page_h: float, page_w: float,
             "no_pressure": bool(anchor.get("no_pressure")),
             "blank_row": bool(anchor.get("blank_row")),
             "pressure_words": [w for w in anchor["by_col"].get("pressure", [])],
+            "zone": next((z for y0, y1, z in dept_zones if y0 - 1.0 <= anchor["cy"] <= y1 + 1.0), ""),
         })
     notes = foot_notes + (parse_block_note(words, notes_top, footer_top) if notes_top < footer_top else [])
     if zoned is not None:
@@ -1114,7 +1144,7 @@ def build_criteria_rows(rows: List[Dict[str, Any]], meta: Dict[str, Any], table_
             sp = ah = sb = ""
         if not room:
             failed.append("room")
-        zone, zone_prefix = zone_of(room) if zoned else ("", "")
+        zone, zone_prefix = zone_of(room) if zoned else (row.get("zone", ""), "")      # Pharmacy p4 / MDU: the DEPARTMENT cell
         if zoned and room and not zone:
             failed.append("zone")
         if row.get("no_pressure"):
@@ -1128,6 +1158,13 @@ def build_criteria_rows(rows: List[Dict[str, Any]], meta: Dict[str, Any], table_
             confidence = min(confidence, 0.50)
         if row.get("vision"):                 # keyed in from the page image, not read from a text layer
             confidence = min(confidence, 0.80)
+        flag = ""
+        if "single_pass" in failed and re.fullmatch(r"\d+(?:\.\d+)?", clean(c.get("single_pass", ""))):
+            # a number under Single Pass: the cells of the row to the right of Min. Total ACH look shifted one column in the
+            # source (DI p13 Toilet: Single Pass '20', Air Class 'NR', Filter '3').  Read as printed; the flag says so.
+            flag = ("values look shifted one column in the source: Single Pass %r, Air Class %r, Filter %r are printed "
+                    "under the wrong headings; the register keeps them as printed"
+                    % (c.get("single_pass", ""), c.get("air_class", ""), c.get("filter", "")))
         for field in failed:
             failures.append({"file": meta["source_file"], "pdf_page": meta["pdf_page"],
                              "booklet_page": meta["booklet_page"], "row": room or "(no room text)",
@@ -1152,6 +1189,7 @@ def build_criteria_rows(rows: List[Dict[str, Any]], meta: Dict[str, Any], table_
             "raw_cells": json.dumps({**{k: c.get(k, "") for k in
                                         ("min_oa", "min_total", "single_pass", "afterhours", "setback")},
                                      **({"zone_prefix": zone_prefix} if zoned else {}),
+                                     **({"source_flag": flag} if flag else {}),
                                      **({"read_by": "vision: page is an image, cells keyed in from the render"}
                                         if row.get("vision") else {})},
                                     ensure_ascii=False),
