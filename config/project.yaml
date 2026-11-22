@@ -44,7 +44,18 @@ precedence:   # Section 11 item 2, CONFIRM
   rfi_overrides_booklet: true
   zoning_source: later dated document governs; every difference listed
   mot_nsc: latest corrigendum governs
+  rfi_overrides:   # later RFI responses override for the area they cover (Section 11 item 2)
+    - rfi: RFI-ME-0233 (Beca memo V1, 5 Nov 2026)
+      scope: 16 DI units of memo Table 1 (L4 Diagnostic Imaging)
+      rule: air-side schematics (Corr 5) and the RFI-ME-0233 zoning govern tags, zoning, airflows and AHU levels over SCH005
+      crossref: out/registers/tag_crossref_rfi_me_0233.csv
+      extend_to_all_departments: pending   # decision D-006
   stray_folders: {governs: "29 - Lab", compare_by_hash: ["__29 - Lab", "__29 - Lab"]}
+
+chilled_water:   # RFI-ME-0233 memo s1, s4; PS ACMV Corr 7 PS/10 (cited by the memo)
+  normal: {supply_c: 8.0, return_c: 16.0, applies_to: all PAHUs, AHUs and FCUs}
+  low_temperature: {supply_c: 5.0, return_c: 13.0, applies_to: "AHU-B-B1-B2PHAB-01A/B, -02A/B, -03A/B, -04 (Basement 2 Compounding Pharmacy) only"}
+  duty_standby_configuration_b: 2N (PS Appendix F p.222)
 
 tolerances:
   area_vs_soa: {agree_pct: 3, agree_m2: 0.5, minor_pct: 10}
