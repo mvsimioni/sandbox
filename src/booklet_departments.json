@@ -206,6 +206,48 @@
       "dept_no": "41",
       "dept_title": "41 - CSSD",
       "department_label": "CSSD"
+    },
+    "IGH_DD Booklet_AW_R2_30 June 2025 _AH 20250707.pdf": {
+      "booklet": true,
+      "dept_no": "47",
+      "dept_title": "47 - Admin Workspace",
+      "department_label": "Admin Workspace"
+    },
+    "20251125_IGH_DD Booklet_Food Services_AH-1.pdf": {
+      "booklet": true,
+      "dept_no": "45",
+      "dept_title": "45 - Food Services",
+      "department_label": "Food Services"
+    },
+    "20250707_IGH_DD Booklet_MMD_AH.pdf": {
+      "booklet": true,
+      "dept_no": "40",
+      "dept_title": "40 - MMD & Pharmacy Store",
+      "department_label": "MMD and Pharmacy Store"
+    },
+    "20250714_IGH_DD Booklet_General Services_AH.pdf": {
+      "booklet": true,
+      "dept_no": "39",
+      "dept_title": "39 - General Services",
+      "department_label": "General Services"
+    },
+    "20250321_IGH_DD Booklet_BME_AH Comments.pdf": {
+      "booklet": true,
+      "dept_no": "37",
+      "dept_title": "37 - BME",
+      "department_label": "BME"
+    },
+    "20250314_IGH_DD Booklet_FM(AH Commented 2025_0327)_dpa.pdf": {
+      "booklet": true,
+      "dept_no": "35",
+      "dept_title": "35 - FM",
+      "department_label": "FM"
+    },
+    "20250325_IGH_DD Booklet_MRO_AH Comments.pdf": {
+      "booklet": true,
+      "dept_no": "34",
+      "dept_title": "34 - MRO",
+      "department_label": "MRO"
     }
   }
 }
