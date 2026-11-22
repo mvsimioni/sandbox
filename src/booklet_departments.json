@@ -200,6 +200,12 @@
       "dept_no": null,
       "dept_title": null,
       "department_label": "ETTV report (envelope)"
+    },
+    "20251212_IGH_DD_Booklet_CSSD_R1_DPA_AH.pdf": {
+      "booklet": true,
+      "dept_no": "41",
+      "dept_title": "41 - CSSD",
+      "department_label": "CSSD"
     }
   }
 }
