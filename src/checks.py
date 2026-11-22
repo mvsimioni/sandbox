@@ -41,7 +41,7 @@ CheckFunc = Callable[["Context"], CheckOutcome]
 BOOTSTRAP_FILES: Tuple[str, ...] = (
     "README.md", "config/project.yaml", "requirements.lock",
     "src/common.py", "src/state.py", "src/drive_io.py", "src/manifest.py", "src/census.py",
-    "src/checks.py", "src/pressure.py",
+    "src/checks.py", "src/pressure.py", "src/blocked_inputs.py",
     "out/qa/decisions_needed.md", "state/progress.json",
 )
 DRIVE_FOLDER_KEYS: Tuple[str, ...] = ("dd_signoff", "template", "basis", "markdown")
