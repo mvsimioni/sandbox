@@ -164,3 +164,11 @@ airflow_comparison:
   # D-013: every equipment row carries Tender airflow (original, with source), Calculated, Reduction L/s, Reduction %, Remarks.
   equipment_columns: [tender_airflow_L_s, tender_source, calculated_airflow_L_s, reduction_L_s, reduction_pct, remarks]
   tender_source_order: [equipment_schedule_corr5, tender_airside_schematic]
+
+# D-015 (Marcus, 22 Nov 2026): deliverable language.
+deliverable_language:
+  standard: ASD-STE100
+  spelling: British
+  forbidden_terms: [Claude, Anthropic, AI, model, agent, subagent, workflow, council, gate, pipeline, "method A", "method B", register, LLM, Fable, Opus, Sonnet, Haiku, prompt, script, MarkItDown]
+  text_gates: [ste-lint-gate, humanizer, remove-ai-marks]
+  cite_sources_as: "document, issue, sheet/page"
