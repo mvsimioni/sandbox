@@ -137,6 +137,7 @@ FURNITURE_LINE_RE = re.compile(
 PAIR_TAG_RE = re.compile(r"^[A-Z]{2,6}(?:-[A-Z0-9]+){2,}(?:/[A-Z0-9]+)?$")
 # a tag that serves two units is printed 'AHU-B-07-04ICU-01/02C' (ICU HDU): the standby reader takes the '/' suffix as part of it
 STANDBY_TAG_RE = re.compile(r"^[A-Z]{2,6}(?:-[A-Z0-9]+){2,}(?:/[A-Z0-9]+)*$")
+SLIGHT_RE = re.compile(r"^SLIGHT(?:LY)?$", re.I)
 PRESSURE_VALUE_RE = re.compile(r"^[+\-−–]?\s*\d+(?:\.\d+)?\s*(?:Pa)?$", re.I)
 
 
@@ -653,7 +654,10 @@ class TableColumns:
         if left_key and left_key in self.clusters and len(self.order) > 1:
             second = self.order[1]
             if word.x0 < self.clusters[second][0] - 4.0:
-                return left_key
+                # Pharmacy p4: the pressure cell 'SLIGHTLY +VE' is centred under its heading, so its first word starts
+                # left of the heading's text and is not part of the room name; the word goes by its centre
+                if not (SLIGHT_RE.match(word.text) and second == "pressure" and self.bounds[second][0] <= word.cx):
+                    return left_key
         for key in self.order:
             lo, hi = self.bounds[key]
             if lo <= word.cx < hi:
@@ -816,7 +820,18 @@ def parse_criteria_page(words: List[Word], page_h: float, page_w: float,
                  and w.size >= 18.0 and w.size < 30.0]
         title_lines = cluster_lines(above)
         if title_lines:
-            table_part = clean(re.sub(r"^[•\u2022\s]+", "", join_words(title_lines[-1])))
+            last = title_lines[-1]
+            # a long title runs on past x = 650 on a line below the section strip ('... Compounding Lab - Setback Mode 1',
+            # Pharmacy p7-p10): the words are the same line's, so the mode and its number are not cut off
+            tail = sorted((w for w in words if w.x0 >= 650 and w.y1 <= cols.header_bottom and w.y0 >= 78.0
+                           and 18.0 <= w.size < 30.0 and not is_gutter(w)
+                           and abs(w.cy - sum(x.cy for x in last) / len(last)) <= 4.0), key=lambda w: w.x0)
+            prev = last[-1]
+            for w in tail:
+                if w.x0 - prev.x1 <= 20.0:
+                    last = last + [w]
+                    prev = w
+            table_part = clean(re.sub(r"^[•\u2022\s]+", "", join_words(last)))
         if re.fullmatch(r"ACMV", table_part, re.I):
             table_part = ""
         if not table_part and fallback_header:
