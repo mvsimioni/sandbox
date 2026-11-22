@@ -326,7 +326,9 @@ def render(selection: Sequence[Tuple[Line, Sequence[Glyph]]]) -> Tuple[str, Opti
     for txt in row_texts:
         if not txt:
             continue
-        if out and not out.endswith("-"):
+        # a trailing hyphen glued to a word is a wrap break ("SCG-" + "DPAID-583");
+        # a hyphen after a space is a printed dash separator and keeps its space
+        if out and not (out.endswith("-") and len(out) > 1 and not out[-2].isspace()):
             out += " "
         out += txt
     return out.strip(), union_bbox(boxes)
@@ -1399,7 +1401,7 @@ def run(manifest: Path | str, depts: Optional[Sequence[str]] = None, layouts_pat
             "missing_labels": "; ".join(sorted({u.label for r in fr.rooms for u in r.unmatched if u.kind in ("missing_label", "unparsed_table") and u.label})),
             "qty_summary_check": "%d/%d" % (sum(int(rs["qty_summary_check"].split("/")[0]) for rs in per_room), sum(int(rs["qty_summary_check"].split("/")[1]) for rs in per_room)),
             "annotation_count": len(fr.annotations), "pages": fr.page_count,
-            "note": "" if len(fr.rooms) == 1 else "%d rooms in one PDF; per-room values joined with ' | ' in room order (see rds_rooms.csv)" % len(fr.rooms),
+            "note": "" if len(fr.rooms) == 1 else "%d rooms in one PDF; per-room values joined with ' | ' in room order where they differ, collapsed to one value where all rooms are identical (see rds_rooms.csv)" % len(fr.rooms),
         })
     layout_rows = []
     label_lists = {lay["id"]: lay for lay in layouts["layouts"]}

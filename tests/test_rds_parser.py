@@ -12,7 +12,7 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import pymupdf
 import pytest
@@ -103,13 +103,14 @@ def _label(page: pymupdf.Page, text: str, baseline_y: float, right_x: float = 13
 
 def build_syn_a(path: Path, *, rules: bool = True, occupancy_label: str = "Occupancy", drop_occupancy: bool = False,
                 extra_label: bool = False, annot: bool = False, code: str = "TR-001", name: str = "Test Room One",
-                hours_label: str = "Hours of Opera#on") -> Path:
+                hours_label: str = "Hours of Opera#on",
+                hours_lines: Sequence[str] = ("Mon-Fri 8am-6pm", "Sat 8am-12pm")) -> Path:
     """Layout SYN-A: row bands, an inline ACMV block and a ruled equipment table."""
     doc = pymupdf.open()
     page = doc.new_page(width=PAGE_W, height=PAGE_H)
     _header(page, code, name)
     rows = [("Revision", 82, 70, 90, ["B"]), ("Issue Date", 102, 90, 110, ["JAN 2026"]),
-            ("Area", 122, 110, 130, ["12.50 m2"]), (hours_label, 142, 130, 165, ["Mon-Fri 8am-6pm", "Sat 8am-12pm"]),
+            ("Area", 122, 110, 130, ["12.50 m2"]), (hours_label, 142, 130, 165, list(hours_lines)),
             (occupancy_label, 177, 165, 185, ["3"])]
     for label, base, top, bottom, values in rows:
         if drop_occupancy and label == occupancy_label:
@@ -205,6 +206,14 @@ def test_row_band_values_bboxes_and_confidence(tmp_path: Path, layouts: Dict[str
     # the value bbox lies inside its row band (rule to rule) and next to the label
     assert 70 <= got["revision"].value_bbox[1] and got["revision"].value_bbox[3] <= 90
     assert 130 <= got["hours_of_operation"].value_bbox[1] and got["hours_of_operation"].value_bbox[3] <= 165
+
+
+def test_wrap_join_keeps_dash_separator_and_joins_wrapped_codes(tmp_path: Path, layouts: Dict[str, Any]) -> None:
+    """A hyphen glued to a word is a wrap break (joined); a hyphen after a space is a printed dash (space kept)."""
+    pdf = build_syn_a(tmp_path / "w1.pdf", hours_lines=("Ref SCG-", "DPAID-583"))
+    assert by_key(rp.parse_pdf(pdf, layouts).rooms[0])["hours_of_operation"].value == "Ref SCG-DPAID-583"
+    pdf = build_syn_a(tmp_path / "w2.pdf", hours_lines=("Sub item to BLAB511 08/11/24 -", "Total quantity should"))
+    assert by_key(rp.parse_pdf(pdf, layouts).rooms[0])["hours_of_operation"].value == "Sub item to BLAB511 08/11/24 - Total quantity should"
 
 
 def test_ligature_normalisation_in_labels(tmp_path: Path, layouts: Dict[str, Any]) -> None:
