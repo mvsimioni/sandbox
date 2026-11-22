@@ -23,7 +23,7 @@ from .styles import CODE_ALLOWED
 ERROR_VALUES = {"#N/A", "#NAME?", "#VALUE!", "#REF!", "#DIV/0!", "#NUM!", "#NULL!", "Err:502", "Err:504", "Err:508", "Err:511",
                 "Err:522", "Err:523"}
 ALLOWED_FUNCS = {"SUM", "SUMIFS", "SUMIF", "SUMPRODUCT", "COUNTIF", "COUNTIFS", "COUNT", "COUNTA", "IF", "AND", "OR", "MAX", "MIN", "ABS", "SIGN",
-                 "SQRT", "ROUND", "ROUNDUP", "INDEX", "MATCH", "ISNUMBER", "ISERROR", "SEARCH", "ROW", "ROWS", "COLUMN", "_XLFN.MAXIFS"}
+                 "SQRT", "ROUND", "ROUNDUP", "TEXT", "INDEX", "MATCH", "ISNUMBER", "ISERROR", "SEARCH", "ROW", "ROWS", "COLUMN", "_XLFN.MAXIFS"}
 ALLOWED_LITERALS = {"0", "1", "2"}
 TOL_PCT = 0.5
 
@@ -313,6 +313,59 @@ def pdf_proof(rc: Path, out_dir: Path) -> Dict[str, Any]:
     return dict(pdf=str(pdf), pages=pages, footer_found=footer, size=pdf.stat().st_size)
 
 
+def print_proof(xlsx: Path, pdf: Path) -> Dict[str, Any]:
+    """No column cut and legible (brief 8.5): print areas cover every visible data column; the scale of each sheet is at
+    least PRINT_MIN_SCALE; the header of the last printed column is found in the PDF text."""
+    from openpyxl.utils import column_index_from_string as ci, get_column_letter as gl
+    from .styles import A3_PRINTABLE_IN, PRINT_MIN_SCALE, _col_inches, col_dims
+    wb = openpyxl.load_workbook(xlsx)
+    try:
+        txt = subprocess.run(["pdftotext", "-layout", str(pdf), "-"], capture_output=True, text=True, timeout=120).stdout
+    except FileNotFoundError:
+        txt = ""
+    flat = re.sub(r"\s+", " ", txt)
+    problems: List[str] = []
+    sheets: Dict[str, Any] = {}
+    for ws in wb:
+        pa = ws.print_area
+        if not pa:
+            problems.append(f"{ws.title}: no print area")
+            continue
+        last_col = ci(re.sub(r"[^A-Z]", "", pa.split(":")[1].replace("$", "")))
+        cut = []
+        dims = col_dims(ws)
+        for row in ws.iter_rows():
+            for c in row:
+                if c.value is not None and c.column > last_col:
+                    dim = dims.get(c.column)
+                    if not (dim is not None and dim.hidden) and gl(c.column) not in cut:
+                        cut.append(gl(c.column))
+        if cut:
+            problems.append(f"{ws.title}: visible data outside the print area in columns {cut[:8]}")
+        pages = ws.page_setup.fitToWidth or 1
+        widths = _col_inches(ws, last_col)
+        total = sum(widths)
+        rep_cols = 0
+        if ws.print_title_cols:
+            rep_cols = ci(re.sub(r"[^A-Z]", "", ws.print_title_cols.split(":")[1]))
+        rep = sum(widths[:rep_cols])
+        scale = min(1.0, pages * A3_PRINTABLE_IN / (total + (pages - 1) * rep)) if total else 1.0
+        if scale < PRINT_MIN_SCALE - 1e-9:
+            problems.append(f"{ws.title}: print scale {scale:.2f} below {PRINT_MIN_SCALE}")
+        head = None
+        for r in (5, 4):
+            v = ws.cell(row=r, column=last_col).value
+            if isinstance(v, str) and v.strip():
+                head = v
+                break
+        if head and txt:
+            word = re.split(r"[\s(]", head.strip())[0]
+            if len(word) >= 4 and word not in flat:
+                problems.append(f"{ws.title}: header {head!r} of the last printed column not found in the PDF")
+        sheets[ws.title] = dict(pages_wide=pages, scale=round(scale, 2), last_print_col=gl(last_col), width_in=round(total, 1))
+    return dict(problems=problems, sheets=sheets)
+
+
 def run(work: Optional[Path] = None, report: Optional[Path] = None) -> int:
     root = Path(".").resolve()
     work = work or Path(tempfile.mkdtemp(prefix="wbself_"))
@@ -382,6 +435,12 @@ def run(work: Optional[Path] = None, report: Optional[Path] = None) -> int:
     results["pdf"] = pdf
     if pdf["pages"] < len(ctx.wb.sheetnames) or not pdf["footer_found"]:
         fails.append(f"pdf proof: {pdf}")
+    pp = print_proof(rc, Path(pdf["pdf"]))
+    ppk = print_proof(krc, to_pdf(krc, work / "pdf_ka"))
+    results["print_proof"] = dict(reva=pp, ka=ppk)
+    for nm, x in (("Rev A rebuild", pp), ("known-answer department", ppk)):
+        for pr in x["problems"]:
+            fails.append(f"print proof {nm}: {pr}")
     results["fails"] = fails
     results["work"] = str(work)
     if report:
@@ -398,6 +457,7 @@ def run(work: Optional[Path] = None, report: Optional[Path] = None) -> int:
     print(f"== Errors: {sum(len(v) for v in err.values())}; formulas {fs['n_formula']}; typed literals {len(fs['literals'])}; IFERROR {len(fs['iferror'])}")
     print(f"== Style proof: {results['style']['n_coded']} coded cells, {len(results['style']['problems'])} problems")
     print(f"== PDF: {pdf['pages']} pages, footer found {pdf['footer_found']}")
+    print(f"== Print proof: {len(pp['problems']) + len(ppk['problems'])} problems; lowest scale {min(v['scale'] for v in pp['sheets'].values()):.2f}")
     print("SELFTEST", "PASS" if not fails else "FAIL")
     for f in fails:
         print("  -", f)

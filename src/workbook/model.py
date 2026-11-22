@@ -65,11 +65,13 @@ def load_input(path: Path) -> Dict[str, Any]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def prov_of(room: Dict[str, Any], group: str, value_present: bool = True) -> Tuple[str, str]:
-    """(code, source id) for a room input group; blank pair when the value is unknown."""
+def prov_of(room: Dict[str, Any], group: str, value_present: bool = True, field: Optional[str] = None) -> Tuple[str, str]:
+    """(code, source id) for a room input; a provenance keyed by the field name overrides the one of its group.
+    Blank pair when the value is unknown."""
     if not value_present:
         return "", ""
-    p = (room.get("prov") or {}).get(group) or room.get("prov_default")
+    prov = room.get("prov") or {}
+    p = (prov.get(field) if field else None) or prov.get(group) or room.get("prov_default")
     if not p:
         raise InputError(f"room {room.get('number')}: input '{group}' has a value but no provenance (code, source id)")
     code, src = p[0], p[1]

@@ -144,12 +144,24 @@ PRINT_MIN_SCALE = 0.75     # body text 10 pt must print at no less than 7.5 pt
 A3_PRINTABLE_IN = 16.54 - 1.0   # A3 landscape width less 0.5 in margins
 
 
+def col_dims(ws) -> Dict[int, Any]:
+    """Column dimension of every column index, expanding the min..max ranges that openpyxl keys by their first letter."""
+    out: Dict[int, Any] = {}
+    for key, dim in ws.column_dimensions.items():
+        lo = dim.min or column_index_from_string(key)
+        hi = dim.max or lo
+        for i in range(lo, hi + 1):
+            out[i] = dim
+    return out
+
+
 def _col_inches(ws, last_col: int) -> List[float]:
     """Approximate printed width of columns 1..last_col in inches (7 px per width unit + 5 px padding, 96 dpi);
     hidden (collapsed) columns print nothing."""
+    dims = col_dims(ws)
     out = []
     for i in range(1, last_col + 1):
-        dim = ws.column_dimensions.get(get_column_letter(i))
+        dim = dims.get(i)
         if dim is not None and dim.hidden:
             out.append(0.0)
             continue

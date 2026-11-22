@@ -77,7 +77,7 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
             put(ws, g("coil_s" + suffix), f"={g('sens')}+{g('oa_sens' + suffix)}+{g('fan')}", "Calc", "d2")
             put(ws, g("coil_l" + suffix), f"={g('lat')}+{g('oa_lat' + suffix)}", "Calc", "d2")
             put(ws, g("coil" + suffix), f"={g('coil_s' + suffix)}+{g('coil_l' + suffix)}", "Result", "d2")
-        put(ws, g("fan"), f"={g('sa_ahu')}/WperkW*FanPressure/FanEfficiency/WperkW", "Calc", "d2")
+        put(ws, g("fan"), f"={g('sa_ahu')}/LperM3*FanPressure/FanEfficiency/WperkW", "Calc", "d2")
         put(ws, g("wm2"), f"=IF({g('area')}>0,{g('coil')}*WperkW/{g('area')},0)", "Calc", "d1")
         put(ws, g("req_t"), f"=IF({g('sa_room')}>0,SUMPRODUCT(({AF.rng('ahu')}={key}){mask}*{AF.rng('supply')}*{AF.rng('troom')})/{g('sa_room')}-{g('sens')}*WperkW/(AirSensibleFactor*{g('sa_room')}),0)", "Calc", "d1")
         if not after:
@@ -159,26 +159,30 @@ def write_ahu(ctx: Ctx) -> None:
 def write_fcu(ctx: Ctx) -> None:
     ws = ctx.wb["FCU"]
     L = ctx.lay["FC"]
-    AF = ctx.lay["AF"]
+    AF, FN = ctx.lay["AF"], ctx.lay["FN"]
     title_block(ws, "FCU", "Rooms on fan coil units: rooms whose system type is FCU, and rooms separated by the outdoor-air rule. "
                 "The coil covers the room load plus outdoor air as it arrives: untreated air from an outdoor-air fan, or treated air from "
-                "a PAHU at its off-coil condition. Blank rows are unused list positions.", ctx)
+                "a PAHU at its off-coil condition. The outdoor-air source is the room's own input, else the PAHU (or outdoor-air fan) that "
+                "serves the room's AHU on Fans; the capacity columns test that unit with the added airflow. Blank rows are unused list positions.", ctx)
     heads = [H("k", "No.", "", 5), H("no", "Room number", "", 14), H("name", "Room name", "", 26), H("ahu", "Original AHU or system", "", 24),
              H("why", "Reason", "", 12), H("area", "Area", "m" + U, 8), H("sens_kw", "Room sensible", "kW", 9),
              H("lat_kw", "Room latent", "kW", 9), H("supply", "Room supply", "L/s", 9), H("oa", "Outdoor air", "L/s", 9),
-             H("oasrc", "Outdoor-air source (PAHU or fan)", "", 22), H("oacond", "Outdoor air arrives", "", 11),
+             H("oasrc", "Outdoor-air source (PAHU or fan)", "", 22), H("oaby", "Source chosen by", "", 14),
+             H("oacond", "Outdoor air arrives", "", 11),
              H("oa_t", "Arrival temperature", "°C", 9), H("oa_h", "Arrival enthalpy", "kJ/kg", 9),
              H("oa_sens", "Outdoor air sensible", "kW", 9), H("oa_lat", "Outdoor air latent", "kW", 9),
              H("coil_s", "Coil sensible", "kW", 9), H("coil_l", "Coil latent", "kW", 9), H("coil", "FCU coil duty", "kW", 10),
-             H("flag", "Flag", "", 30)]
-    write_headers(ws, L, heads, 4, {"k": "ROOM", "area": "LOAD", "oasrc": "OUTDOOR AIR", "oa_sens": "COIL", "flag": "FLAG"})
+             H("cap_sched", "Source unit, scheduled", "L/s", 10), H("cap_drawn", "Source unit, drawn with the added air", "L/s", 11),
+             H("cap", "Source capacity", "", 12), H("flag", "Flag", "", 44)]
+    write_headers(ws, L, heads, 4, {"k": "ROOM", "area": "LOAD", "oasrc": "OUTDOOR AIR", "oa_sens": "COIL", "cap_sched": "CAPACITY OF THE SOURCE",
+                                    "flag": "FLAG"})
+    ri = ctx.lay["RI"]
     for t in range(ctx.n_fcu_rows):
         g = lambda k: L.local(k, t)
         put(ws, g("k"), f"=ROWS({L.col('k')}${L.first}:{L.col('k')}{L.row(t)})", "Calc", "d0")
         mx = f"MAX({AF.rng('fcurank')})"
         idx = f"MATCH({g('no')},{AF.rng('no')},0)"
         put(ws, g("no"), f'=IF({g("k")}>{mx},"",INDEX({AF.rng("no")},MATCH({g("k")},{AF.rng("fcurank")},0)))', "LinkTag").alignment = Alignment(horizontal="left")
-        ri = ctx.lay["RI"]
         for k, src, fmt, left in (("name", AF.rng("name"), None, True), ("ahu", AF.rng("ahu"), None, True),
                                   ("area", AF.rng("area"), "d1", False), ("supply", AF.rng("supply"), "d1", False),
                                   ("oa", AF.rng("oa"), "d1", False)):
@@ -186,8 +190,20 @@ def write_fcu(ctx: Ctx) -> None:
         _hl(ws, g("why"), f'=IF({g("no")}="","",IF(INDEX({AF.rng("systype")},{idx})="FCU","SYSTEM TYPE","OA RULE"))', "Calc", left=True)
         put(ws, g("sens_kw"), f'=IF({g("no")}="","",INDEX({AF.rng("sens")},{idx})/WperkW)', "Link", "d2")
         put(ws, g("lat_kw"), f'=IF({g("no")}="","",INDEX({AF.rng("lat")},{idx})/WperkW)', "Link", "d2")
-        _hl(ws, g("oasrc"), f'=IF({g("no")}="","",IF(INDEX({ri.rng("oasrc")},{idx})="","not set",INDEX({ri.rng("oasrc")},{idx})))', "Link", left=True)
-        _hl(ws, g("oacond"), f'=IF({g("no")}="","",IF(INDEX({ri.rng("oacond")},{idx})="","UNTREATED",INDEX({ri.rng("oacond")},{idx})))', "Link", left=True)
+        own = f"INDEX({ri.rng('oasrc')},{idx})"
+        mp, mo = f"MATCH({g('ahu')},{FN.rng('pk_p')},0)", f"MATCH({g('ahu')},{FN.rng('pk_o')},0)"
+        if ctx.fans:
+            dflt = (f'IF(ISNUMBER({mp}),INDEX({FN.rng("tag")},{mp}),IF(ISNUMBER({mo}),INDEX({FN.rng("tag")},{mo}),"not set"))')
+        else:
+            dflt = '"not set"'
+        _hl(ws, g("oasrc"), f'=IF({g("no")}="","",IF({own}<>"",{own},{dflt}))', "Link", left=True)
+        _hl(ws, g("oaby"), f'=IF({g("no")}="","",IF({own}<>"","ROOM INPUT",IF({g("oasrc")}="not set","NOT SET","FANS DEFAULT")))', "Calc", left=True)
+        if ctx.fans:
+            ftype = f'IF(ISNUMBER(MATCH({g("oasrc")},{FN.rng("tag")},0)),INDEX({FN.rng("type")},MATCH({g("oasrc")},{FN.rng("tag")},0)),"")'
+        else:
+            ftype = '""'
+        _hl(ws, g("oacond"), (f'=IF({g("no")}="","",IF(INDEX({ri.rng("oacond")},{idx})<>"",INDEX({ri.rng("oacond")},{idx}),'
+                              f'IF({ftype}="PAHU","TREATED","UNTREATED")))'), "Link", left=True)
         put(ws, g("oa_t"), f'=IF({g("no")}="","",IF({g("oacond")}="TREATED",PAHUOffT,OutdoorDB))', "Calc", "d1")
         put(ws, g("oa_h"), f'=IF({g("no")}="","",IF({g("oacond")}="TREATED",PAHUOffH,OutdoorH))', "Calc", "d1")
         troom = f"INDEX({AF.rng('troom')},{idx})"
@@ -197,13 +213,25 @@ def write_fcu(ctx: Ctx) -> None:
         put(ws, g("coil_s"), f'=IF({g("no")}="","",{g("sens_kw")}+{g("oa_sens")})', "Calc", "d2")
         put(ws, g("coil_l"), f'=IF({g("no")}="","",{g("lat_kw")}+{g("oa_lat")})', "Calc", "d2")
         put(ws, g("coil"), f'=IF({g("no")}="","",{g("coil_s")}+{g("coil_l")})', "Result", "d2")
-        _hl(ws, g("flag"), f'=IF({g("no")}="","",IF({g("oasrc")}="not set","OUTDOOR-AIR SOURCE NOT SET: CHOOSE FROM ZONING",'
-                           f'IF(AND({g("oacond")}="TREATED",PAHUOffT=""),"PAHU OFF-COIL CONDITION NOT SET","")))', "Calc", left=True)
+        if ctx.fans:
+            fm = f"MATCH({g('oasrc')},{FN.rng('tag')},0)"
+            put(ws, g("cap_sched"), f'=IF({g("no")}="","",IF(ISNUMBER({fm}),INDEX({FN.rng("sched")},{fm}),""))', "Link", "d0")
+            put(ws, g("cap_drawn"), f'=IF({g("no")}="","",IF(ISNUMBER({fm}),INDEX({FN.rng("drawn")},{fm}),""))', "Link", "d1")
+            put(ws, g("cap"), f'=IF({g("no")}="","",IF(ISNUMBER({fm}),INDEX({FN.rng("status")},{fm}),"NOT SET"))', "Check")
+        else:
+            put(ws, g("cap_sched"), None, "Link", "d0")
+            put(ws, g("cap_drawn"), None, "Link", "d1")
+            put(ws, g("cap"), f'=IF({g("no")}="","","NOT SET")', "Check")
+        _hl(ws, g("flag"), (f'=IF({g("no")}="","",IF({g("oasrc")}="not set","OUTDOOR-AIR SOURCE NOT SET: CHOOSE FROM ZONING; COIL ON UNTREATED AIR UNTIL THEN",'
+                            f'IF(AND({g("oacond")}="TREATED",PAHUOffT=""),"PAHU OFF-COIL CONDITION NOT SET",'
+                            f'IF({g("cap")}="FAIL","SOURCE UNIT TOO SMALL WITH THE ADDED AIR",IF({g("oaby")}="FANS DEFAULT","SOURCE TAKEN FROM FANS: CONFIRM","")))))'),
+            "Calc", left=True)
     if ctx.n_fcu_rows:
         band_rows(ws, f"A{L.first}:{L.col('flag')}{L.last}")
         cf_formula(ws, f"{L.col('flag')}{L.first}:{L.col('flag')}{L.last}", f'{L.col("flag")}{L.first}<>""')
-    put(ws, f"A{L.last + 2}", "The FCU capacity is checked against the unit chosen in zoning once its outdoor-air connection is approved "
-        "(Gate 3a); this tab sizes the coil duty only.", "Note")
+        cf_text(ws, f"{L.col('cap')}{L.first}:{L.col('cap')}{L.last}", f"{L.col('cap')}{L.first}", "FAIL")
+    put(ws, f"A{L.last + 2}", "Source capacity: the PAHU or outdoor-air fan on Fans carries the separated room's outdoor air on top of its AHU's; "
+        "its status there is the test. The FCU itself is a new system: its selection follows the approved zoning change (Gate 3a).", "Note")
     _setup(ws, ctx, L, L.idx["flag"], L.last + 2, "4:6", f"{L.col('name')}{L.first}", "FF00B050")
 
 
@@ -211,13 +239,15 @@ def write_fcu(ctx: Ctx) -> None:
 def write_fans(ctx: Ctx) -> None:
     ws = ctx.wb["Fans"]
     L, AF, AH = ctx.lay["FN"], ctx.lay["AF"], ctx.lay["AH"]
+    AH2, FC = ctx.lay["AH2"], ctx.lay["FC"]
     title_block(ws, "Fans", "Return, exhaust and isolation-exhaust fans, outdoor-air fans and PAHUs: required airflow from the balance, "
                 "duct leakage, drawn duty and margin against the scheduled duty. Airflow only: fan pressure is not calculated here.", ctx)
     heads = [H("tag", "Fan tag", "", 24), H("type", "Type", "", 16), H("serves", "Serves (AHU tag, or fan tag for exhaust)", "", 26),
              H("req", "Required airflow", "L/s", 10), H("leak", "Duct leakage", "%", 8), H("drawn", "Drawn duty", "L/s", 10),
              H("sched", "Scheduled duty", "L/s", 10), H("margin", "Margin of schedule over drawn duty", "%", 10),
-             H("code", "Code", "", 5), H("src", "Source ID", "", 11), H("remark", "Remark", "", 40), H("status", "Status", "", 11)]
-    write_headers(ws, L, heads, 4, {"tag": "FAN", "req": "AIRFLOW", "sched": "SCHEDULE"})
+             H("code", "Code", "", 5), H("src", "Source ID", "", 11), H("remark", "Remark", "", 40), H("status", "Status", "", 11),
+             H("pk_p", "First PAHU of the AHU (FCU source)", "", 16), H("pk_o", "First outdoor-air fan of the AHU (FCU source)", "", 16)]
+    write_headers(ws, L, heads, 4, {"tag": "FAN", "req": "AIRFLOW", "sched": "SCHEDULE", "pk_p": "FCU OUTDOOR-AIR SOURCE"})
     for t, f in enumerate(ctx.fans):
         g = lambda k: L.local(k, t)
         code, src = f.get("code", "D"), f.get("source", "")
@@ -228,7 +258,9 @@ def write_fans(ctx: Ctx) -> None:
             _val(ctx, ws, g(k), f.get(fld), code, fmt=fmt, kind=kind, cref=g("code"), sref=g("src"), src=src, label=f"fan {fld}",
                  room=f["tag"])
         _prov_cells(ctx, ws, g("code"), g("src"), code, src, True)
-        oa_ahu = f"INDEX({AH.rng('oa_rule')},MATCH({g('serves')},{AH.rng('ahu')},0))"
+        # outdoor air of the AHU after the outdoor-air rule, plus the outdoor air of FCU rooms that draw on this unit
+        oa_ahu = (f"INDEX({AH2.rng('oa_rule')},MATCH({g('serves')},{AH2.rng('ahu')},0))"
+                  f"+SUMIFS({FC.rng('oa')},{FC.rng('oasrc')},{g('tag')})")
         put(ws, g("req"), (f'=IF({g("type")}="RETURN",SUMIFS({AF.rng("ret")},{AF.rng("ahu")},{g("serves")}),'
                            f'IF(OR({g("type")}="OUTDOOR AIR",{g("type")}="PAHU"),{oa_ahu},'
                            f'IF(OR({g("type")}="EXHAUST",{g("type")}="ISOLATION EXHAUST"),SUMIFS({AF.rng("exhaust")},{AF.rng("exfan")},{g("tag")}),0)))'),
@@ -238,11 +270,13 @@ def write_fans(ctx: Ctx) -> None:
         put(ws, g("margin"), f'=IF(AND({g("sched")}<>"",{g("drawn")}>0),{g("sched")}/{g("drawn")}-1,"")', "Calc", "pct1")
         put(ws, g("status"), f'=IF({g("sched")}="","NO SCHEDULE",IF({g("sched")}>={g("drawn")},"PASS","FAIL"))', "Check")
         put(ws, g("remark"), f.get("remark"), "Note")
+        put(ws, g("pk_p"), f'=IF(AND({g("type")}="PAHU",COUNTIFS({L.upto("type", t)},"PAHU",{L.upto("serves", t)},{g("serves")})=1),{g("serves")},"")', "CalcTag")
+        put(ws, g("pk_o"), f'=IF(AND({g("type")}="OUTDOOR AIR",COUNTIFS({L.upto("type", t)},"OUTDOOR AIR",{L.upto("serves", t)},{g("serves")})=1),{g("serves")},"")', "CalcTag")
     if ctx.fans:
         list_validation(ws, f"{L.col('type')}{L.first}:{L.col('type')}{L.last}", "ListFanType")
         band_rows(ws, f"A{L.first}:{L.col('status')}{L.last}")
         cf_text(ws, f"{L.col('status')}{L.first}:{L.col('status')}{L.last}", f"{L.col('status')}{L.first}", "FAIL")
-    _setup(ws, ctx, L, L.idx["status"], L.last, "4:6", f"{L.col('tag')}{L.first}", "FF00B050")
+    _setup(ws, ctx, L, L.idx["pk_o"], L.last, "4:6", f"{L.col('tag')}{L.first}", "FF00B050")
 
 
 def write_vav(ctx: Ctx) -> None:
@@ -338,7 +372,7 @@ def write_flow_balance(ctx: Ctx) -> None:
         put(ws, g("out"), f"={g('extract')}+{g('leak_out')}", "Calc", "d1")
         put(ws, g("net"), f"={g('inn')}-{g('out')}", "Result", "d1")
         put(ws, g("close"), f"=MAX(BalTolLps,BalTolPct*{g('inn')})", "Calc", "d1")
-        put(ws, g("status"), f'=IF(ABS({g("net")})<={g("close")},"PASS",IF({g("supply")}=0,"TRANSFER AIR","FAIL"))', "Check")
+        put(ws, g("status"), f'=IF(ABS({g("net")})<={g("close")},"PASS",IF({g("supply")}=0,"TRANSFER AIR",IF({AF.addr("fix", i)}=1,"SPECIFIED","FAIL")))', "Check")
         put(ws, g("ach"), f"=IF({AF.addr('vol', i)}>0,ConvM3hPerLps*{g('net')}/{AF.addr('vol', i)},0)", "Calc", "d2")
     band_rows(ws, f"A{L.first}:{L.col('ach')}{L.last}")
     cf_text(ws, f"{L.col('status')}{L.first}:{L.col('status')}{L.last}", f"{L.col('status')}{L.first}", "FAIL")

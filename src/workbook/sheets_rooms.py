@@ -60,20 +60,20 @@ def write_room_information(ctx: Ctx) -> None:
         n = r["number"]
         g = lambda k: f"{L.col(k)}{row}"
         # identity
-        code, src = prov_of(r, "identity")
         for k, v in (("no", n), ("name", r.get("name")), ("storey", r.get("storey"))):
-            _val(ctx, ws, g(k), v, code, kind="tag" if k == "no" else "text", cref=g("id_c"), sref=g("id_s"), src=src,
+            code, src = prov_of(r, "identity", not blank(v), k)
+            _val(ctx, ws, g(k), v, code, kind="tag" if k == "no" else "text", cref=g(k + "_c"), sref=g(k + "_s"), src=src,
                  label=f"room {k}", room=n)
-        _prov_cells(ctx, ws, g("id_c"), g("id_s"), code, src, True)
+            _prov_cells(ctx, ws, g(k + "_c"), g(k + "_s"), code, src, not blank(v))
         # zoning
         zf = [("ahu", "ahu", "tag"), ("zone", "zone_tag", "tag"), ("systype", "system_type", "text"),
               ("terminal", "terminal_tag", "tag"), ("exfan", "exhaust_fan", "tag"), ("oasrc", "oa_source", "tag"),
               ("oacond", "oa_condition", "text")]
-        anyv = any(not blank(r.get(f)) for _, f, _ in zf)
-        zc, zs = prov_of(r, "zoning", anyv)
         for k, f, kind in zf:
-            _val(ctx, ws, g(k), r.get(f), zc, kind=kind, cref=g("zon_c"), sref=g("zon_s"), src=zs, label=f"room {f}", room=n)
-        _prov_cells(ctx, ws, g("zon_c"), g("zon_s"), zc, zs, anyv)
+            has_f = not blank(r.get(f))
+            zc, zs = prov_of(r, "zoning", has_f, f)
+            _val(ctx, ws, g(k), r.get(f), zc, kind=kind, cref=g(k + "_c"), sref=g(k + "_s"), src=zs, label=f"room {f}", room=n)
+            _prov_cells(ctx, ws, g(k + "_c"), g(k + "_s"), zc, zs, has_f)
         # single-value groups
         simple = [("sptype", "space_type", "space_type", "text", None), ("cond", "room_condition", "space_type", "text", None),
                   ("soa", "soa_area_m2", "soa_area", "num", "d1"), ("meas", "measured_area_m2", "measured_area", "num", "d1"),
@@ -128,8 +128,6 @@ def write_room_information(ctx: Ctx) -> None:
     list_validation(ws, f"{L.col('oacond')}{L.first}:{L.col('oacond')}{last}", "ListOACond")
     band_rows(ws, f"A{L.first}:{L.col('remark')}{last}")
     cf_text(ws, f"{L.col('agree')}{L.first}:{L.col('agree')}{last}", f"{L.col('agree')}{L.first}", "NO")
-    group_cols(ws, L, "id_c", "id_s")
-    group_cols(ws, L, "zon_c", "zon_s")
     _setup(ws, ctx, L, L.idx["remark"], last, "4:6", f"{L.col('name')}{L.first}", "FF1F4E79")
 
 
@@ -205,7 +203,7 @@ def write_envelope(ctx: Ctx) -> None:
                                 ("glz", "glazing_m2", "num", "d1"), ("wall", "wall_m2", "num", "d1"), ("roof", "roof_m2", "num", "d1"),
                                 ("shade", "shading", "text", None), ("method", "method", "text", None)):
             _val(ctx, ws, g(k), e.get(f), code, fmt=fmt, kind=kind, cref=g("code"), sref=g("src"), src=src,
-                 label=f"envelope {f}", room=e["room"])
+                 label=f, room=e.get("segment") or e["room"])
         _prov_cells(ctx, ws, g("code"), g("src"), code, src, True)
         calc = {"win_wm2": ("=INDEX(OriWindow,MATCH({ori},OriName,0))", "Link", "d1"),
                 "wall_wm2": ("=INDEX(OriWall,MATCH({ori},OriName,0))", "Link", "d1"),
@@ -227,7 +225,7 @@ ENG_F: Dict[str, str] = {
     "vol": "={area}*{h}", "glz": "={RI.glz}", "wall": "={RI.wall}", "roof": "={RI.roof}",
     "nenv": "=COUNTIF([EN.room],{no})",
     "occ": "={RI.people}", "iof": "={RI.iof}", "oa_ach": "={CR.oa_ach}", "oa_lpp": "={CR.oa_lpp}", "oa_spec": "={CR.oa_spec}",
-    "oa": "=MAX({occ}*{oa_lpp}*{iof},{oa_ach}*{vol}/ConvM3hPerLps,{oa_spec})",
+    "oa": "=IF(AND({fix}=1,{oa_spec}>0),{oa_spec},MAX({occ}*{oa_lpp}*{iof},{oa_ach}*{vol}/ConvM3hPerLps,{oa_spec}))",
     "sa_ach": "={CR.sa_ach}", "sa_lpm2": "={CR.sa_lpm2}", "sa_spec": "={CR.sa_spec}",
     "sa_lps": "=MAX({sa_lpm2}*{area},{sa_ach}*{vol}/ConvM3hPerLps,{sa_spec})",
     "ex_ach": "={CR.ex_ach}", "ex_lpm2": "={CR.ex_lpm2}", "ex_spec": "={CR.ex_spec}",
@@ -253,7 +251,9 @@ ENG_F: Dict[str, str] = {
     "troom": "=INDEX(SpaceTypeT,MATCH({sptype},SpaceTypeName,0))", "hroom": "=INDEX(SpaceTypeH,MATCH({sptype},SpaceTypeName,0))",
     "tsup": "=SupplyTemp",
     "th_lps": "={sens}/(AirSensibleFactor*({troom}-{tsup}))",
-    "pm": "={AF.pm}", "fin_unr": "=MAX({th_lps},{sa_lps},{pm})", "fin": "=ROUNDUP({fin_unr},RoundTo)",
+    "fix": '=IF({CR.code}="S",1,0)', "pm": "={AF.pm}",
+    "fin_unr": "=IF(AND({fix}=1,{sa_spec}>0),{sa_spec},MAX({th_lps},{sa_lps},{pm}))",
+    "fin": "=IF(AND({fix}=1,{sa_spec}>0),{fin_unr},ROUNDUP({fin_unr},RoundTo))",
     "fin_m3h": "={fin}*ConvM3hPerLps", "ach": "=IF({vol}>0,{fin_m3h}/{vol},0)",
     "voc": "={oa}", "vsc": "={fin}", "frac": "=IF({vsc}>0,{voc}/{vsc},0)",
 }
@@ -324,24 +324,27 @@ AF_F: Dict[str, str] = {
     "no": "={RI.no}", "name": "={RI.name}", "storey": "={RI.storey}", "ahu": "={RI.ahu}", "sys": "={RI.systype}",
     "area": "={ENG.area}", "vol": "={ENG.vol}", "sens": "={ENG.sens}", "lat": "={ENG.lat}", "troom": "={ENG.troom}",
     "hroom": "={ENG.hroom}", "ac": "={ENG.sa_lps}", "th": "={ENG.th_lps}",
-    "gov": '=IF({supply}=0,"NONE",IF({pm}>MAX({th},{ac}),"PRESSURE",IF({th}>={ac},"THERMAL","AIR CHANGE")))',
+    "gov": '=IF({supply}=0,"NONE",IF({fix}=1,"SPECIFIED",IF({pm}>MAX({th},{ac}),"PRESSURE",IF({th}>={ac},"THERMAL","AIR CHANGE"))))',
     "margin": "=ABS({th}-{ac})", "ex_min": "={ENG.ex_fin}",
     "pm": '=IF({kind}="EXHAUST",MAX(0,{ex_min}-{off}),IF({kind}="SUPPLY",{ex_min}+{off},0))',
     "supply": "={ENG.fin}",
-    "extract": '=IF({kind}="EXHAUST",{supply}+{off},IF({kind}="SUPPLY",{supply}-{off},MAX({supply},{ex_min})))',
+    "extract": '=IF(AND({fix}=1,{ex_min}>0),{ex_min},IF({kind}="EXHAUST",{supply}+{off},IF({kind}="SUPPLY",{supply}-{off},MAX({supply},{ex_min}))))',
     "single": "={CR.single}",
     "exhaust": '=IF({single}="Y",{extract},IF({kind}="EXHAUST",MAX({ex_min},{off}),{ex_min}))',
     "ret": "={extract}-{exhaust}", "oa_air": "={ENG.oa}",
-    "oa": '=IF({supply}>0,MIN({supply},MAX({oa_air},{exhaust}+IF({kind}="SUPPLY",{off},0))),0)',
+    "oa": '=IF({supply}>0,MIN({supply},IF(AND({fix}=1,{oa_spec}>0),{oa_spec},MAX({oa_air},{exhaust}+IF({kind}="SUPPLY",{off},0)))),0)',
     "frac": "=IF({supply}>0,{oa}/{supply},0)",
     "minflow": "=MIN({supply},MAX({ac},{oa},{pm}))",
-    "ok": '=IF({supply}>=MAX({th},{ac},{pm}),"PASS","FAIL")',
-    "terminal": "={RI.terminal}", "exfan": "={RI.exfan}", "clin": "={CR.clin}", "systype": "={RI.systype}",
+    "ok": '=IF({supply}>=MAX({th},{ac},{pm}),"PASS",IF({fix}=1,"SPECIFIED","FAIL"))',
+    "fix": "={ENG.fix}", "oa_spec": "={ENG.oa_spec}",
+    "spec_off": '=IF(AND({fix}=1,{kind}<>""),IF({kind}="EXHAUST",{extract}-{supply},{supply}-{extract}),"")',
+    "off_chk": '=IF(ISNUMBER({spec_off}),IF({spec_off}>={off}-BalTolLps,"OK","SHORT"),"")',
+    "terminal": "={RI.terminal}", "exfan": "={RI.exfan}", "clin": '=IF({fix}=1,"YES",{CR.clin})', "systype": "={RI.systype}",
 }
 AF_STYLE = {"no": "LinkTag", "name": "Link", "storey": "Link", "ahu": "LinkTag", "sys": "Link", "terminal": "LinkTag",
-            "exfan": "LinkTag", "clin": "Link", "systype": "Link", "single": "Link", "ok": "Check", "gov": "Calc",
-            "supply": "Result", "oa": "Result"}
-AF_LINK = {"area", "vol", "sens", "lat", "troom", "hroom", "ac", "th", "ex_min", "supply", "oa_air"}
+            "exfan": "LinkTag", "clin": "Calc", "systype": "Link", "single": "Link", "ok": "Check", "gov": "Calc",
+            "supply": "Result", "oa": "Result", "off_chk": "Check"}
+AF_LINK = {"fix", "oa_spec", "area", "vol", "sens", "lat", "troom", "hroom", "ac", "th", "ex_min", "supply", "oa_air"}
 
 
 def write_airflow(ctx: Ctx) -> None:
@@ -366,8 +369,8 @@ def write_airflow(ctx: Ctx) -> None:
             f = re.sub(r"\{ENG\.(\w+)\}", lambda m: eng(m.group(1)), f)
             f = expand(ctx, f, L, i, {"RI": i, "CR": i})
             st = AF_STYLE.get(k, "Link" if k in AF_LINK else "Calc")
-            fmt = None if k in ("no", "name", "storey", "ahu", "sys", "gov", "single", "ok", "terminal", "exfan", "clin", "systype") \
-                else ("pct1" if k == "frac" else ("d1"))
+            fmt = None if k in ("no", "name", "storey", "ahu", "sys", "gov", "single", "ok", "terminal", "exfan", "clin", "systype", "off_chk") \
+                else ("pct1" if k == "frac" else ("d0" if k == "fix" else "d1"))
             c = put(ws, g(k), f, st, fmt)
             if fmt is None:
                 c.alignment = Alignment(horizontal="left" if st != "Check" else "center", vertical="center")
@@ -410,10 +413,14 @@ def write_airflow(ctx: Ctx) -> None:
             ctx, f'=IF(AND({g("sepf")}=0,{g("supply")}>0,COUNTIFS({L.upto("ahu", i)},{g("ahu")},{L.upto("supply", i)},">0",{L.upto("sepf", i)},0)=1),{g("ahu")},"")',
             L, i), "CalcTag")
         put(ws, g("fcu"), f'=IF(OR({g("systype")}="FCU",{g("sepf")}=1),1,0)', "Calc", "d0")
+        put(ws, g("flgrank"), f'=IF(OR({g("status")}="SEPARATE",{g("status")}="LIST FOR MARCUS"),'
+                              f'COUNTIF({L.upto("status", i)},"SEPARATE")+COUNTIF({L.upto("status", i)},"LIST FOR MARCUS"),0)', "Calc", "d0")
         put(ws, g("fcurank"), f'=IF({g("fcu")}=1,SUM({L.upto("fcu", i)}),0)', "Calc", "d0")
     last = L.last
     band_rows(ws, f"A{L.first}:{L.col('ok')}{last}")
     cf_text(ws, f"{L.col('ok')}{L.first}:{L.col('ok')}{last}", f"{L.col('ok')}{L.first}", "FAIL")
+    cf_text(ws, f"{L.col('ok')}{L.first}:{L.col('ok')}{last}", f"{L.col('ok')}{L.first}", "SPECIFIED", fill="FFFFF2CC")
+    cf_text(ws, f"{L.col('off_chk')}{L.first}:{L.col('off_chk')}{last}", f"{L.col('off_chk')}{L.first}", "SHORT")
     for tx, fill in (("THERMAL", "FFDDEBF7"), ("AIR CHANGE", "FFE2EFDA"), ("PRESSURE", "FFFCE4D6")):
         cf_text(ws, f"{L.col('gov')}{L.first}:{L.col('gov')}{last}", f"{L.col('gov')}{L.first}", tx, bold=True, fill=fill)
     cf_formula(ws, f"{L.col('supply')}{L.first}:{L.col('supply')}{last}",

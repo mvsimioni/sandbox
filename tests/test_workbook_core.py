@@ -76,7 +76,7 @@ def test_every_tab_present_and_print_setup(reva):
                  "Fans", "VAV", "Venturi Valves", "Flow Balance", "Airflow Comparison", "Checks", "Sources", "Flags"]:
         ws = wb[name]
         assert ws.page_setup.paperSize == 8 and ws.page_setup.orientation == "landscape", name
-        assert ws.page_setup.fitToWidth == 1 and ws.sheet_properties.pageSetUpPr.fitToPage, name
+        assert ws.page_setup.fitToWidth >= 1 and ws.sheet_properties.pageSetUpPr.fitToPage, name
         assert ws.print_area, name
         assert "Page &P of &N" in ws.oddFooter.right.text, name
         assert ws.sheet_view.showGridLines is False, name

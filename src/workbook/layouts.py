@@ -25,12 +25,10 @@ def trip(key: str, header: str, unit: str, width: float, with_prov: bool = True)
 
 def ri_spec() -> Spec:
     s: Spec = []
-    s += [("no", "Room number", "", 14), ("name", "Room name", "", 28), ("storey", "Storey", "", 8),
-          ("id_c", "Code", "", 5), ("id_s", "Source ID", "", 11)]
-    s += [("ahu", "AHU or system tag", "", 24), ("zone", "Zone tag", "", 8), ("systype", "System type", "", 10),
-          ("terminal", "Terminal tag", "", 14), ("exfan", "Exhaust fan tag", "", 14), ("oasrc", "Outdoor-air source (FCU)",
-                                                                                       "", 16),
-          ("oacond", "Outdoor air to FCU", "", 11), ("zon_c", "Code", "", 5), ("zon_s", "Source ID", "", 11)]
+    s += trip("no", "Room number", "", 14) + trip("name", "Room name", "", 28) + trip("storey", "Storey", "", 8)
+    s += trip("ahu", "AHU or system tag", "", 24) + trip("zone", "Zone tag", "", 8) + trip("systype", "System type", "", 10)
+    s += trip("terminal", "Terminal tag", "", 14) + trip("exfan", "Exhaust fan tag", "", 14)
+    s += trip("oasrc", "Outdoor-air source (FCU)", "", 16) + trip("oacond", "Outdoor air to FCU", "", 11)
     s += trip("sptype", "Space type", "", 20)
     s += trip("cond", "Room condition", "", 10)
     s += trip("soa", "SOA or DPA area", "m²", 9)
@@ -90,8 +88,8 @@ ENG: List[Tuple[str, str, str, float, str, str]] = [
     ("sptype", "Space type", "", 18, "L", "ROOM DETAILS"), ("cond", "Room condition", "", 9, "L", "ROOM DETAILS"),
     ("h", "Ceiling height", "m", 8, "L", "ROOM DETAILS"), ("area", "Room area", "m²", 9, "L", "ROOM DETAILS"),
     ("vol", "Volume", "m³", 9, "C", "ROOM DETAILS"),
-    ("glz", "Glazing", "m²", 8, "C", "ROOM DETAILS"), ("wall", "External wall", "m²", 8, "C", "ROOM DETAILS"),
-    ("roof", "Roof", "m²", 8, "C", "ROOM DETAILS"), ("nenv", "Envelope rows", "no.", 7, "C", "ROOM DETAILS"),
+    ("glz", "Glazing", "m²", 8, "L", "ROOM DETAILS"), ("wall", "External wall", "m²", 8, "L", "ROOM DETAILS"),
+    ("roof", "Roof", "m²", 8, "L", "ROOM DETAILS"), ("nenv", "Envelope rows", "no.", 7, "C", "ROOM DETAILS"),
     ("occ", "Occupancy", "persons", 9, "L", "MINIMUM AIR REQUIREMENTS"), ("iof", "I.O.F.", "–", 7, "L", "MINIMUM AIR REQUIREMENTS"),
     ("oa_ach", "Min outdoor air", "ACH", 8, "L", "MINIMUM AIR REQUIREMENTS"),
     ("oa_lpp", "Outdoor air per person", "L/s", 8, "L", "MINIMUM AIR REQUIREMENTS"),
@@ -125,6 +123,7 @@ ENG: List[Tuple[str, str, str, float, str, str]] = [
     ("hroom", "Design room enthalpy", "kJ/kg", 9, "C", "ROOM COOLING SUPPLY AIR CHECK"),
     ("tsup", "Supply air temperature", "°C", 9, "L", "ROOM COOLING SUPPLY AIR CHECK"),
     ("th_lps", "Thermal-load airflow", "L/s", 10, "C", "ROOM COOLING SUPPLY AIR CHECK"),
+    ("fix", "Fixed by specification (MOT)", "0 / 1", 8, "L", "FINAL ROOM SUPPLY AIR"),
     ("pm", "Exhaust and pressure minimum", "L/s", 10, "L", "FINAL ROOM SUPPLY AIR"),
     ("fin_unr", "Governing airflow, unrounded", "L/s", 10, "C", "FINAL ROOM SUPPLY AIR"),
     ("fin", "Final room supply, rounded up", "L/s", 10, "R", "FINAL ROOM SUPPLY AIR"),
@@ -148,7 +147,9 @@ def af_spec() -> Spec:
                ("single", "Single pass", "", 7), ("exhaust", "Exhaust", "L/s", 10), ("ret", "Return", "L/s", 10),
                ("oa_air", "Outdoor air, air-change basis", "L/s", 10), ("oa", "Outdoor air", "L/s", 10),
                ("frac", "Outdoor-air fraction", "–", 9), ("minflow", "Minimum airflow (VAV)", "L/s", 10),
-               ("ok", "Supply meets both cases", "", 9), ("terminal", "Terminal tag", "", 14), ("exfan", "Exhaust fan tag", "", 14),
+               ("ok", "Supply meets both cases", "", 9), ("fix", "Fixed by specification (MOT)", "0 / 1", 8),
+               ("oa_spec", "Outdoor air, specified", "L/s", 9), ("spec_off", "Offset, as specified", "L/s", 9),
+               ("off_chk", "Specified offset against offset needed", "", 12), ("terminal", "Terminal tag", "", 14), ("exfan", "Exhaust fan tag", "", 14),
                ("clin", "Clinical criteria", "", 8), ("systype", "System type (input)", "", 9)]
     for r in range(1, OA_ROUNDS + 1):
         s += [(f"in{r}", f"Round {r}: in AHU", "0 / 1", 7), (f"tot{r}", f"Round {r}: AHU supply", "L/s", 9),
@@ -157,7 +158,7 @@ def af_spec() -> Spec:
               (f"lst{r}", f"Round {r}: list", "0 / 1", 7)]
     s += [("status", "Outdoor-air rule", "", 16), ("sepf", "Separated", "0 / 1", 8), ("cmark0", "Highest-fraction mark", "", 10),
           ("cmark1", "Highest-fraction mark after separation", "", 10),
-          ("ref0", "First supply room of the AHU", "", 10), ("ref1", "First supply room after separation", "", 10), ("fcu", "On an FCU", "0 / 1", 7),
+          ("ref0", "First supply room of the AHU", "", 10), ("ref1", "First supply room after separation", "", 10), ("fcu", "On an FCU", "0 / 1", 7), ("flgrank", "Outdoor-air flag order", "no.", 7),
           ("fcurank", "FCU list order", "no.", 7)]
     return s
 
@@ -167,7 +168,7 @@ def ps_keys() -> Tuple[List[str], int]:
     printed = ["node", "kind", "name", "suite", "set", "set_c", "set_s", "perim", "perim_c", "perim_s", "area", "h", "ovr",
                "ovr_c", "ovr_s", "surf", "limit", "n", "supply", "exhaust", "pfin", "env_in", "env_out", "gap_in",
                "gap_out", "fix_in", "fix_out", "air_in", "air_out", "kindoff", "needed", "design", "tighter", "ratio",
-               "status", "off_lps", "design_lps", "needed_n50", "needed_n75", "needed_g2", "ratio_n50", "ratio_n75",
+               "status", "spec_off", "spec_chk", "off_lps", "design_lps", "needed_n50", "needed_n75", "needed_g2", "ratio_n50", "ratio_n75",
                "ratio_g2", "flag_s", "upa", "resid", "note"]
     helpers = [f"p{k}" for k in range(NPASS + 1)] + ["lk", "negf", "bsum"] + [f"u{k}" for k in range(NBIS + 1)]
     return printed + helpers, len(printed)
@@ -221,9 +222,9 @@ AHU_KEYS = ["ahu", "type", "n", "area", "vol", "sa_room", "leak", "sa_ahu", "oa_
             "sens", "lat", "rt", "rh", "oa_sens", "oa_lat", "fan", "coil_s", "coil_l", "coil", "wm2",
             "oa_sens_ms", "oa_lat_ms", "coil_s_ms", "coil_l_ms", "coil_ms", "req_t", "sched", "sched_oa",
             "sched_c", "sched_s"]
-FCU_KEYS = ["k", "no", "name", "ahu", "why", "area", "sens_kw", "lat_kw", "supply", "oa", "oasrc", "oacond", "oa_t", "oa_h",
-            "oa_sens", "oa_lat", "coil_s", "coil_l", "coil", "flag"]
-FAN_KEYS = ["tag", "type", "serves", "req", "leak", "drawn", "sched", "margin", "code", "src", "remark", "status"]
+FCU_KEYS = ["k", "no", "name", "ahu", "why", "area", "sens_kw", "lat_kw", "supply", "oa", "oasrc", "oaby", "oacond", "oa_t", "oa_h",
+            "oa_sens", "oa_lat", "coil_s", "coil_l", "coil", "cap_sched", "cap_drawn", "cap", "flag"]
+FAN_KEYS = ["tag", "type", "serves", "req", "leak", "drawn", "sched", "margin", "code", "src", "remark", "status", "pk_p", "pk_o"]
 VAV_KEYS = ["tag", "type", "rooms", "n", "max", "min", "turn", "code", "src", "remark"]
 VEN_KEYS = ["tag", "room", "role", "d1", "d2", "off", "design", "tight", "ratio", "status", "code", "src", "remark"]
 FB_KEYS = ["no", "name", "ahu", "supply", "oa", "exhaust", "ret", "extract", "leak_in", "leak_out", "inn", "out", "net",

@@ -126,7 +126,8 @@ def write_basis(ctx: Ctx) -> None:
                     c.alignment = Alignment(horizontal="left", vertical="center")
                 ctx.coded.append(dict(sheet=ws.title, cell=f"{col}{r}", code_cell=f"E{r}", src_cell=f"F{r}", code=row.get("code", "D")))
                 if row.get("code") == "A" and j == 0:
-                    ctx.assumptions.append(dict(sheet=ws.title, cell=f"{col}{r}", label=f"{title}: {row['vals'][0]}", value="row", room="", src=row.get("source")))
+                    ctx.assumptions.append(dict(sheet=ws.title, cell=f"{col}{r}", label=f"{title}: {row['vals'][0]}", room="", src=row.get("source"),
+                                            value=", ".join(f"{h} {x}" for h, x in zip(heads[1:], row["vals"][1:]))))
             put(ws, f"E{r}", row.get("code", "D"), "Code")
             put(ws, f"F{r}", row.get("source"), "Tag")
             ctx.src_ranges.append(f"F{r}")
@@ -253,15 +254,15 @@ def write_sources(ctx: Ctx) -> None:
     L = ctx.lay["SO"]
     title_block(ws, "Sources", "One row per source ID: document, issue, page or sheet, location, text as read, method and confidence. "
                 "Every input in the workbook links here.", ctx)
-    heads = [("id", "Source ID", "", 13), ("doc", "Document", "", 44), ("issue", "Issue", "", 16), ("page", "Page or sheet", "", 14),
-             ("loc", "Location on the page", "", 30), ("text", "Text as read", "", 60), ("method", "Method", "", 34), ("conf", "Confidence", "", 10)]
+    heads = [("id", "Source ID", "", 13), ("doc", "Document", "", 44), ("issue", "Issue", "", 22), ("page", "Page or sheet", "", 22),
+             ("loc", "Location on the page", "", 30), ("text", "Text as read", "", 60), ("method", "Method", "", 34), ("conf", "Confidence", "", 13)]
     write_headers(ws, L, heads, 4, {"id": "SOURCE"})
     for i, s in enumerate(ctx.sources):
         g = lambda k: L.local(k, i)
         put(ws, g("id"), s["id"], "Tag")
         for k, f in (("doc", "document"), ("issue", "issue"), ("page", "page"), ("loc", "location"), ("text", "text_as_read"),
                      ("method", "method"), ("conf", "confidence")):
-            put(ws, g(k), s.get(f), "TextWrap" if k in ("doc", "loc", "text", "method") else "Text")
+            put(ws, g(k), s.get(f), "TextWrap" if k in ("doc", "issue", "page", "loc", "text", "method") else "Text")
     band_rows(ws, f"A{L.first}:{L.col('conf')}{L.last}")
     _setup(ws, ctx, L, L.idx["conf"], L.last, "4:6", f"B{L.first}", "FF7F7F7F")
 
@@ -296,11 +297,25 @@ def build_flag_rows(ctx: Ctx) -> List[Dict[str, Any]]:
         if blank(r.get("ceiling_height_m")):
             rows.append(dict(type="CONFIRM", ref=n, desc=f"Room {n} {r.get('name', '')}: ceiling height not found; volume and air-change airflow are zero until given.",
                              status="OPEN", owner="Marcus", src="", link=("Room Information", ctx.lay["RI"].local("h", gi))))
+    # one flag per design constant or table row, and one per room (or per room and sheet) for the room-level inputs
+    grouped: Dict[Any, List[Dict[str, Any]]] = {}
     for a in ctx.assumptions:
-        if a["sheet"] == "Basis of Design" and a["room"] == "":
-            pass
-        rows.append(dict(type="ASSUMPTION", ref=f"{a['sheet']}!{a['cell']}", desc=f"{a['label']} = {a['value']}: assumed, to confirm.",
-                         status="OPEN", owner="Marcus", src=a.get("src", ""), link=(a["sheet"], a["cell"])))
+        if a["sheet"] in ("Room Information", "Envelope") and a.get("room"):
+            grouped.setdefault((a["sheet"], a["room"]), []).append(a)
+            continue
+        if blank(a.get("value")):
+            desc = f"{a['label']}: not given by any document and left blank; set it before it is used."
+            typ = "CONFIRM"
+        else:
+            desc = f"{a['label']} = {a['value']}: assumed, to confirm."
+            typ = "ASSUMPTION"
+        rows.append(dict(type=typ, ref=f"{a['sheet']}!{a['cell']}", desc=desc, status="OPEN", owner="Marcus", src=a.get("src", ""),
+                         link=(a["sheet"], a["cell"])))
+    for (sheet, room), items in grouped.items():
+        what = ", ".join(f"{a['label'].replace('room ', '')} {a['value']}" for a in items)
+        who = f"Envelope segment {room}" if sheet == "Envelope" else f"Room {room}"
+        rows.append(dict(type="ASSUMPTION", ref=f"{sheet}!{room}", desc=f"{who}: assumed inputs, to confirm: {what}.",
+                         status="OPEN", owner="Marcus", src=items[0].get("src", ""), link=(sheet, items[0]["cell"])))
     return rows
 
 
@@ -332,8 +347,40 @@ def write_flags(ctx: Ctx, rows: List[Dict[str, Any]]) -> None:
         list_validation(ws, f"{L.col('status')}{L.first}:{L.col('status')}{L.last}", "ListFlagStatus")
         band_rows(ws, f"A{L.first}:{L.col('note')}{L.last}")
         cf_text(ws, f"{L.col('status')}{L.first}:{L.col('status')}{L.last}", f"{L.col('status')}{L.first}", "OPEN", bold=False, fill="FFFFF2CC")
-    # live outdoor-air rule row
-    AF = ctx.lay["AF"]
+    # live outdoor-air rule flags: one row per room the rule separates (CONFIRM) or lists for Marcus (VERIFY)
+    AF, AH, AH2, FC = ctx.lay["AF"], ctx.lay["AH"], ctx.lay["AH2"], ctx.lay["FC"]
+    for q in range(ctx.n_live):
+        i = len(rows) + q
+        g = lambda k: L.local(k, i)
+        kx = f"ROWS($A${L.row(len(rows))}:$A{L.row(i)})"          # position of this live row, 1 for the first
+        m = f"MATCH({kx},{AF.rng('flgrank')},0)"
+        used = f"{kx}<=MAX({AF.rng('flgrank')})"
+        pick = lambda k: f"INDEX({AF.rng(k)},{m})"
+        ahu = pick("ahu")
+        fm = f"MATCH({pick('no')},{FC.rng('no')},0)"
+        put(ws, g("id"), f'=IF({used},"F-"&TEXT(ROWS($A${L.first}:$A{L.row(i)}),"000"),"")', "Tag")
+        put(ws, g("type"), f'=IF({used},IF({pick("status")}="SEPARATE","CONFIRM","VERIFY"),"")', "Text")
+        put(ws, g("ref"), f'=IF({used},{pick("no")},"")', "Tag")
+        before = f"INDEX({AH.rng('oa_rule')},MATCH({ahu},{AH.rng('ahu')},0))"
+        after = f"INDEX({AH2.rng('oa_rule')},MATCH({ahu},{AH2.rng('ahu')},0))"
+        cb = f"INDEX({AH.rng('coil')},MATCH({ahu},{AH.rng('ahu')},0))"
+        ca = f"INDEX({AH2.rng('coil')},MATCH({ahu},{AH2.rng('ahu')},0))"
+        sb = f"INDEX({AH.rng('sa_ahu')},MATCH({ahu},{AH.rng('ahu')},0))"
+        sa = f"INDEX({AH2.rng('sa_ahu')},MATCH({ahu},{AH2.rng('ahu')},0))"
+        sep = (f'"Outdoor-air rule: separate room "&{pick("no")}&" ("&{pick("name")}&") from "&{ahu}&" onto a dedicated FCU. Its outdoor-air fraction "'
+               f'&TEXT({pick("frac")},"0.0%")&" on "&TEXT({pick("supply")},"0")&" L/s of supply sets the AHU fraction. AHU supply "&TEXT({sb},"0")&" to "'
+               f'&TEXT({sa},"0")&" L/s, outdoor air "&TEXT({before},"0")&" to "&TEXT({after},"0")&" L/s, coil duty "&TEXT({cb},"0.0")&" to "'
+               f'&TEXT({ca},"0.0")&" kW. FCU outdoor air from "&INDEX({FC.rng("oasrc")},{fm})&" ("&INDEX({FC.rng("oaby")},{fm})&", "'
+               f'&INDEX({FC.rng("oacond")},{fm})&"); source capacity "&INDEX({FC.rng("cap")},{fm})&". Proposal in zoning_change_proposals.csv; '
+               f'after Marcus approves, update the zone schedule and the zoning PDF and carry the FCU into Task 4."')
+        lst = (f'"Outdoor-air rule: room "&{pick("no")}&" ("&{pick("name")}&") sets the outdoor-air fraction of "&{ahu}&" with "'
+               f'&TEXT({pick("frac")},"0.0%")&" on a small share of the supply, but its criteria (air class, filtration, pressure, or fixed by '
+               f'specification) may not be met by an FCU: not separated, listed for Marcus."')
+        put(ws, g("desc"), f'=IF({used},IF({pick("status")}="SEPARATE",{sep},{lst}),"")', "TextWrap")
+        put(ws, g("status"), f'=IF({used},"OPEN","")', "Text")
+        put(ws, g("owner"), f'=IF({used},"Marcus","")', "Text")
+        put(ws, g("src"), None, "Tag")
+        put(ws, g("note"), None, "Note")
     r = L.last + 2
     put(ws, f"A{r}", "Live", "Tag")
     put(ws, f"D{r}", (f'="Outdoor-air rule: "&COUNTIF({AF.rng("status")},"SEPARATE")&" room(s) proposed for separation onto an FCU; "'
@@ -403,6 +450,10 @@ def write_checks(ctx: Ctx) -> None:
         ("Rooms whose final supply is below either airflow case or the pressure minimum", f'=COUNTIF({AF.rng("ok")},"FAIL")', 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
         ("Rooms whose outdoor air is below the air-change minimum", f"=SUMPRODUCT(--({AF.rng('oa')}<{AF.rng('oa_air')}))", 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
         ("Rooms whose outdoor air exceeds their supply", f"=SUMPRODUCT(--({AF.rng('oa')}>{AF.rng('supply')}))", 0, '=IF(C{r}=0,"PASS","FAIL")', "outdoor air is capped at supply; transfer air makes up the rest"),
+        ("Specified (MOT) rooms where the calculation needs more supply than specified", f'=COUNTIF({AF.rng("ok")},"SPECIFIED")', 0,
+         '=IF(C{r}=0,"PASS","VERIFY")', "specified airflows are not resized; listed for the MOT engineer"),
+        ("Specified (MOT) rooms whose specified offset is below the offset needed", f'=COUNTIF({AF.rng("off_chk")},"SHORT")', 0,
+         '=IF(C{r}=0,"PASS","VERIFY")', "offset needed beside the specified one (Pressure)"),
         ("Pressure-controlled rooms with a ratio below 1.0", f'=COUNTIF({PS.rng("status")},"FAIL")', 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
         ("Pressure-controlled rooms with a ratio from 1.0 to 1.2 (VERIFY)", f'=COUNTIF({PS.rng("status")},"VERIFY")', 0, '=IF(C{r}=0,"PASS","VERIFY")', ""),
         ("Free-pressure spaces whose balance does not close", f'=COUNTIF({PS.rng("status")},"UNSOLVED")', 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
@@ -430,7 +481,7 @@ def write_checks(ctx: Ctx) -> None:
         put(ws, f"A{r}", i + 1, "Text", "d0")
         put(ws, f"B{r}", desc, "Text")
         put(ws, f"C{r}", val, "Calc", "d1" if i == 0 else "d0")
-        put(ws, f"D{r}", lim if isinstance(lim, str) and lim.startswith("=") else lim, "Calc", "d1" if i in (0, 12) else "d0")
+        put(ws, f"D{r}", lim if isinstance(lim, str) and lim.startswith("=") else lim, "Calc", "d1" if (i == 0 or desc.startswith("AHU supply of rooms")) else "d0")
         if isinstance(lim, str) and not lim.startswith("="):
             ws[f"D{r}"].alignment = Alignment(horizontal="right")
         put(ws, f"E{r}", st.replace("{r}", str(r)), "Check")
@@ -453,7 +504,7 @@ def write_checks(ctx: Ctx) -> None:
 def write_readme(ctx: Ctx) -> None:
     ws = ctx.wb["README"]
     d = ctx.data
-    for col, w in zip("ABCDEFG", (2, 24, 40, 14, 14, 12, 12)):
+    for col, w in zip("ABCDEFG", (2, 24, 40, 44, 16, 14, 14)):
         ws.column_dimensions[col].width = w
     ws.column_dimensions["H"].width = 40
     put(ws, "B1", f"{d['department'].get('number', '')}  {d['department'].get('name', '')}", "Title")
@@ -541,6 +592,6 @@ def write_readme(ctx: Ctx) -> None:
     rev = d.get("project", {}).get("revision", {})
     for rv in d.get("revisions", [rev]):
         for col, k in zip("BCDEFG", ("rev", "date", "description", "by", "checked", "approved")):
-            put(ws, f"{col}{r}", rv.get(k), "Text")
+            put(ws, f"{col}{r}", rv.get(k), "TextWrap" if k == "description" else "Text")
         r += 1
     setup_sheet(ws, "README", rev=ctx.rev, date=ctx.date, project=ctx.project, print_rows="1:2", last_col=8, last_row=r, tab_colour="FF1F4E79")

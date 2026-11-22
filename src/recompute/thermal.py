@@ -374,8 +374,10 @@ def _apply_airflow(res: Dict[str, Any], c: Dict[str, Any], pres: Optional[Dict[s
         else:
             governing = "exhaust_pressure"
     step = c["supplyrounding"]
-    supply = supply_raw if res["fixed_by_specification"] else _roundup(supply_raw, step)
-    if kind == "exhaust":
+    supply = supply_raw if governing == "specified" else _roundup(supply_raw, step)
+    if res["fixed_by_specification"] and res["exhaust_specified"] and exh_req > 0:
+        exhaust = exh_req         # specified airflows are not resized; the offset needed is reported beside them
+    elif kind == "exhaust":
         exhaust = max(supply + offset, exh_req)
     elif kind == "supply":
         exhaust = max(supply - offset, 0.0)
@@ -395,6 +397,8 @@ def _apply_airflow(res: Dict[str, Any], c: Dict[str, Any], pres: Optional[Dict[s
     res.update({
         "supply_lps_unrounded": supply_raw, "supply_lps": supply, "exhaust_lps": exhaust,
         "offset_lps": offset, "offset_kind": kind, "oa_lps": oa,
+        "offset_specified_lps": ((exhaust - supply) if kind == "exhaust" else (supply - exhaust))
+        if (res["fixed_by_specification"] and kind) else None,
         "oa_fraction": oa / supply if supply > 0 else 0.0,
         "governing_case": governing,
         "case_margin_thermal_vs_air_change_lps": thermal - minimum,

@@ -25,6 +25,7 @@ PS_HEAD = {
     "fix_out": ("Fixed transfer out", "m³/h", 9), "air_in": ("Air in", "m³/h", 9), "air_out": ("Air out", "m³/h", 9),
     "kindoff": ("Offset kind", "", 10), "needed": ("Offset needed", "m³/h", 9), "design": ("Design offset", "m³/h", 9),
     "tighter": ("Offset of a tighter room", "m³/h", 9), "ratio": ("Ratio design / needed", "–", 8), "status": ("Status", "", 9),
+    "spec_off": ("Offset as specified (MOT, not resized)", "m³/h", 11), "spec_chk": ("Specified offset against needed", "", 11),
     "off_lps": ("Offset needed", "L/s", 9), "design_lps": ("Design offset", "L/s", 9),
     "needed_n50": ("Offset needed, n = 0.50", "m³/h", 9), "needed_n75": ("Offset needed, n = 0.75", "m³/h", 9),
     "needed_g2": ("Offset needed, gaps × 2", "m³/h", 9), "ratio_n50": ("Ratio, n = 0.50", "–", 8),
@@ -151,6 +152,9 @@ def write_pressure(ctx: Ctx) -> None:
         put(ws, g("ratio"), f'=IF({g("needed")}>OffsetEps,{g("design")}/{g("needed")},"n/a")', "Calc", "d2")
         put(ws, g("status"), f'=IF(ISNUMBER({g("ratio")}),IF({g("ratio")}<RatioFail,"FAIL",IF(OR({g("ratio")}<RatioVerify,{raw}<-OffsetEps),'
                              f'"VERIFY","PASS")),"PASS")', "Check")
+        fx = ctx.lay["AF"].addr("fix", gi)
+        put(ws, g("spec_off"), f'=IF({fx}=1,IF({g("kindoff")}="EXHAUST",{g("exhaust")}-{g("supply")},{g("supply")}-{g("exhaust")}),"")', "Calc", "d1")
+        put(ws, g("spec_chk"), f'=IF(ISNUMBER({g("spec_off")}),IF({g("spec_off")}>={g("needed")}-OffsetEps,"OK","SHORT"),"")', "Check")
         put(ws, g("off_lps"), f"={g('needed')}/ConvM3hPerLps", "Calc", "d1")
         put(ws, g("design_lps"), f"={g('design')}/ConvM3hPerLps", "Calc", "d1")
         gapnet = f"({g('gap_in')}+{g('fix_in')}-{g('gap_out')}-{g('fix_out')})"
@@ -182,9 +186,10 @@ def write_pressure(ctx: Ctx) -> None:
             put(ws, c, f, "Calc", "d3")
         put(ws, g("upa"), f"={g(f'u{NBIS}')}", "Calc", "d1")
     last = PS.last
-    for k in ("status", "flag_s"):
+    for k in ("status", "flag_s", "spec_chk"):
         cf_text(ws, f"{PS.col(k)}{PS.first}:{PS.col(k)}{last}", f"{PS.col(k)}{PS.first}", "FAIL")
         cf_text(ws, f"{PS.col(k)}{PS.first}:{PS.col(k)}{last}", f"{PS.col(k)}{PS.first}", "UNSOLVED")
+        cf_text(ws, f"{PS.col(k)}{PS.first}:{PS.col(k)}{last}", f"{PS.col(k)}{PS.first}", "SHORT")
         cf_text(ws, f"{PS.col(k)}{PS.first}:{PS.col(k)}{last}", f"{PS.col(k)}{PS.first}", "VERIFY", fill="FFFFF2CC")
         cf_text(ws, f"{PS.col(k)}{PS.first}:{PS.col(k)}{last}", f"{PS.col(k)}{PS.first}", "FLAG", fill="FFFFF2CC")
     band_rows(ws, f"A{PS.first}:{PS.col('note')}{last}")

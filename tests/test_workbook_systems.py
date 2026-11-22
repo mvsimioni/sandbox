@@ -101,12 +101,16 @@ def test_ahu_before_and_after_separation(oa):
 
 
 def test_fcu_tab_lists_separated_room_with_oa_coil(oa):
+    from src.workbook.layouts import FCU_KEYS
     rows = _rows(oa["rc"], "FCU")
-    first = rows[0]
-    assert first[1] == "M1"
-    assert first[4] == "OA RULE"
-    assert first[18] and first[18] > first[6] + first[7]   # coil duty includes the outdoor air
-    assert "NOT SET" in first[20]                            # outdoor-air source not chosen yet: flagged
+    first = dict(zip(FCU_KEYS, rows[0]))
+    assert first["no"] == "M1"
+    assert first["why"] == "OA RULE"
+    assert first["coil"] and first["coil"] > first["sens_kw"] + first["lat_kw"]   # coil duty includes the outdoor air
+    # no source on the room: the outdoor-air fan that serves its AHU on Fans is proposed, untreated, and flagged to confirm
+    assert first["oasrc"] == "OAF-1" and first["oaby"] == "FANS DEFAULT" and first["oacond"] == "UNTREATED"
+    assert first["cap"] in ("PASS", "FAIL")                      # capacity of the source with the added airflow is tested
+    assert "CONFIRM" in first["flag"]
 
 
 def test_fans_vav_venturi_comparison_flow_balance(oa):

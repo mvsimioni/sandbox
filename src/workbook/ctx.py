@@ -40,6 +40,7 @@ DEFAULTS: Dict[str, Tuple] = {
     "ConvM3hPerLps": ("Conversion, m³/h per L/s", 3.6, "–", "S", "GEN-ENGINE", "unit conversion"),
     "SecPerHour": ("Seconds per hour", 3600, "s", "S", "GEN-PRESSURE", "door-gap equation"),
     "WperkW": ("Watts per kilowatt", 1000, "W", "S", "GEN-ENGINE", "unit conversion"),
+    "LperM3": ("Litres per cubic metre", 1000, "L", "S", "GEN-ENGINE", "unit conversion: airflow L/s to m³/s"),
     "PercentBase": ("Occupancy density base (persons per 100 m²)", 100, "m²", "S", "GEN-ENGINE", "unit conversion"),
     "RoundTo": ("Rounding of final supply (ROUNDUP digits; −1 = 10 L/s)", -1, "digits", "S", "GEN-ENGINE",
                 "as the example"),
@@ -92,7 +93,7 @@ OPTIONAL_BLANK = {
 GROUPS = [
     ("Load method", ["SafetyFactor", "SupplyTemp", "InfiltrationACH", "RoofSolarGain", "OutdoorDB", "OutdoorWB", "OutdoorH",
                      "AirSensibleFactor", "AirDensity", "AirLatentFactor", "RoundTo", "AreaDecimals", "ConvM3hPerLps", "PercentBase",
-                     "WperkW"]),
+                     "WperkW", "LperM3"]),
     ("AHU totalisation", ["DuctLeakage", "FanPressure", "FanEfficiency", "OAShare", "OADrop", "PAHUOffT", "PAHUOffH"]),
     ("Pressure method", ["AirtightLimit", "TighterLimit", "FlowN", "FlowNLow", "FlowNHigh", "DoorCd", "RefPressure",
                          "RatioFail", "RatioVerify", "ApplyFromPa", "SecPerHour", "MMperM", "CM2perM2", "GapSides",

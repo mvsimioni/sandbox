@@ -97,7 +97,8 @@ def _prepare(ctx: Ctx) -> None:
     ctx.terminals = terminals
     ctx.valves = list(d.get("valves", []))
     ctx.references = list(d.get("references", []))
-    ctx.n_fcu_rows = min(len(ctx.rooms), 10)
+    n_sys_fcu = sum(1 for r in ctx.rooms if str(r.get("system_type") or "").upper() == "FCU")
+    ctx.n_fcu_rows = min(len(ctx.rooms), n_sys_fcu + 4 * max(1, len(ctx.ahus)))   # 4 = outdoor-air rule rounds
 
 
 def build_workbook(data: Union[Dict[str, Any], Path, str], out: Optional[Path] = None) -> Ctx:
@@ -132,8 +133,9 @@ def build_workbook(data: Union[Dict[str, Any], Path, str], out: Optional[Path] =
     SS.write_comparison(ctx)
     SB.write_sources(ctx)
     rows = SB.build_flag_rows(ctx)
-    ctx.n_flags = len(rows)
-    ctx.lay["FL"] = Layout("Flags", ["id", "type", "ref", "desc", "status", "owner", "src", "note"], 7, len(rows))
+    ctx.n_live = min(len(ctx.rooms), 4 * len(ctx.ahus))       # outdoor-air rule: one live flag per separated or listed room
+    ctx.n_flags = len(rows) + ctx.n_live
+    ctx.lay["FL"] = Layout("Flags", ["id", "type", "ref", "desc", "status", "owner", "src", "note"], 7, ctx.n_flags)
     SB.write_checks(ctx)
     SB.write_readme(ctx)
     SB.write_flags(ctx, rows)
