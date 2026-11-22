@@ -7,7 +7,14 @@ Inputs (all read-only):
 * the pull ledger ``state/pull_ledger.jsonl`` (plus ``state/upload_ledger.jsonl``
   when files were uploaded by hand),
 * the pull plan ``state/pull_plan.csv`` (for connector-limit blocks),
-* ``state/unstable_departments.json`` when the lister produced one.
+* ``state/unstable_departments.json`` when the lister produced one,
+* ``drive.transport`` from ``config/project.yaml`` (``--transport`` overrides it):
+  the connector size limit only blocks files on the connector transport.
+
+Integrity checks on the way: a file whose Drive size or md5 moved since it
+was fetched is reported as a stale pull (``pulled=n``), a Drive id listed
+twice only inherits a ledger record whose path matches, and oversize files
+that the pull plan never saw are still flagged.
 
 Outputs:
 
@@ -80,6 +87,12 @@ SKIPPED_ZIP_COLUMNS: Tuple[str, ...] = ("rel_path", "bytes", "parent_folder", "d
 
 EXPECTED_DEPARTMENTS = 50
 PROBABLE_DUP_NOTE = "probable duplicate (size+name)"
+BLOCKED_NOTE = "blocked: connector limit"
+OVER_LIMIT_NOTE = "over connector limit (rclone transport: not blocked)"
+STALE_NOTE = "stale pull"
+DUPLICATE_ID_NOTE = "duplicate Drive id in listing"
+TRANSPORTS: Tuple[str, ...] = ("connector", "rclone")
+PLAN_BLOCKED_STATUS = "blocked_connector_limit"
 
 _DEPT_FOLDER_RE = re.compile(r"^(?:__)?(\d{2})\s*-\s*(.+)$")
 _FILE_NUMBER_RE = re.compile(r"^(\d{1,2})(?=[\s_\-.])")
@@ -198,15 +211,42 @@ def load_ledger(state_dir: Path) -> Dict[str, Dict[str, Any]]:
     return index
 
 
-def ledger_lookup(ledger: Dict[str, Dict[str, Any]], drive_id: str, rel_path: str) -> Optional[Dict[str, Any]]:
-    """Find the ledger record for a file, preferring the Drive id over the path."""
-    return ledger.get("id:" + str(drive_id)) or ledger.get("path:" + rel_path)
+def ledger_lookup(ledger: Dict[str, Dict[str, Any]], drive_id: str, rel_path: str,
+                  unique_id: bool = True) -> Optional[Dict[str, Any]]:
+    """Find the ledger record for a file, preferring the Drive id over the path.
+
+    When the listing carries the same Drive id more than once (``unique_id`` is
+    False) the id record is accepted only if its ``rel_path`` matches, so a
+    second entry never inherits a fetch made for the first. The path fallback
+    is used only for records without a Drive id or with the same one.
+    """
+    record = ledger.get("id:" + str(drive_id)) if drive_id else None
+    if record is not None and (unique_id or str(record.get("rel_path") or rel_path) == rel_path):
+        return record
+    by_path = ledger.get("path:" + rel_path)
+    if by_path is None or (by_path.get("drive_id") and str(by_path["drive_id"]) != str(drive_id)):
+        return None
+    return by_path
+
+
+def load_plan(state_dir: Path) -> Dict[str, str]:
+    """``{drive_id: status}`` from the pull plan (empty when there is no plan)."""
+    rows = read_csv_dicts(state_dir / "pull_plan.csv")
+    return {str(row["drive_id"]): str(row.get("status") or "") for row in rows if row.get("drive_id")}
 
 
 def load_blocked_ids(state_dir: Path) -> set[str]:
     """Drive ids the pull plan marks ``blocked_connector_limit`` (empty when there is no plan)."""
-    rows = read_csv_dicts(state_dir / "pull_plan.csv")
-    return {row.get("drive_id", "") for row in rows if row.get("status") == "blocked_connector_limit"}
+    return {drive_id for drive_id, status in load_plan(state_dir).items() if status == PLAN_BLOCKED_STATUS}
+
+
+def configured_transport(override: Optional[str] = None) -> str:
+    """The pull transport: ``override`` when given, else ``drive.transport`` from the config."""
+    value = override or str((load_config().get("drive", {}) or {}).get("transport") or "connector")
+    value = value.strip().lower()
+    if value not in TRANSPORTS:
+        raise ValueError(f"unknown transport '{value}' (expected one of {', '.join(TRANSPORTS)})")
+    return value
 
 
 def load_unstable(state_dir: Path) -> Any:
@@ -286,12 +326,51 @@ def _base_row(rec: Dict[str, Any]) -> Dict[str, Any]:
         "_title": title,
         "_stray": dept["stray"],
         "_blocked": False,
+        "_over_limit": False,
+        "_has_size": rec.get("fileSize") not in (None, ""),
+        "_stale": "",
+        "_moved_from": "",
+        "_id_count": 1,
     }
+
+
+def stale_reasons(row: Dict[str, Any], record: Dict[str, Any]) -> List[str]:
+    """Why the listing no longer matches the fetched copy: Drive size or md5 moved since the fetch.
+
+    The ledger ``bytes`` equal Drive's size at fetch time only when ``size_match``
+    was not False, and ``drive_md5`` (else the local ``md5`` when ``md5_match``
+    was not False) stands for Drive's md5 at fetch time; nothing else is compared.
+    """
+    reasons: List[str] = []
+    fetched_bytes = record.get("bytes")
+    if row["_has_size"] and fetched_bytes not in (None, "") and record.get("size_match") is not False:
+        if _to_int(fetched_bytes) != row["bytes"]:
+            reasons.append(f"Drive size {_to_int(fetched_bytes)} at fetch, now {row['bytes']}")
+    fetched_md5 = str(record.get("drive_md5") or "")
+    if not fetched_md5 and record.get("md5_match") is not False:
+        fetched_md5 = str(record.get("md5") or "")
+    if row["drive_md5"] and fetched_md5 and row["drive_md5"] != fetched_md5:
+        reasons.append("Drive md5 changed since fetch")
+    return reasons
 
 
 def _apply_ledger(row: Dict[str, Any], record: Optional[Dict[str, Any]], root_dir: Path) -> None:
     """Fill ``sha256``/``pulled`` from the ledger record and note any integrity problems."""
     if record is None or row["doc_class"] == "zip":
+        return
+    ledger_path = str(record.get("rel_path") or "")
+    if ledger_path and ledger_path != row["rel_path"]:
+        row["_moved_from"] = ledger_path
+        row["notes"].append(f"moved or renamed since fetch (ledger path: {ledger_path})")
+    stale = stale_reasons(row, record)
+    if stale:
+        # The local copy is a superseded version: report it unpulled, keep its hash out of
+        # the duplicate matching and say what moved so the pull can be repeated.
+        row["_stale"] = "; ".join(stale)
+        row["pulled"] = "n"
+        row["sha256"] = ""
+        row["notes"].append(f"{STALE_NOTE} ({row['_stale']}; local sha256 "
+                            f"{str(record.get('sha256') or '')[:12]} superseded, re-pull needed)")
         return
     row["sha256"] = str(record.get("sha256") or "")
     row["pulled"] = "y"
@@ -309,15 +388,27 @@ def _apply_ledger(row: Dict[str, Any], record: Optional[Dict[str, Any]], root_di
         row["notes"].append("local file missing")
 
 
-def _apply_blocked(row: Dict[str, Any], blocked_ids: set[str]) -> None:
-    """Mark files the connector transport cannot fetch."""
+def _apply_blocked(row: Dict[str, Any], plan: Dict[str, str], transport: str) -> None:
+    """Mark unpulled files over the connector limit (per plan or per listing size).
+
+    The size rule runs for every unpulled file, so a file that grew or appeared
+    after the plan was written is still caught. On the rclone transport nothing
+    is blocked; oversize files only get an informational note.
+    """
     if row["doc_class"] == "zip" or row["pulled"] == "y":
         return
-    plan_blocked = row["drive_id"] in blocked_ids
-    too_big = not blocked_ids and row["bytes"] > CONNECTOR_LIMIT_BYTES
-    if plan_blocked or too_big:
+    if plan and row["drive_id"] not in plan:
+        row["notes"].append("not in pull plan")
+    plan_blocked = plan.get(row["drive_id"]) == PLAN_BLOCKED_STATUS
+    too_big = row["bytes"] > CONNECTOR_LIMIT_BYTES
+    if not (plan_blocked or too_big):
+        return
+    if transport == "connector":
         row["_blocked"] = True
-        row["notes"].append("blocked: connector limit")
+        row["notes"].append(BLOCKED_NOTE)
+    else:
+        row["_over_limit"] = True
+        row["notes"].append(OVER_LIMIT_NOTE)
 
 
 def assign_duplicates(rows: List[Dict[str, Any]]) -> None:
@@ -348,14 +439,19 @@ def assign_duplicates(rows: List[Dict[str, Any]]) -> None:
             break
 
 
-def build_rows(listing: Dict[str, Any], ledger: Dict[str, Dict[str, Any]], blocked_ids: set[str],
-               root_dir: Path) -> List[Dict[str, Any]]:
+def build_rows(listing: Dict[str, Any], ledger: Dict[str, Dict[str, Any]], plan: Dict[str, str],
+               root_dir: Path, transport: str = "connector") -> List[Dict[str, Any]]:
     """Assemble every manifest row (with private ``_`` helper keys) sorted by ``rel_path``."""
     rows = [_base_row(rec) for rec in listing["files"]]
     rows.sort(key=lambda r: (r["rel_path"], r["drive_id"]))
+    id_counts = Counter(r["drive_id"] for r in rows if r["drive_id"])
     for row in rows:
-        _apply_ledger(row, ledger_lookup(ledger, row["drive_id"], row["rel_path"]), root_dir)
-        _apply_blocked(row, blocked_ids)
+        row["_id_count"] = id_counts.get(row["drive_id"], 1)
+        if row["_id_count"] > 1:
+            row["notes"].append(f"{DUPLICATE_ID_NOTE} ({row['_id_count']} entries)")
+        record = ledger_lookup(ledger, row["drive_id"], row["rel_path"], unique_id=row["_id_count"] == 1)
+        _apply_ledger(row, record, root_dir)
+        _apply_blocked(row, plan, transport)
     assign_duplicates(rows)
     return rows
 
@@ -589,11 +685,17 @@ def _section_cross_stage(rows: List[Dict[str, Any]]) -> List[str]:
     return lines + [""]
 
 
-def _section_blocked(rows: List[Dict[str, Any]]) -> List[str]:
+def _section_blocked(rows: List[Dict[str, Any]], transport: str = "connector") -> List[str]:
     """Files the connector transport cannot fetch, by root and department."""
     lines = [f"## 8. Files blocked by the connector limit ({CONNECTOR_LIMIT_BYTES:,} bytes)", ""]
     blocked = [r for r in rows if r["_blocked"]]
-    lines.append(f"Blocked files: {len(blocked)}, total {_fmt_bytes(sum(r['bytes'] for r in blocked))}.")
+    over = [r for r in rows if r["_over_limit"]]
+    lines.append(f"Transport: {transport}. Blocked files: {len(blocked)}, "
+                 f"total {_fmt_bytes(sum(r['bytes'] for r in blocked))}.")
+    if transport != "connector":
+        lines.append(f"rclone has no size limit: {len(over)} unpulled files over the connector limit "
+                     f"({_fmt_bytes(sum(r['bytes'] for r in over))}) would be blocked only if the transport "
+                     "reverted to the connector.")
     lines.append("")
     agg: Dict[Tuple[str, str, str], List[int]] = defaultdict(lambda: [0, 0])
     for r in blocked:
@@ -627,8 +729,32 @@ def _section_unstable(unstable: Any) -> List[str]:
     return lines + [""]
 
 
+def _section_integrity(rows: List[Dict[str, Any]], plan: Dict[str, str]) -> List[str]:
+    """Duplicate Drive ids, stale pulls, moved files and files the pull plan never saw."""
+    lines = ["## 10. Listing integrity (duplicate ids, stale pulls, plan coverage)", ""]
+    dup_ids = [r for r in rows if r["_id_count"] > 1]
+    stale = [r for r in rows if r["_stale"]]
+    moved = [r for r in rows if r["_moved_from"]]
+    unplanned = [r for r in rows if plan and r["doc_class"] != "zip" and r["drive_id"] not in plan]
+    lines.append(f"Drive ids listed more than once: {len({r['drive_id'] for r in dup_ids})} "
+                 f"({len(dup_ids)} entries); stale pulls: {len(stale)}; moved or renamed since fetch: "
+                 f"{len(moved)}; files absent from the pull plan: "
+                 f"{len(unplanned) if plan else 'n/a (no plan)'}.")
+    lines += ["", "### Duplicate Drive ids", ""]
+    lines += _md_table(["drive_id", "rel_path", "bytes", "pulled"],
+                       [(r["drive_id"], r["rel_path"], r["bytes"], r["pulled"]) for r in dup_ids])
+    lines += ["", "### Stale pulls (Drive size or md5 moved since the fetch)", ""]
+    lines += _md_table(["rel_path", "bytes", "reason"], [(r["rel_path"], r["bytes"], r["_stale"]) for r in stale])
+    lines += ["", "### Moved or renamed since the fetch", ""]
+    lines += _md_table(["rel_path", "ledger path"], [(r["rel_path"], r["_moved_from"]) for r in moved])
+    lines += ["", "### Files absent from the pull plan", ""]
+    lines += _md_table(["rel_path", "bytes", "pulled"], [(r["rel_path"], r["bytes"], r["pulled"]) for r in unplanned])
+    return lines + [""]
+
+
 def render_report(rows: List[Dict[str, Any]], zips: List[Dict[str, Any]], tree: FolderTree,
-                  listing: Dict[str, Any], unstable: Any) -> str:
+                  listing: Dict[str, Any], unstable: Any, transport: str = "connector",
+                  plan: Optional[Dict[str, str]] = None) -> str:
     """Assemble ``inventory_anomalies.md``."""
     head = [
         "# Inventory anomalies",
@@ -639,7 +765,7 @@ def render_report(rows: List[Dict[str, Any]], zips: List[Dict[str, Any]], tree: 
     ]
     body = (_section_counts(rows) + _section_departments(tree) + _section_zips(zips) + _section_zip_twins(rows)
             + _section_strays(rows, tree, listing) + _section_aliases(rows) + _section_cross_stage(rows)
-            + _section_blocked(rows) + _section_unstable(unstable))
+            + _section_blocked(rows, transport) + _section_unstable(unstable) + _section_integrity(rows, plan or {}))
     return "\n".join(head + body).rstrip() + "\n"
 
 
@@ -647,29 +773,33 @@ def render_report(rows: List[Dict[str, Any]], zips: List[Dict[str, Any]], tree: 
 # Build / summary
 # --------------------------------------------------------------------------- #
 def build(state_dir: Path, registers_dir: Path, qa_dir: Path, root_dir: Path,
-          listing_path: Optional[Path] = None) -> Dict[str, Any]:
+          listing_path: Optional[Path] = None, transport: Optional[str] = None) -> Dict[str, Any]:
     """Build manifest, skipped-zip register and anomaly report; return a small summary."""
+    mode = configured_transport(transport)
     listing = load_listing(resolve_listing_path(state_dir, listing_path))
     tree = FolderTree(listing["folders"])
-    rows = build_rows(listing, load_ledger(state_dir), load_blocked_ids(state_dir), root_dir)
+    plan = load_plan(state_dir)
+    rows = build_rows(listing, load_ledger(state_dir), plan, root_dir, mode)
     zips = skipped_zip_rows(rows)
     manifest_path = write_csv_dicts(registers_dir / "manifest.csv", public_rows(rows), MANIFEST_COLUMNS)
     write_csv_dicts(registers_dir / "skipped_zip.csv", zips, SKIPPED_ZIP_COLUMNS)
     report_path = atomic_write_text(qa_dir / "inventory_anomalies.md",
-                                    render_report(rows, zips, tree, listing, load_unstable(state_dir)))
+                                    render_report(rows, zips, tree, listing, load_unstable(state_dir), mode, plan))
     digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     Progress(state_dir / "progress.json").set("manifest", "done", hash=digest, listing=listing["path"],
-                                              files=len(rows), zips=len(zips))
+                                              files=len(rows), zips=len(zips), transport=mode)
     return {"files": len(rows), "zips": len(zips), "pulled": sum(r["pulled"] == "y" for r in rows),
             "duplicates": sum(bool(r["duplicate_of"]) for r in rows), "blocked": sum(r["_blocked"] for r in rows),
+            "stale": sum(bool(r["_stale"]) for r in rows), "transport": mode,
             "manifest": str(manifest_path), "report": str(report_path)}
 
 
 def summary(registers_dir: Path) -> Dict[str, Any]:
-    """Counts from an existing ``manifest.csv``."""
-    rows = read_csv_dicts(registers_dir / "manifest.csv")
-    if not rows:
-        raise FileNotFoundError(f"no manifest at {registers_dir / 'manifest.csv'}; run 'build' first")
+    """Counts from an existing ``manifest.csv`` (an empty manifest is valid and yields zeros)."""
+    path = registers_dir / "manifest.csv"
+    if not path.is_file():
+        raise FileNotFoundError(f"no manifest at {path}; run 'build' first")
+    rows = read_csv_dicts(path)
     return {
         "files": len(rows),
         "by_root": dict(sorted(Counter(r["root"] for r in rows).items())),
