@@ -16,7 +16,7 @@ drive:
   rclone_remotes:
     source: {name: aigh_src, scope: drive.readonly}
     markdown: {name: aigh_md, scope: drive, root_folder_id: 1LM7Days62cbiHH81n31WOPq9AwKKuHK9}
-  transport: connector      # connector | rclone. rclone needs a credential path Marcus has not yet chosen (decisions_needed D-001)
+  transport: connector      # D-001 decided 22 Nov 2026: connector only; files up to 10 MB; RLS and RDS first; nothing over 10 MB pursued
   exclude: ["*.zip"]
   listing_interval_minutes: 15   # two listings; a changed department is "unstable"
 
@@ -49,7 +49,7 @@ precedence:   # Section 11 item 2, CONFIRM
       scope: 16 DI units of memo Table 1 (L4 Diagnostic Imaging)
       rule: air-side schematics (Corr 5) and the RFI-ME-0233 zoning govern tags, zoning, airflows and AHU levels over SCH005
       crossref: out/registers/tag_crossref_rfi_me_0233.csv
-      extend_to_all_departments: pending   # decision D-006
+      extend_to_all_departments: false   # D-006 decided: DI only; elsewhere schedule and schematics should agree, differences listed
   stray_folders: {governs: "29 - Lab", compare_by_hash: ["__29 - Lab", "__29 - Lab"]}
 
 chilled_water:   # RFI-ME-0233 memo s1, s4; PS ACMV Corr 7 PS/10 (cited by the memo)
@@ -101,6 +101,9 @@ workbook:
   banned_functions: [XLOOKUP, FILTER, UNIQUE, SORT, SEQUENCE]
 
 zoning:
+  background_revision: latest available corrigendum per sheet   # Marcus 22 Nov 2026
+  zone_lower_basement_3: true
+  mezzanines: per the stacking diagram
   output: out/zoning/AIGH_IP_AHU_Zoning_Consolidated.pdf
   fill_opacity: 0.35
   reserved_colour: pure red (review mark-ups only)
