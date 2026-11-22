@@ -124,3 +124,9 @@ models:   # baseline tiers, Section 4.2; the allocation specialist confirms from
   drive_listing: {model: haiku, effort: low}
   connector_pull: {model: sonnet, effort: low}
   rule: every agent call names its model; none inherits the session model
+
+# D-008 (Marcus, 2026-11-22): department folders processed for RDS and SOA only.
+department_scope:
+  process: [RDS, SOA]
+  also_processed: [short_dd_booklets, basis]
+  not_processed: [RLS, SoE, medical_equipment_list, records_of_engagement, dwg_list, other]

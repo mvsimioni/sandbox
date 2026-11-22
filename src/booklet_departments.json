@@ -127,6 +127,79 @@
     "5. Equipment Schedules (Corr 5).pdf": {
       "booklet": false,
       "reason": "not a booklet"
+    },
+    "IGH_DD Booklet_Dental_BATCH 1.pdf": {
+      "booklet": true,
+      "dept_no": "17",
+      "dept_title": "17 - Outpatient - Surgical, Dental",
+      "department_label": "Dental"
+    },
+    "IGH_DD Booklet_ENT_DPE comments.pdf": {
+      "booklet": true,
+      "dept_no": "18",
+      "dept_title": "18 - Outpatient - Surgical, ENT",
+      "department_label": "ENT"
+    },
+    "IGH_DD Booklet_Eye_BATCH 1.pdf": {
+      "booklet": true,
+      "dept_no": "19",
+      "dept_title": "19 - Outpatient - Surgical, Eye",
+      "department_label": "Eye"
+    },
+    "IGH_DD Booklet_HFL_OCP_DPE comments.pdf": {
+      "booklet": true,
+      "dept_no": "20",
+      "dept_title": "20 - Outpatient - Health for Life",
+      "department_label": "Health for Life"
+    },
+    "DD Booklet_MSOT_BATCH 1.pdf": {
+      "booklet": true,
+      "dept_no": "22",
+      "dept_title": "22 - MOT DSOT ASW Sleep Lab",
+      "department_label": "Major Operating Theatre"
+    },
+    "DD Booklet_DSOT_BATCH 1.pdf": {
+      "booklet": true,
+      "dept_no": "22",
+      "dept_title": "22 - MOT DSOT ASW Sleep Lab",
+      "department_label": "Day Surgery Operating Theatre"
+    },
+    "DD Booklet_AMSC_BATCH 1.pdf": {
+      "booklet": true,
+      "dept_no": "22",
+      "dept_title": "22 - MOT DSOT ASW Sleep Lab",
+      "department_label": "Ambulatory Surgical Centre",
+      "note": "Cover reads AMBULATORY SURGICAL CENTRE; mapped to 22 (ASW) by folder name, to confirm"
+    },
+    "DD Booklet_Endo_BATCH 1.pdf": {
+      "booklet": true,
+      "dept_no": "23",
+      "dept_title": "23 - Endoscopy",
+      "department_label": "Endoscopy"
+    },
+    "IGH_DD Booklet_Rehab AHP_BATCH 2.pdf": {
+      "booklet": true,
+      "dept_no": "24",
+      "dept_title": "24 - Rehabilitation Services AHP",
+      "department_label": "Rehabilitation Services AHP"
+    },
+    "DD Booklet_CATH_BATCH 1.pdf": {
+      "booklet": true,
+      "dept_no": "28",
+      "dept_title": "28 - Cath Lab",
+      "department_label": "Cath Lab"
+    },
+    "DD Booklet_LabMed_BATCH 2.pdf": {
+      "booklet": true,
+      "dept_no": "29",
+      "dept_title": "29 - Lab",
+      "department_label": "Laboratory Medicine"
+    },
+    "20260129_AIGH_ETTV_Report.pdf": {
+      "booklet": false,
+      "dept_no": null,
+      "dept_title": null,
+      "department_label": "ETTV report (envelope)"
     }
   }
 }
