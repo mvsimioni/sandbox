@@ -181,3 +181,37 @@ occupancy:
   rds_register: out/registers/rds_rooms.csv
   reading_rule: "sum of upper bounds of patients + staff + visitors as printed; n/a or 0 -> 0; blank -> next source"
   rule_status: ASSUMPTION
+
+# D-017 (Marcus, 22 Nov 2026): occupancy fallback (no RDS, no booklet) = area x default density by room use.
+# Values per 100 m2: ASHRAE 62.1 Table 6.2.2.1 default occupant density (health-care rows: ASHRAE 62.1-2007).
+# All values VERIFY against the issued standard (edition to confirm). Cell text red, note in Remarks.
+  density_default:
+    style: {font_colour: "FFC00000", named_style: Assumption-Occupancy, code: A}
+    remarks_template: "Occupancy assumed: {density} p/100 m2 x {area} m2 = {people} (ASHRAE 62.1 Table 6.2.2.1, {use}). No RDS value. To confirm."
+    rounding: up_to_whole_person
+    per_100m2:
+      office: 5
+      reception_waiting: 30
+      conference_meeting: 50
+      main_entry_lobby: 10
+      break_room_pantry: 25
+      lecture_classroom: 65
+      lecture_hall_fixed_seats: 150
+      classroom_training: 35
+      computer_lab: 25
+      laboratory: 25
+      pharmacy_prep: 10
+      retail_sales: 15
+      kitchen_cooking: 20
+      cafeteria_dining: 100
+      telephone_data_entry: 60
+      patient_room: 10
+      medical_procedure: 20
+      operating_room: 20
+      recovery_icu: 20
+      physical_therapy: 20
+      corridor_circulation: 0
+      storage: 0
+      toilet: 0
+      plant_room: 0
+    status: VERIFY
