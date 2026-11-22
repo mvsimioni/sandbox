@@ -216,3 +216,9 @@ occupancy:
       toilet: 0
       plant_room: 0
     status: VERIFY
+
+# D-019 (Marcus, 22 Nov 2026): ceiling height from the RLS only (narrow exception to D-008), per room type; else flagged default.
+ceiling_height:
+  source_order: [rls, flagged_default]
+  rls_pattern: "CH\\s*=\\s*(\\d{4})"
+  flagged_default_m: 3.0
