@@ -174,3 +174,10 @@ deliverable_language:
   forbidden_terms: [Claude, Anthropic, AI, model, agent, subagent, workflow, council, gate, pipeline, "method A", "method B", register, LLM, Fable, Opus, Sonnet, Haiku, prompt, script, MarkItDown]
   text_gates: [ste-lint-gate, humanizer, remove-ai-marks]
   cite_sources_as: "document, issue, sheet/page"
+
+# D-016 (Marcus, 22 Nov 2026): occupancy (number of people) from the RDS first, then booklet, then density default (flagged).
+occupancy:
+  source_order: [rds, booklet, density_default]
+  rds_register: out/registers/rds_rooms.csv
+  reading_rule: "sum of upper bounds of patients + staff + visitors as printed; n/a or 0 -> 0; blank -> next source"
+  rule_status: ASSUMPTION
