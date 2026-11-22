@@ -116,6 +116,11 @@ def pull_ledger_path() -> Path:
     return state_dir() / "pull_ledger.jsonl"
 
 
+def upload_ledger_path() -> Path:
+    """``state/upload_ledger.jsonl``: files the engineer uploaded by hand (over the connector limit)."""
+    return state_dir() / "upload_ledger.jsonl"
+
+
 def push_plan_path() -> Path:
     """``state/push_plan.csv``."""
     return state_dir() / "push_plan.csv"
@@ -521,6 +526,28 @@ def ledger_by_id(path: Optional[Path] = None) -> Dict[str, Dict[str, Any]]:
     return latest
 
 
+def upload_index(path: Optional[Path] = None) -> Dict[str, Dict[str, Any]]:
+    """Upload-ledger rows keyed by ``id:<drive_id>`` and ``path:<rel_path>`` (later rows win).
+
+    A file in the upload ledger was supplied by hand because the connector
+    could not fetch it, so the pull plan treats it as fetched (transport
+    ``upload``) even when, as for a working copy assembled from uploaded parts,
+    its bytes cannot match Drive's size.
+    """
+    index: Dict[str, Dict[str, Any]] = {}
+    for row in ledger_rows(path or upload_ledger_path()):
+        if row.get("drive_id"):
+            index["id:" + str(row["drive_id"])] = row
+        if row.get("rel_path"):
+            index["path:" + str(row["rel_path"])] = row
+    return index
+
+
+def uploaded_row(entry: Dict[str, Any], uploads: Dict[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The upload-ledger row for a listing entry (by Drive id, else by ``rel_path``), or ``None``."""
+    return uploads.get("id:" + str(entry.get("id"))) or uploads.get("path:" + str(entry.get("rel_path", "")))
+
+
 def append_ledger(row: Dict[str, Any]) -> None:
     """Append one row to the pull ledger under the shared lock."""
     with file_lock(pull_ledger_path()):
@@ -571,11 +598,18 @@ def ledger_row_current(row: Optional[Dict[str, Any]], entry: Dict[str, Any]) -> 
     return True
 
 
-def plan_status(entry: Dict[str, Any], ledger: Dict[str, Dict[str, Any]], transport: str = "connector") -> str:
-    """Status of one listing file for the pull plan (zip, then fetched, then the transport's size rule)."""
+def plan_status(entry: Dict[str, Any], ledger: Dict[str, Dict[str, Any]], transport: str = "connector",
+                uploads: Optional[Dict[str, Dict[str, Any]]] = None) -> str:
+    """Status of one listing file for the pull plan: zip, then fetched (pull or upload ledger), then the size rule.
+
+    ``uploads`` is :func:`upload_index`; a file it holds is ``fetched`` whatever
+    its size, since the upload is the transport the connector limit called for.
+    """
     if common.is_zip(str(entry.get("rel_path", ""))):
         return "skipped_zip"
     if ledger_row_current(ledger.get(str(entry.get("id"))), entry):
+        return "fetched"
+    if uploads and uploaded_row(entry, uploads) is not None:
         return "fetched"
     if transport == "rclone" or _as_int(entry.get("fileSize")) <= CONNECTOR_LIMIT:
         return "pending"
@@ -583,8 +617,9 @@ def plan_status(entry: Dict[str, Any], ledger: Dict[str, Dict[str, Any]], transp
 
 
 def build_pull_plan(listing: Dict[str, Any], transport: str) -> List[Dict[str, Any]]:
-    """Pull-plan rows for every non-folder entry of ``listing``."""
+    """Pull-plan rows for every non-folder entry of ``listing`` (pull and upload ledgers count as fetched)."""
     ledger = ledger_by_id()
+    uploads = upload_index()
     rows: List[Dict[str, Any]] = []
     for entry in listing.get("files", []):
         size = _as_int(entry.get("fileSize"))
@@ -595,7 +630,7 @@ def build_pull_plan(listing: Dict[str, Any], transport: str) -> List[Dict[str, A
             "bytes": size,
             "mime_type": entry.get("mimeType", ""),
             "transport_eligible": "y" if eligible else "n",
-            "status": plan_status(entry, ledger, transport),
+            "status": plan_status(entry, ledger, transport, uploads),
         })
     return rows
 

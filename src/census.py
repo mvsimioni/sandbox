@@ -1,12 +1,16 @@
 """Page census of every pulled PDF and PPTX, by script only (no model).
 
-For each file in ``state/pull_ledger.jsonl`` with extension ``pdf`` or ``pptx``
-(or any file named with ``--paths``) the census records one row per page or
-slide in ``out/registers/page_census.csv`` and one row per file in
-``out/registers/file_census.csv``.  The per-page measurements drive the later
-choice of extraction route (text layer, vector drawing, scan) so they must be
-cheap, deterministic and resumable:
+For each file in ``state/pull_ledger.jsonl`` and ``state/upload_ledger.jsonl``
+with extension ``pdf`` or ``pptx`` (or any file named with ``--paths``) the
+census records one row per page or slide in ``out/registers/page_census.csv``
+and one row per file in ``out/registers/file_census.csv``.  The per-page
+measurements drive the later choice of extraction route (text layer, vector
+drawing, scan) so they must be cheap, deterministic and resumable:
 
+* coverage is by file, work is by hash: the first ledger file of each
+  ``sha256`` is measured; every later file with the same hash gets its own
+  ``file_census.csv`` row with ``kind`` and the page counts copied from the
+  first and the note ``duplicate of <rel_path>`` (no page rows of its own),
 * a file whose ``sha256`` already has a row in ``file_census.csv`` is skipped
   (rows with an error are skipped too unless ``--retry-errors`` is given, which
   drops those rows and censuses the files again),
@@ -110,8 +114,16 @@ PAGE_COLUMNS: Tuple[str, ...] = (
 )
 FILE_COLUMNS: Tuple[str, ...] = (
     "rel_path", "sha256", "kind", "pages", "text_pages", "vector_pages", "raster_pages", "mixed_pages",
-    "total_annotations", "seconds", "error",
+    "total_annotations", "seconds", "error", "note",
 )
+DUPLICATE_NOTE_PREFIX = "duplicate of "
+"""``note`` of a file row whose bytes were censused under another ``rel_path`` (same sha256)."""
+COPIED_COLUMNS: Tuple[str, ...] = (
+    "kind", "pages", "text_pages", "vector_pages", "raster_pages", "mixed_pages", "total_annotations", "error",
+)
+"""File-row columns a duplicate copies from the first row of its hash."""
+LEDGER_NAMES: Tuple[str, ...] = ("pull_ledger.jsonl", "upload_ledger.jsonl")
+"""Fetch ledgers that feed the census, in this order (the manifest and checks read the same pair)."""
 SUMMARY_COLUMNS: Tuple[str, ...] = (
     "root", "files", "errors", "pages", "text", "vector_drawing", "raster_or_scan", "mixed", "total_annotations",
 )
@@ -646,6 +658,7 @@ def _file_row(rel_path: str, sha256: str, kind: str, pages: List[Dict[str, Any]]
         "total_annotations": sum(int(row["annotation_count"]) for row in pages),
         "seconds": round(seconds, 2),
         "error": error,
+        "note": "",
     }
 
 
@@ -705,7 +718,7 @@ def _hash_or_fail(path: Path) -> str:
 
 
 def tasks_from_ledger(ledger_path: Path, root_dir: Path) -> List[Dict[str, Any]]:
-    """Census tasks for every pdf/pptx ledger entry (missing local files become error tasks)."""
+    """Census tasks for every pdf/pptx entry of one ledger (missing local files become error tasks)."""
     tasks: List[Dict[str, Any]] = []
     for record in read_jsonl(ledger_path):
         if not isinstance(record, dict):
@@ -720,6 +733,19 @@ def tasks_from_ledger(ledger_path: Path, root_dir: Path) -> List[Dict[str, Any]]
             sha = sha256_file(local)
         tasks.append({"rel_path": rel_path, "sha256": sha, "kind": kind, "local_path": str(local)})
     return tasks
+
+
+def tasks_from_ledgers(ledger_paths: Sequence[Path], root_dir: Path) -> List[Dict[str, Any]]:
+    """Census tasks over several ledgers in order (pull ledger first, then the upload ledger)."""
+    tasks: List[Dict[str, Any]] = []
+    for path in ledger_paths:
+        tasks.extend(tasks_from_ledger(path, root_dir))
+    return tasks
+
+
+def default_upload_ledger(ledger_path: Path) -> Path:
+    """The upload ledger that goes with a pull ledger: ``upload_ledger.jsonl`` beside it."""
+    return Path(ledger_path).parent / LEDGER_NAMES[1]
 
 
 def tasks_from_paths(paths: Sequence[str], root_dir: Path) -> List[Dict[str, Any]]:
@@ -740,37 +766,78 @@ def tasks_from_paths(paths: Sequence[str], root_dir: Path) -> List[Dict[str, Any
 
 def dedupe_tasks(tasks: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Keep the first task per resume key (hash-identical copies share one census)."""
-    seen: set[str] = set()
-    unique: List[Dict[str, Any]] = []
+    return split_tasks(tasks)[0]
+
+
+def split_tasks(tasks: Iterable[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Tuple[Dict[str, Any], Dict[str, Any]]]]:
+    """Split tasks into ``(primaries, duplicates)``.
+
+    The first task per resume key is the primary (its bytes are measured).  A
+    later task with the same key but another ``rel_path`` is a duplicate and
+    is returned as ``(task, primary)``; it gets a file-census row copied from
+    the primary.  A task repeating a key *and* a ``rel_path`` already seen (the
+    same ledger line appended twice) is dropped.
+    """
+    primaries: Dict[str, Dict[str, Any]] = {}
+    seen_files: set[Tuple[str, str]] = set()
+    ordered: List[Dict[str, Any]] = []
+    duplicates: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
     for task in tasks:
         key = task_key(task)
-        if key in seen:
+        file_key = (key, str(task.get("rel_path", "")))
+        if file_key in seen_files:
             continue
-        seen.add(key)
-        unique.append(task)
-    return unique
+        seen_files.add(file_key)
+        primary = primaries.get(key)
+        if primary is None:
+            primaries[key] = task
+            ordered.append(task)
+        else:
+            duplicates.append((task, primary))
+    return ordered, duplicates
 
 
-def _valid_rows(path: Path, columns: Sequence[str]) -> Tuple[List[Dict[str, str]], int]:
-    """Rows of a register whose field count matches ``columns``; also the number of torn rows dropped.
+def duplicate_row(task: Dict[str, Any], primary_row: Dict[str, Any]) -> Dict[str, Any]:
+    """File-census row for a duplicate: its own ``rel_path``, counts copied from the primary's row."""
+    row: Dict[str, Any] = {column: "" for column in FILE_COLUMNS}
+    row.update({column: primary_row.get(column, "") for column in COPIED_COLUMNS})
+    row.update({"rel_path": task["rel_path"], "sha256": task["sha256"], "kind": task["kind"], "seconds": 0,
+                "note": f"{DUPLICATE_NOTE_PREFIX}{primary_row.get('rel_path', '')}"})
+    return row
+
+
+def is_duplicate_row(row: Dict[str, Any]) -> bool:
+    """True for a file-census row that was copied from another row of the same hash."""
+    return str(row.get("note") or "").startswith(DUPLICATE_NOTE_PREFIX)
+
+
+def _valid_rows(path: Path, columns: Sequence[str]) -> Tuple[List[Dict[str, str]], int, bool]:
+    """Rows of a register whose field count matches its header; ``(rows, torn, outdated)``.
 
     A crash during an append can leave an incomplete last line (or, in theory,
     any line of the block that was being written).  Such a line has too few
     fields or lacks its terminator, so it is dropped rather than trusted.
+
+    A register written before a column was added has a header that is a
+    strict prefix of ``columns``; its rows are kept, padded with blanks, and
+    ``outdated`` is True so the caller rewrites the file with the full header.
     """
     if not path.exists() or path.stat().st_size == 0:
-        return [], 0
+        return [], 0, False
     raw = path.read_bytes()
     text = raw.decode("utf-8", errors="replace")
     torn_tail = not raw.endswith(b"\n")
     records = list(csv.reader(text.splitlines(keepends=True)))
     if not records:
-        return [], 0
+        return [], 0, False
+    header = records[0]
+    outdated = len(header) < len(columns) and list(columns[: len(header)]) == header
+    width = len(header) if outdated else len(columns)
     body = records[1:]
     if torn_tail and body:
         body = body[:-1]
-    kept = [dict(zip(columns, rec)) for rec in body if len(rec) == len(columns)]
-    return kept, len(records) - 1 - len(kept)
+    kept = [dict(zip(columns, rec + [""] * (len(columns) - width))) for rec in body if len(rec) == width]
+    return kept, len(records) - 1 - len(kept), outdated
 
 
 class Registers:
@@ -793,22 +860,36 @@ class Registers:
         """sha256 values that already have a file-census row (kept for callers that key by hash)."""
         return {row["sha256"] for row in self.file_rows() if row.get("sha256")}
 
+    def done_files(self) -> set[Tuple[str, str]]:
+        """``(resume key, rel_path)`` of every file-census row: coverage by file, duplicates included."""
+        return {(task_key(row), str(row.get("rel_path", ""))) for row in self.file_rows()}
+
+    def primary_rows(self) -> Dict[str, Dict[str, str]]:
+        """``{resume key: first file row that is not itself a duplicate}``: the measured row per hash."""
+        primaries: Dict[str, Dict[str, str]] = {}
+        for row in self.file_rows():
+            if not is_duplicate_row(row):
+                primaries.setdefault(task_key(row), row)
+        return primaries
+
     def repair(self) -> Dict[str, int]:
         """Drop torn rows from both registers and page rows whose file never got its file row.
 
-        Returns ``{"torn": n, "orphans": m}``.  Runs under the register lock.
+        A file register written with an older, shorter header is rewritten
+        with the current columns (rows kept, new columns blank).  Returns
+        ``{"torn": n, "orphans": m, "migrated": k}``.  Runs under the register lock.
         """
         with file_lock(self.file_path):
-            files, torn_files = _valid_rows(self.file_path, FILE_COLUMNS)
-            if torn_files:
+            files, torn_files, outdated_files = _valid_rows(self.file_path, FILE_COLUMNS)
+            if torn_files or outdated_files:
                 write_csv_dicts(self.file_path, files, FILE_COLUMNS)
-            pages, torn_pages = _valid_rows(self.page_path, PAGE_COLUMNS)
+            pages, torn_pages, outdated_pages = _valid_rows(self.page_path, PAGE_COLUMNS)
             done = {task_key(row) for row in files}
             kept = [row for row in pages if task_key(row) in done]
             orphans = len(pages) - len(kept)
-            if torn_pages or orphans:
+            if torn_pages or orphans or outdated_pages:
                 write_csv_dicts(self.page_path, kept, PAGE_COLUMNS)
-        return {"torn": torn_files + torn_pages, "orphans": orphans}
+        return {"torn": torn_files + torn_pages, "orphans": orphans, "migrated": int(outdated_files) + int(outdated_pages)}
 
     def drop_rows(self, keys: set[str], errors_only: bool) -> int:
         """Remove the rows (file and page) whose resume key is in ``keys``; return how many file rows went.
@@ -865,6 +946,11 @@ class Registers:
             if result["pages"]:
                 self._append(self.page_path, result["pages"], PAGE_COLUMNS)
             self._append(self.file_path, [result["file"]], FILE_COLUMNS)
+
+    def record_duplicate(self, row: Dict[str, Any]) -> None:
+        """Persist one duplicate's file row (it has no page rows of its own)."""
+        with file_lock(self.file_path):
+            self._append(self.file_path, [row], FILE_COLUMNS)
 
     def log(self, message: str) -> None:
         """One progress line to stderr and to ``logs/census.log``."""
@@ -1013,6 +1099,45 @@ def _run_pool(tasks: List[Dict[str, Any]], workers: int, file_timeout_s: float, 
     return errors
 
 
+def _copy_duplicate_rows(duplicates: Sequence[Tuple[Dict[str, Any], Dict[str, Any]]], registers: Registers,
+                         progress: Progress) -> Tuple[int, int]:
+    """Give every duplicate whose primary has a file row its own row; return ``(written, waiting)``.
+
+    A duplicate already in the register (same key and ``rel_path``) is left
+    alone, so reruns add nothing; one whose primary has no row yet (cut off by
+    ``--limit``, or an error dropped for retry) waits for the next run.
+    """
+    done = registers.done_files()
+    primaries = registers.primary_rows()
+    written = waiting = 0
+    for task, _primary_task in duplicates:
+        key = task_key(task)
+        if (key, task["rel_path"]) in done:
+            continue
+        primary_row = primaries.get(key)
+        if primary_row is None:
+            waiting += 1
+            continue
+        row = duplicate_row(task, primary_row)
+        registers.record_duplicate(row)
+        done.add((key, task["rel_path"]))
+        error = bool(row["error"])
+        progress.set(f"census:{task['rel_path']}", "error" if error else "done", hash=task["sha256"] or None,
+                     pages=row["pages"], error=row["error"], duplicate_of=primary_row.get("rel_path", ""))
+        registers.log(f"duplicate {task['rel_path']} -> {row['note']} (pages={row['pages']})")
+        written += 1
+    return written, waiting
+
+
+def ledger_paths(args: argparse.Namespace) -> List[Path]:
+    """The ledgers a ``run`` reads: ``--ledger`` and ``--upload-ledger`` (default: beside the pull ledger)."""
+    upload = args.upload_ledger if getattr(args, "upload_ledger", None) is not None else default_upload_ledger(args.ledger)
+    paths = [Path(args.ledger)]
+    if Path(upload).resolve() != paths[0].resolve():
+        paths.append(Path(upload))
+    return paths
+
+
 def run(args: argparse.Namespace) -> int:
     """``run`` subcommand: census every pending pdf/pptx; non-zero when any file errored."""
     root_dir = args.project_root if args.project_root is not None else project_root()
@@ -1021,10 +1146,10 @@ def run(args: argparse.Namespace) -> int:
     repaired = registers.repair()
     if any(repaired.values()):
         registers.log(f"repaired registers: dropped {repaired['torn']} torn rows and {repaired['orphans']} "
-                      f"orphan page rows")
+                      f"orphan page rows; {repaired['migrated']} register(s) rewritten with the current columns")
 
-    tasks = tasks_from_paths(args.paths, root_dir) if args.paths else tasks_from_ledger(args.ledger, root_dir)
-    tasks = dedupe_tasks(tasks)
+    tasks = tasks_from_paths(args.paths, root_dir) if args.paths else tasks_from_ledgers(ledger_paths(args), root_dir)
+    tasks, duplicates = split_tasks(tasks)
     done = registers.done_keys(include_errors=not args.retry_errors)
     pending = [t for t in tasks if not t["sha256"] or task_key(t) not in done]
     already = len(tasks) - len(pending)
@@ -1039,11 +1164,17 @@ def run(args: argparse.Namespace) -> int:
         task["page_budget_s"] = args.page_budget
     limit_note = f" (limit {args.limit})" if args.limit is not None else ""
     registers.log(f"census: {len(tasks)} candidate files, {already} already censused, "
-                  f"{len(pending)} to do{limit_note}, {args.workers} workers")
-    if not pending:
-        return 0
-    errors = _run_pool(pending, args.workers, args.file_timeout, registers, progress, args.kill_grace)
-    registers.log(f"census finished: {len(pending) - errors} ok, {errors} errors")
+                  f"{len(pending)} to do{limit_note}, {args.workers} workers; "
+                  f"{len(duplicates)} hash-identical duplicate file(s) share a census")
+    errors = 0
+    if pending:
+        errors = _run_pool(pending, args.workers, args.file_timeout, registers, progress, args.kill_grace)
+        registers.log(f"census finished: {len(pending) - errors} ok, {errors} errors")
+    if duplicates:
+        written, waiting = _copy_duplicate_rows(duplicates, registers, progress)
+        if written or waiting:
+            registers.log(f"duplicates: {written} row(s) copied from the first file of their hash, {waiting} waiting "
+                          f"for their primary")
     return 1 if errors else 0
 
 
@@ -1117,9 +1248,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_dir_options(parser, suppress=False)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run_cmd = sub.add_parser("run", help="census every pending pdf/pptx in the pull ledger")
+    run_cmd = sub.add_parser("run", help="census every pending pdf/pptx in the pull and upload ledgers")
     _add_dir_options(run_cmd, suppress=True)
-    run_cmd.add_argument("--ledger", type=Path, default=PATHS["state"] / "pull_ledger.jsonl", help="pull ledger")
+    run_cmd.add_argument("--ledger", type=Path, default=PATHS["state"] / LEDGER_NAMES[0], help="pull ledger")
+    run_cmd.add_argument("--upload-ledger", type=Path, default=None,
+                         help="upload ledger read after the pull ledger (default: upload_ledger.jsonl beside it)")
     run_cmd.add_argument("--progress", type=Path, default=PATHS["state"] / "progress.json", help="progress file")
     run_cmd.add_argument("--project-root", type=Path, default=None, help="root that ledger local_path values are relative to")
     run_cmd.add_argument("--paths", nargs="+", default=None,

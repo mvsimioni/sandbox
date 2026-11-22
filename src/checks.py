@@ -55,6 +55,8 @@ SELFTEST_TIMEOUT_S = 300
 MIN_LISTING_GAP_MIN = 15
 """The spec's minimum gap between the two listings; the config may only widen it."""
 BLOCKED_STATUS = "blocked_connector_limit"
+ASSEMBLED_TRANSPORT = "upload-assembled"
+"""Ledger transport of a working copy stitched together from uploaded parts of one Drive file."""
 TEMPLATE_PROGRESS_KEY = "template_workflow"
 """Progress item set by ``python -m src.template_workflow finish``."""
 _LIMIT_REASON_RE = re.compile(r"connector|limit|10485760|10\s*mib|too\s+large|size", re.IGNORECASE)
@@ -321,8 +323,44 @@ def check_two_listings(ctx: Context) -> CheckOutcome:
     return status, evidence
 
 
+def _assembled_parts(ctx: Context, record: Dict[str, Any]) -> int:
+    """Number of uploaded parts behind an ``upload-assembled`` ledger row.
+
+    The parts are ledgered with transport ``upload`` and a ``drive_id`` that
+    names the parent file's id (``"<id> (parent file, N B)"``), so they are
+    counted by that id; a ``parts`` field on the row itself takes precedence.
+    """
+    try:
+        declared = int(record.get("parts") or 0)
+    except (TypeError, ValueError):
+        declared = 0
+    if declared > 0:
+        return declared
+    parent = str(record.get("drive_id") or "").strip()
+    if not parent:
+        return 0
+    return sum(1 for r in ctx.ledger_rows()
+               if r is not record and str(r.get("transport", "")) == "upload"
+               and parent in str(r.get("drive_id", "")) and str(r.get("rel_path", "")) != str(record.get("rel_path", "")))
+
+
+def _assembled_note(ctx: Context, rel_path: str, record: Dict[str, Any]) -> str:
+    """Evidence line explaining why an assembled working copy cannot match Drive's byte size."""
+    parts = _assembled_parts(ctx, record)
+    count = f"{parts} uploaded parts" if parts else "uploaded parts"
+    return (f"{rel_path}: assembled from {count}; page content to be confirmed against the Drive original "
+            f"when a full transport exists")
+
+
 def check_manifest_matches_listing(ctx: Context) -> CheckOutcome:
-    """P0-04: manifest rows equal the listing's files; pulled rows carry sha256 and size_match."""
+    """P0-04: manifest rows equal the listing's files; pulled rows carry sha256 and size_match.
+
+    The ledger is the pull ledger plus the upload ledger (``Context.ledger_rows``).
+    A row whose transport is ``upload-assembled`` is a working copy stitched
+    from uploaded parts of one Drive file; it cannot be byte-identical to the
+    original, so its ``size_match`` false is reported as an explained
+    exception rather than a failure.  Every other ``size_match`` false fails.
+    """
     listing = ctx.latest_listing()
     if listing is None:
         return FAIL, ["no consolidated listing"]
@@ -337,23 +375,33 @@ def check_manifest_matches_listing(ctx: Context) -> CheckOutcome:
     ledger = ctx.ledger_index()
     no_sha: List[str] = []
     bad_size: List[str] = []
+    assembled: List[str] = []
     pulled = 0
     for row in rows:
         if str(row.get("pulled", "")).strip().lower() != "y":
             continue
         pulled += 1
+        rel_path = str(row.get("rel_path", "?"))
         if not str(row.get("sha256", "")).strip():
-            no_sha.append(row.get("rel_path", "?"))
+            no_sha.append(rel_path)
         record = ledger.get("id:" + str(row.get("drive_id", ""))) or ledger.get("path:" + str(row.get("rel_path", "")))
-        if record is None or not _truthy(record.get("size_match")):
-            bad_size.append(row.get("rel_path", "?"))
-    evidence.append(f"pulled rows {pulled}")
+        if record is None or _truthy(record.get("size_match")):
+            if record is None:
+                bad_size.append(rel_path)
+            continue
+        if str(record.get("transport", "")) == ASSEMBLED_TRANSPORT:
+            assembled.append(_assembled_note(ctx, rel_path, record))
+        else:
+            bad_size.append(rel_path)
+    evidence.append(f"pulled rows {pulled} (ledgers: {', '.join(LEDGER_FILES)})")
     if no_sha:
         status = FAIL
         evidence.append(f"pulled without sha256: {_sample(no_sha)}")
     if bad_size:
         status = FAIL
         evidence.append(f"pulled without size_match true in the ledger: {_sample(bad_size)}")
+    for line in assembled:
+        evidence.append(f"explained exception ({ASSEMBLED_TRANSPORT}): {line}")
     return status, evidence
 
 
@@ -374,17 +422,22 @@ def check_skipped_zips(ctx: Context) -> CheckOutcome:
 
 
 def check_census_covers_ledger(ctx: Context) -> CheckOutcome:
-    """P0-06: every fetched pdf/pptx appears in file_census.csv."""
-    wanted = [str(r.get("rel_path", "")) for r in ctx.ledger_rows()
-              if common.file_ext(str(r.get("rel_path", ""))) in CENSUS_KINDS]
+    """P0-06: every fetched pdf/pptx appears in file_census.csv.
+
+    Coverage is by ``rel_path`` over both ledgers (pull and upload): a file
+    that is hash-identical to one already censused still has its own census
+    row (noted ``duplicate of <rel_path>``), so every fetched path must appear.
+    """
+    wanted = sorted({str(r.get("rel_path", "")) for r in ctx.ledger_rows()
+                     if common.file_ext(str(r.get("rel_path", ""))) in CENSUS_KINDS})
     if not wanted:
-        return PASS, ["no pdf/pptx in the pull ledger"]
+        return PASS, ["no pdf/pptx in the pull or upload ledger"]
     path = ctx.registers / "file_census.csv"
     if not path.is_file():
         return FAIL, [f"file_census.csv missing; {len(wanted)} pdf/pptx fetched"]
     census = {_norm_path(r.get("rel_path", "")) for r in common.read_csv_dicts(path)}
     missing = [p for p in wanted if _norm_path(p) not in census]
-    evidence = [f"{len(wanted)} pdf/pptx in ledger, {len(census)} files in census"]
+    evidence = [f"{len(wanted)} pdf/pptx in the ledgers ({', '.join(LEDGER_FILES)}), {len(census)} files in census"]
     if missing:
         return FAIL, evidence + [f"not in census: {_sample(missing)}"]
     return PASS, evidence
