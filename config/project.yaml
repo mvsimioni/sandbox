@@ -117,4 +117,7 @@ models:   # baseline tiers, Section 4.2; the allocation specialist confirms from
   schematic_engineer: {model: opus, effort: high}
   verifier: {model: opus, effort: high}
   council: {model: opus, effort: xhigh}
-  chair: {model: fable, effort: high}
+  chair: {model: opus, effort: high}   # Marcus 22 Nov 2026: main session on Opus 5.5; Fable not used for any stage
+  drive_listing: {model: haiku, effort: low}
+  connector_pull: {model: sonnet, effort: low}
+  rule: every agent call names its model; none inherits the session model
