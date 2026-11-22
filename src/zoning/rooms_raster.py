@@ -1,0 +1,307 @@
+"""Method B: seeded region growing on the wall raster.
+
+No segmentation-model weights are available, so the second method is classical: the same strokes that method A
+uses (heavy wall strokes, door closers, bridges and fine-pen lines) are rasterised in tiles at 1 px <= 10 mm, the free
+pixels are labelled with 4-connectivity, and each room-tag seed claims its connected component.  Components that
+hold several seeds are split by a watershed on the distance to the wall raster with the seeds as markers (so
+neighbouring seeds act as barriers); small unseeded components bounded by fine-pen lines (furniture, door swings)
+are absorbed by the neighbour they share most fine-pen boundary with, as in method A.
+"""
+
+from __future__ import annotations
+
+import math
+from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+import cv2
+import shapely
+from scipy import ndimage as ndi
+from shapely.geometry import Polygon
+
+TILE_PX = 2048
+MAX_MM_PER_PX = 10.0
+FURNITURE_MAX_M2 = 8.0
+THIN_FRACTION_MIN = 0.5
+
+
+def pixels_per_pt(mm_per_pt: float, target_mm_per_px: float = 8.0) -> float:
+    """Raster scale (px per pt) giving at most ``MAX_MM_PER_PX`` mm per pixel (default target 8 mm)."""
+    s = mm_per_pt / min(target_mm_per_px, MAX_MM_PER_PX)
+    assert mm_per_pt / s <= MAX_MM_PER_PX + 1e-9
+    return s
+
+
+@dataclass
+class Raster:
+    x0: float
+    y0: float
+    S: float
+    shape: Tuple[int, int]
+    wall: np.ndarray    # uint8, heavy strokes + closers + bridges
+    thin: np.ndarray    # uint8, fine-pen strokes (excluding where wall is set)
+
+    @property
+    def mm_per_px(self) -> float:
+        return float("nan")
+
+
+def render_tiles(segs: np.ndarray, roi: Tuple[float, float, float, float], S: float, tile_px: int = TILE_PX,
+                 out: Optional[np.ndarray] = None) -> np.ndarray:
+    """Rasterise segments (page-view pt) as 1 px lines into ``out`` (uint8), one tile at a time."""
+    x0, y0, x1, y1 = roi
+    W = int(math.ceil((x1 - x0) * S))
+    H = int(math.ceil((y1 - y0) * S))
+    if out is None:
+        out = np.zeros((H, W), np.uint8)
+    sx = np.minimum(segs[:, 0], segs[:, 2]); ex = np.maximum(segs[:, 0], segs[:, 2])
+    sy = np.minimum(segs[:, 1], segs[:, 3]); ey = np.maximum(segs[:, 1], segs[:, 3])
+    SH = 4
+    for ty in range(0, H, tile_px):
+        for tx in range(0, W, tile_px):
+            tw, th = min(tile_px, W - tx), min(tile_px, H - ty)
+            # tile bounds in pt, with a 1 px margin so lines crossing the edge are drawn
+            bx0, by0 = x0 + (tx - 1) / S, y0 + (ty - 1) / S
+            bx1, by1 = x0 + (tx + tw + 1) / S, y0 + (ty + th + 1) / S
+            sel = np.nonzero((ex >= bx0) & (sx <= bx1) & (ey >= by0) & (sy <= by1))[0]
+            if len(sel) == 0:
+                continue
+            tile = np.zeros((th, tw), np.uint8)
+            s = segs[sel]
+            px = ((s[:, [0, 2]] - x0) * S - tx + 0.5) * (1 << SH)
+            py = ((s[:, [1, 3]] - y0) * S - ty + 0.5) * (1 << SH)
+            pxi = np.round(px).astype(np.int64)
+            pyi = np.round(py).astype(np.int64)
+            for a, b, c, d in zip(pxi[:, 0], pyi[:, 0], pxi[:, 1], pyi[:, 1]):
+                cv2.line(tile, (int(a), int(b)), (int(c), int(d)), 255, 1, cv2.LINE_8, SH)
+            out[ty:ty + th, tx:tx + tw] |= tile
+    return out
+
+
+def _pair_contacts(lab: np.ndarray, wall: np.ndarray, offsets=(2, 3, 4), chunk_rows: int = 1024) -> Dict[Tuple[int, int], List[int]]:
+    """Contact counts between components across 1-3 px barriers: ``{(a, b): [thin_count, wall_count]}``.
+
+    Pixels ``k`` apart (k = 2..4) with only barrier pixels between them and different non-zero labels are in contact;
+    the contact is "wall" when any in-between pixel is a heavy-wall pixel and "thin" otherwise.  Rows are processed in
+    chunks and the transposed pass works on a contiguous copy so the 300 Mpx raster stays cache friendly.
+    """
+    acc: Dict[Tuple[int, int], List[int]] = defaultdict(lambda: [0, 0])
+    n = int(lab.max()) + 1
+    maxk = max(offsets)
+    for axis in (1, 0):
+        L = lab if axis == 1 else np.ascontiguousarray(lab.T)
+        Wm = wall if axis == 1 else np.ascontiguousarray(wall.T)
+        H, Wd = L.shape
+        for r0 in range(0, H, chunk_rows):
+            Lc = L[r0:r0 + chunk_rows]
+            Wc = Wm[r0:r0 + chunk_rows]
+            for k in offsets:
+                a = Lc[:, :-k]
+                b = Lc[:, k:]
+                sel = (a > 0) & (b > 0) & (a != b)
+                if not sel.any():
+                    continue
+                for j in range(1, k):       # all pixels in between must be barrier
+                    sel &= Lc[:, j:Wd - k + j] == 0
+                r, c = np.nonzero(sel)
+                if len(r) == 0:
+                    continue
+                la, lb = a[r, c].astype(np.int64), b[r, c].astype(np.int64)
+                wallhit = np.zeros(len(r), bool)
+                for j in range(1, k):
+                    wallhit |= Wc[r, c + j] > 0
+                lo, hi = np.minimum(la, lb), np.maximum(la, lb)
+                code = lo * n + hi
+                for w, flag in ((wallhit, 1), (~wallhit, 0)):
+                    if not w.any():
+                        continue
+                    u, cnt = np.unique(code[w], return_counts=True)
+                    for uu, cc in zip(u, cnt):
+                        acc[(int(uu // n), int(uu % n))][flag] += int(cc)
+    return acc
+
+
+@dataclass
+class SeedRegion:
+    tag_index: int
+    pixels: int
+    area_m2: float
+    perimeter_m: float
+    polygon: Optional[Polygon]
+    component: int
+    shared_component: bool      # seed shares its component with another seed (split by watershed)
+    leaked: bool                # component touches the ROI border (open to the outside)
+    notes: str = ""
+
+
+def grow_regions(wall: np.ndarray, thin: np.ndarray, roi: Tuple[float, float, float, float], S: float,
+                 seeds_pv: np.ndarray, m2_per_px: float, pt_per_px: float,
+                 max_region_m2: float = 4000.0) -> Tuple[List[SeedRegion], dict]:
+    """Seeded region growing from tag seeds (page-view pt) on the wall and thin rasters."""
+    x0, y0, _, _ = roi
+    barrier = (wall > 0) | (thin > 0)
+    lab, n = ndi.label(~barrier)           # 4-connected
+    diag = {"n_components": int(n), "px_shape": list(wall.shape), "mm_per_px": float(math.sqrt(m2_per_px) * 1000.0)}
+    # seed pixels, nudged off barrier pixels
+    seed_px = np.zeros((len(seeds_pv), 2), int)
+    seed_lab = np.zeros(len(seeds_pv), np.int64)
+    for i, (x, y) in enumerate(seeds_pv):
+        c = int((x - x0) * S); r = int((y - y0) * S)
+        c = min(max(c, 0), lab.shape[1] - 1); r = min(max(r, 0), lab.shape[0] - 1)
+        if lab[r, c] == 0:
+            found = False
+            for rad in range(1, 12):
+                rs, re_ = max(r - rad, 0), min(r + rad + 1, lab.shape[0])
+                cs, ce = max(c - rad, 0), min(c + rad + 1, lab.shape[1])
+                win = lab[rs:re_, cs:ce]
+                nz = np.argwhere(win > 0)
+                if len(nz):
+                    d = ((nz[:, 0] + rs - r) ** 2 + (nz[:, 1] + cs - c) ** 2)
+                    k = int(np.argmin(d))
+                    r, c = nz[k][0] + rs, nz[k][1] + cs
+                    found = True
+                    break
+            diag["n_seeds_nudged"] = diag.get("n_seeds_nudged", 0) + 1
+            if not found:
+                seed_px[i] = (r, c); seed_lab[i] = 0
+                continue
+        seed_px[i] = (r, c)
+        seed_lab[i] = lab[r, c]
+    areas = np.bincount(lab.ravel(), minlength=n + 1).astype(np.int64)
+    # border-touching components are open to the outside
+    border = np.unique(np.concatenate([lab[0], lab[-1], lab[:, 0], lab[:, -1]]))
+    border_set = set(int(b) for b in border if b > 0)
+    has_seed = np.zeros(n + 1, bool)
+    has_seed[seed_lab[seed_lab > 0]] = True
+    # absorb small unseeded components bounded mostly by fine-pen lines
+    parent = np.arange(n + 1)
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    small = (~has_seed) & (areas * m2_per_px < FURNITURE_MAX_M2)
+    small[0] = False
+    contacts = _pair_contacts(lab, wall)
+    diag["n_contact_pairs"] = len(contacts)
+    merged = 0
+    for _ in range(8):
+        agg: Dict[int, Dict[int, List[int]]] = defaultdict(lambda: defaultdict(lambda: [0, 0]))
+        for (a, b), (t, w) in contacts.items():
+            ra, rb = find(a), find(b)
+            if ra == rb:
+                continue
+            agg[ra][rb][0] += t; agg[ra][rb][1] += w
+            agg[rb][ra][0] += t; agg[rb][ra][1] += w
+        changed = False
+        for c, nb in agg.items():
+            if parent[c] != c or not small[c] or c in border_set:
+                continue
+            thin_tot = sum(v[0] for v in nb.values())
+            wall_tot = sum(v[1] for v in nb.values())
+            if thin_tot + wall_tot == 0 or thin_tot / (thin_tot + wall_tot) < THIN_FRACTION_MIN:
+                continue
+            tgt = max(nb.items(), key=lambda kv: (kv[1][0], areas[kv[0]]))[0]
+            parent[c] = tgt
+            areas[tgt] += areas[c]
+            small[tgt] = small[tgt] and (not has_seed[tgt]) and areas[tgt] * m2_per_px < FURNITURE_MAX_M2
+            changed = True
+            merged += 1
+        if not changed:
+            break
+    diag["n_absorbed_components"] = merged
+    root = np.array([find(i) for i in range(n + 1)], dtype=np.int64)
+    lab2 = root[lab]
+    del lab
+    # group seeds by merged component
+    comp_seeds: Dict[int, List[int]] = defaultdict(list)
+    for i, l in enumerate(seed_lab):
+        if l > 0:
+            comp_seeds[int(root[l])].append(i)
+    results: List[SeedRegion] = []
+    h, w = lab2.shape
+    objs = ndi.find_objects(lab2)
+    border2 = {int(root[b]) for b in border_set}
+    for comp, idxs in comp_seeds.items():
+        sl = objs[comp - 1]
+        if sl is None:
+            continue
+        r0, r1 = max(sl[0].start - 1, 0), min(sl[0].stop + 1, h)
+        c0, c1 = max(sl[1].start - 1, 0), min(sl[1].stop + 1, w)
+        mask = lab2[r0:r1, c0:c1] == comp
+        leaked = comp in border2
+        if len(idxs) == 1:
+            parts = {idxs[0]: mask}
+        else:
+            from skimage.segmentation import watershed
+            markers = np.zeros(mask.shape, np.int32)
+            for k, i in enumerate(idxs, start=1):
+                markers[seed_px[i][0] - r0, seed_px[i][1] - c0] = k
+            dist = ndi.distance_transform_edt(mask)
+            ws = watershed(-dist, markers, mask=mask)
+            parts = {i: ws == k for k, i in enumerate(idxs, start=1)}
+        for i, m in parts.items():
+            px = int(m.sum())
+            area = px * m2_per_px
+            if area > max_region_m2 and leaked:
+                results.append(SeedRegion(i, px, area, 0.0, None, comp, len(idxs) > 1, True, "component open to the outside"))
+                continue
+            poly, perim = _mask_polygon(m, r0, c0, x0, y0, S)
+            results.append(SeedRegion(i, px, area, perim * pt_per_px / S * 0 + perim, poly, comp, len(idxs) > 1, leaked))
+    diag["n_seed_regions"] = len(results)
+    diag["n_split_components"] = sum(1 for idxs in comp_seeds.values() if len(idxs) > 1)
+    diag["n_unplaced_seeds"] = int((seed_lab == 0).sum())
+    return results, diag
+
+
+def _mask_polygon(mask: np.ndarray, r0: int, c0: int, x0: float, y0: float, S: float):
+    """Polygon (page-view pt) of a boolean mask: pixel outline grown by half a pixel, holes kept; returns (polygon, perimeter pt)."""
+    m = np.pad(mask.astype(np.uint8), 1)
+    cnts, hier = cv2.findContours(m, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hier is None:
+        return None, 0.0
+    hier = hier[0]
+    rings: Dict[int, np.ndarray] = {}
+    for k, c in enumerate(cnts):
+        pts = c[:, 0, :].astype(float) - 1.0
+        pts = np.stack([x0 + (pts[:, 0] + c0 + 0.5) / S, y0 + (pts[:, 1] + r0 + 0.5) / S], axis=1)
+        if len(pts) >= 3:
+            rings[k] = pts
+    polys = []
+    for k, pts in rings.items():
+        if hier[k][3] >= 0:      # a hole: attached to its parent shell below
+            continue
+        holes = [rings[j] for j in rings if hier[j][3] == k]
+        polys.append(Polygon(pts, holes).buffer(0))
+    if not polys:
+        return None, 0.0
+    poly = polys[0] if len(polys) == 1 else shapely.union_all(polys)
+    poly = poly.buffer(0.5 / S, join_style="mitre", mitre_limit=2.0)
+    if poly.geom_type == "MultiPolygon":
+        poly = max(poly.geoms, key=lambda g: g.area)
+    return poly, float(poly.length)
+
+
+def roi_from_points(pts: np.ndarray, margin_pt: float = 40.0) -> Tuple[float, float, float, float]:
+    """Bounding box of seed points plus a margin."""
+    return (float(pts[:, 0].min() - margin_pt), float(pts[:, 1].min() - margin_pt),
+            float(pts[:, 0].max() + margin_pt), float(pts[:, 1].max() + margin_pt))
+
+
+def measure_rooms(wall_segments: np.ndarray, thin_segments: np.ndarray, tags: Sequence[dict], mm_per_pt: float,
+                  target_mm_per_px: float = 8.0, margin_pt: float = 40.0) -> Tuple[List[SeedRegion], dict]:
+    """Rasterise in tiles and grow a region from each tag seed; returns regions and diagnostics."""
+    seeds = np.array([[t["x_pv"], t["y_pv"]] for t in tags], float)
+    roi = roi_from_points(seeds, margin_pt)
+    S = pixels_per_pt(mm_per_pt, target_mm_per_px)
+    wall = render_tiles(wall_segments, roi, S)
+    thin = render_tiles(thin_segments, roi, S)
+    thin[wall > 0] = 0
+    m2_per_px = (mm_per_pt / S / 1000.0) ** 2
+    res, diag = grow_regions(wall, thin, roi, S, seeds, m2_per_px, mm_per_pt / 1000.0)
+    diag.update({"roi_pv": list(roi), "px_per_pt": S, "mm_per_px_x": mm_per_pt / S, "tile_px": TILE_PX})
+    return res, diag
