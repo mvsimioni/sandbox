@@ -1,0 +1,1131 @@
+"""Google Drive input/output for the AIGH IP ACMV pipeline.
+
+This is the ONLY module that touches Drive.  Two transports exist:
+
+``rclone``
+    Chosen automatically when ``rclone listremotes`` shows both ``aigh_src:``
+    and ``aigh_md:``.  Exactly the commands from the brief are run (lsjson,
+    copy, check); nothing else.
+
+``connector``
+    Otherwise.  The Google Drive connector of the Claude session lists
+    metadata and saves downloads of at most 10 MiB to disk.  It cannot be
+    called from Python, so here the Python side *plans* (``pull`` writes
+    ``state/pull_plan.csv``), *ingests* saved blobs (``ingest`` /
+    ``ingest-dir``) and *verifies* (``verify``) while agents do the fetching.
+
+Verbs: ``doctor``, ``list``, ``pull``, ``push-markdown`` plus the helpers
+``ingest``, ``ingest-dir``, ``verify``, ``record-push``, ``lock``, ``unlock``.
+
+Everything is idempotent and resumable; all state lives in files under
+``state/``.  Nothing under ``data/source`` is ever deleted except a
+just-ingested copy whose size did not match Drive's ``fileSize``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.metadata
+import importlib.util
+import json
+import os
+import platform
+import shutil
+import stat
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+try:  # package import (python -m src.drive_io, tests)
+    from src import common
+    from src.state import Progress, file_lock
+except ModuleNotFoundError:  # run as a plain script from inside src/
+    import common  # type: ignore[no-redef]
+    from state import Progress, file_lock  # type: ignore[no-redef,attr-defined]
+
+FOLDER_MIME = "application/vnd.google-apps.folder"
+CONNECTOR_LIMIT = common.CONNECTOR_LIMIT_BYTES
+SRC_REMOTE = "aigh_src"
+MD_REMOTE = "aigh_md"
+MARKDOWN_DRIVE_ROOT = "MarkDown"
+
+PLAN_COLUMNS = ("drive_id", "rel_path", "bytes", "mime_type", "transport_eligible", "status")
+PUSH_PLAN_COLUMNS = ("rel_path", "sha256", "bytes", "drive_path", "status")
+LEDGER_FIELDS = (
+    "drive_id", "rel_path", "local_path", "bytes", "sha256", "md5", "drive_md5",
+    "size_match", "md5_match", "fetched_at", "transport",
+)
+REQUIRED_PACKAGES: Dict[str, str] = {
+    # requirements.lock name -> import name
+    "markitdown": "markitdown",
+    "pymupdf": "fitz",
+    "pdfplumber": "pdfplumber",
+    "openpyxl": "openpyxl",
+    "python-pptx": "pptx",
+    "pandas": "pandas",
+    "ezdxf": "ezdxf",
+    "shapely": "shapely",
+    "pyyaml": "yaml",
+}
+# config key -> (root folder name on disk / in rel_path, exclude zips?)
+SOURCE_ROOTS: Tuple[Tuple[str, str, bool], ...] = (
+    ("dd_signoff", common.ROOT_DD, True),
+    ("template", common.ROOT_TEMPLATE, False),
+    ("basis", common.ROOT_BASIS, False),
+)
+
+
+# --------------------------------------------------------------------------- #
+# Paths and small utilities
+# --------------------------------------------------------------------------- #
+def paths() -> Dict[str, Path]:
+    """Project paths, resolved now so that ``AIGH_ROOT`` is honoured."""
+    return common.resolve_paths()
+
+
+def state_dir() -> Path:
+    """``state/`` for the current project root."""
+    return paths()["state"]
+
+
+def source_dir() -> Path:
+    """``data/source`` for the current project root."""
+    return paths()["source"]
+
+
+def markdown_dir() -> Path:
+    """``out/markdown`` for the current project root."""
+    return paths()["markdown"]
+
+
+def pull_plan_path() -> Path:
+    """``state/pull_plan.csv``."""
+    return state_dir() / "pull_plan.csv"
+
+
+def pull_ledger_path() -> Path:
+    """``state/pull_ledger.jsonl``."""
+    return state_dir() / "pull_ledger.jsonl"
+
+
+def push_plan_path() -> Path:
+    """``state/push_plan.csv``."""
+    return state_dir() / "push_plan.csv"
+
+
+def push_ledger_path() -> Path:
+    """``state/push_ledger.jsonl``."""
+    return state_dir() / "push_ledger.jsonl"
+
+
+def lock_state_path() -> Path:
+    """``state/source_lock.json``."""
+    return state_dir() / "source_lock.json"
+
+
+def progress() -> Progress:
+    """Progress tracker bound to the current project root."""
+    return Progress(state_dir() / "progress.json")
+
+
+def _log(line: str) -> None:
+    """Append one timestamped line to ``logs/drive_io.log`` (best effort)."""
+    try:
+        log_dir = paths().get("logs", common.project_root() / "logs")
+        common.ensure_dir(log_dir)
+        with (log_dir / "drive_io.log").open("a", encoding="utf-8") as handle:
+            handle.write(f"{common.utc_now_iso()}\t{line}\n")
+    except OSError:
+        pass
+
+
+def _run(argv: Sequence[str], cwd: Optional[Path] = None, timeout: Optional[int] = None) -> subprocess.CompletedProcess:
+    """Run an external command, log it, and return the completed process (never raises on exit code)."""
+    _log("run: " + " ".join(argv))
+    try:
+        return subprocess.run(list(argv), cwd=str(cwd) if cwd else None, capture_output=True, text=True, timeout=timeout)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        _log(f"run failed: {exc}")
+        return subprocess.CompletedProcess(list(argv), 127, "", str(exc))
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    """Coerce Drive's string sizes (and None) to ``int``."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_iso(stamp: str) -> datetime:
+    """Parse an ISO-8601 UTC stamp with or without fractional seconds."""
+    text = stamp.strip().replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(text)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+# --------------------------------------------------------------------------- #
+# Transport
+# --------------------------------------------------------------------------- #
+def rclone_remotes() -> List[str]:
+    """Remote names reported by ``rclone listremotes`` (empty when rclone is absent)."""
+    proc = _run(["rclone", "listremotes"])
+    if proc.returncode != 0:
+        return []
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip().endswith(":")]
+
+
+def detect_transport() -> str:
+    """``rclone`` when both project remotes exist, otherwise ``connector``."""
+    remotes = set(rclone_remotes())
+    return "rclone" if {f"{SRC_REMOTE}:", f"{MD_REMOTE}:"} <= remotes else "connector"
+
+
+def drive_folder_ids() -> Dict[str, str]:
+    """``{config key: Drive folder id}`` from ``config.drive.folders``."""
+    folders = common.load_config().get("drive", {}).get("folders", {}) or {}
+    return {key: str(value.get("id", "")) for key, value in folders.items() if isinstance(value, dict)}
+
+
+def rclone_source(folder_id: str) -> str:
+    """The rclone remote string for a source folder, exactly as the brief writes it."""
+    return f"{SRC_REMOTE},root_folder_id={folder_id}:"
+
+
+# --------------------------------------------------------------------------- #
+# Listings
+# --------------------------------------------------------------------------- #
+def listings_dir() -> Path:
+    """``state/listings``."""
+    return state_dir() / "listings"
+
+
+def listing_files() -> List[Path]:
+    """Consolidated listings, oldest first (names sort chronologically)."""
+    if not listings_dir().is_dir():
+        return []
+    return sorted(listings_dir().glob("listing_*.json"))
+
+
+def latest_listing() -> Optional[Dict[str, Any]]:
+    """The most recent consolidated listing, or ``None``."""
+    files = listing_files()
+    if not files:
+        return None
+    return json.loads(files[-1].read_text(encoding="utf-8"))
+
+
+def load_listing(path: Path) -> Dict[str, Any]:
+    """Read one consolidated listing file."""
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def read_raw_jsonl_listing() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+    """Consolidate ``state/drive_listing/*.jsonl``: ``(files, folders, inputs)`` deduplicated by id.
+
+    When an id appears more than once the entry with the latest ``listed_at``
+    wins.  ``inputs`` records the name, size and SHA-256 of each JSONL so a
+    rerun on unchanged inputs can be recognised.
+    """
+    raw_dir = state_dir() / "drive_listing"
+    by_id: Dict[str, Dict[str, Any]] = {}
+    inputs: Dict[str, Any] = {}
+    for jsonl in sorted(raw_dir.glob("*.jsonl")) if raw_dir.is_dir() else []:
+        inputs[jsonl.name] = {"bytes": jsonl.stat().st_size, "sha256": common.sha256_file(jsonl)}
+        for entry in common.read_jsonl(jsonl):
+            if not isinstance(entry, dict) or not entry.get("id"):
+                continue
+            previous = by_id.get(entry["id"])
+            if previous is None or str(entry.get("listed_at", "")) >= str(previous.get("listed_at", "")):
+                by_id[entry["id"]] = entry
+    files = [e for e in by_id.values() if e.get("mimeType") != FOLDER_MIME]
+    folders = [e for e in by_id.values() if e.get("mimeType") == FOLDER_MIME]
+    key = lambda e: str(e.get("rel_path", ""))  # noqa: E731
+    return sorted(files, key=key), sorted(folders, key=key), inputs
+
+
+def _rclone_entry(root_name: str, item: Dict[str, Any], listed_at: str) -> Dict[str, Any]:
+    """Map one ``rclone lsjson`` item to the shared listing shape."""
+    rel = f"{root_name}/{item.get('Path', '')}"
+    name = item.get("Name") or rel.rsplit("/", 1)[-1]
+    entry: Dict[str, Any] = {
+        "id": item.get("ID"),
+        "title": name,
+        "mimeType": item.get("MimeType") or "application/octet-stream",
+        "fileSize": str(_as_int(item.get("Size"))),
+        "fileExtension": common.file_ext(name),
+        "modifiedTime": item.get("ModTime"),
+        "rel_path": rel,
+        "listed_at": listed_at,
+    }
+    md5 = (item.get("Hashes") or {}).get("md5")
+    if md5:
+        entry["md5Checksum"] = md5
+    return entry
+
+
+def read_rclone_listing() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+    """Run ``rclone lsjson -R --files-only --hash`` per source folder and map to the listing shape."""
+    listed_at = common.utc_now_iso()
+    files: List[Dict[str, Any]] = []
+    folder_paths: set[str] = set()
+    ids = drive_folder_ids()
+    for key, root_name, _exclude in SOURCE_ROOTS:
+        proc = _run(["rclone", "lsjson", "-R", "--files-only", "--hash", rclone_source(ids[key])])
+        if proc.returncode != 0:
+            raise RuntimeError(f"rclone lsjson failed for {root_name}: {proc.stderr.strip()}")
+        for item in json.loads(proc.stdout or "[]"):
+            entry = _rclone_entry(root_name, item, listed_at)
+            files.append(entry)
+            parts = entry["rel_path"].split("/")
+            folder_paths.update("/".join(parts[:n]) for n in range(1, len(parts)))
+    folders = [{"id": None, "title": p.rsplit("/", 1)[-1], "mimeType": FOLDER_MIME, "rel_path": p, "listed_at": listed_at}
+               for p in sorted(folder_paths)]
+    return sorted(files, key=lambda e: e["rel_path"]), folders, {"transport": "rclone"}
+
+
+def _new_listing_path(now: datetime) -> Tuple[Path, str]:
+    """Pick ``listing_<stamp>.json``; bump by a second until the name is free so two runs never collide."""
+    while True:
+        stamp = now.strftime("%Y%m%dT%H%M%SZ")
+        path = listings_dir() / f"listing_{stamp}.json"
+        if not path.exists():
+            return path, now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        now += timedelta(seconds=1)
+
+
+def write_listing(files: List[Dict[str, Any]], folders: List[Dict[str, Any]], inputs: Dict[str, Any],
+                  force: bool = False) -> Tuple[Path, bool]:
+    """Write a consolidated listing unless the inputs are unchanged since the latest one.
+
+    Returns ``(path, written)``; when not written ``path`` is the existing latest listing.
+    """
+    existing = listing_files()
+    if existing and not force:
+        last = load_listing(existing[-1])
+        if last.get("inputs") == inputs and inputs:
+            return existing[-1], False
+    path, taken_at = _new_listing_path(datetime.now(timezone.utc))
+    doc = {"taken_at": taken_at, "inputs": inputs, "files": files, "folders": folders}
+    common.atomic_write_json(path, doc)
+    return path, True
+
+
+def department_key(rel_path: str) -> Optional[str]:
+    """Top-level folder name under ``DD Sign-OFF`` (``None`` outside that root)."""
+    segs = [s for s in rel_path.split("/") if s]
+    if len(segs) < 2 or segs[0] != common.ROOT_DD:
+        return None
+    folder = segs[1]
+    if len(segs) == 2 and common.is_zip(folder):
+        folder = folder[: -len(".zip")]
+    return folder
+
+
+def department_signatures(listing: Dict[str, Any]) -> Dict[str, set]:
+    """``{department: {(id, modifiedTime, fileSize), ...}}`` over the files of a listing."""
+    sigs: Dict[str, set] = {}
+    for entry in listing.get("files", []):
+        key = department_key(str(entry.get("rel_path", "")))
+        if key is None:
+            continue
+        sigs.setdefault(key, set()).add((entry.get("id"), entry.get("modifiedTime"), str(entry.get("fileSize", ""))))
+    for entry in listing.get("folders", []):
+        key = department_key(str(entry.get("rel_path", "")))
+        if key is not None:
+            sigs.setdefault(key, set())
+    return sigs
+
+
+def compare_listings(previous: Dict[str, Any], current: Dict[str, Any], names: Tuple[str, str]) -> Dict[str, Any]:
+    """Stable/unstable departments between two listings (a changed signature set is unstable)."""
+    before, after = department_signatures(previous), department_signatures(current)
+    departments = sorted(set(before) | set(after))
+    unstable = [d for d in departments if before.get(d) != after.get(d)]
+    stable = [d for d in departments if d not in unstable]
+    try:
+        minutes = round((_parse_iso(current["taken_at"]) - _parse_iso(previous["taken_at"])).total_seconds() / 60.0, 2)
+    except (KeyError, ValueError):
+        minutes = None
+    return {"compared": [names[0], names[1]], "minutes_apart": minutes, "unstable": unstable, "stable": stable}
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    """``list``: consolidate the listing, then compare with the previous one for stability."""
+    transport = args.transport or detect_transport()
+    if transport == "rclone":
+        files, folders, inputs = read_rclone_listing()
+        inputs["taken"] = common.utc_now_iso()  # every rclone run is a fresh snapshot
+    else:
+        files, folders, inputs = read_raw_jsonl_listing()
+    if not files and not folders:
+        print("error: no listing data found (state/drive_listing/*.jsonl is empty)", file=sys.stderr)
+        return 1
+    path, written = write_listing(files, folders, inputs, force=args.force)
+    verb = "wrote" if written else "unchanged, kept"
+    print(f"{verb} {path.relative_to(common.project_root())}: {len(files)} files, {len(folders)} folders ({transport})")
+    all_listings = listing_files()
+    if len(all_listings) >= 2:
+        prev_path, cur_path = all_listings[-2], all_listings[-1]
+        report = compare_listings(load_listing(prev_path), load_listing(cur_path), (prev_path.name, cur_path.name))
+        common.atomic_write_json(state_dir() / "unstable_departments.json", report)
+        print(f"compared {prev_path.name} with {cur_path.name} ({report['minutes_apart']} minutes apart): "
+              f"{len(report['stable'])} stable, {len(report['unstable'])} unstable")
+        for dept in report["unstable"]:
+            print(f"  unstable: {dept}")
+    else:
+        print("only one consolidated listing so far; run list again after the listing interval to test stability")
+    progress().set("drive_io:list", "done", hash=path.name, transport=transport)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Ledger helpers
+# --------------------------------------------------------------------------- #
+def ledger_rows(path: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """All pull-ledger rows (append-only; the last row per drive_id is current)."""
+    return [row for row in common.read_jsonl(path or pull_ledger_path()) if isinstance(row, dict)]
+
+
+def ledger_by_id(path: Optional[Path] = None) -> Dict[str, Dict[str, Any]]:
+    """``{drive_id: latest ledger row}``."""
+    latest: Dict[str, Dict[str, Any]] = {}
+    for row in ledger_rows(path):
+        if row.get("drive_id"):
+            latest[str(row["drive_id"])] = row
+    return latest
+
+
+def append_ledger(row: Dict[str, Any]) -> None:
+    """Append one row to the pull ledger under the shared lock."""
+    with file_lock(pull_ledger_path()):
+        common.append_jsonl(pull_ledger_path(), {k: row.get(k) for k in LEDGER_FIELDS})
+
+
+def listing_index(listing: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """``{id: file entry}`` for the files of a listing."""
+    return {str(e["id"]): e for e in listing.get("files", []) if e.get("id")}
+
+
+def local_rel_path(entry: Dict[str, Any], listing: Dict[str, Any]) -> str:
+    """Where a listing entry lives under ``data/source``.
+
+    Drive allows two files with the same path; the first id (sorted) keeps the
+    plain path and later ones get ``<stem>~<id8><suffix>`` so neither is lost.
+    """
+    rel = str(entry["rel_path"])
+    twins = sorted(str(e["id"]) for e in listing.get("files", []) if e.get("rel_path") == rel and e.get("id"))
+    if len(twins) <= 1 or twins[0] == str(entry["id"]):
+        return rel
+    head, _, name = rel.rpartition("/")
+    stem, dot, ext = name.rpartition(".")
+    tagged = f"{stem}~{str(entry['id'])[:8]}.{ext}" if dot and stem else f"{name}~{str(entry['id'])[:8]}"
+    return f"{head}/{tagged}" if head else tagged
+
+
+# --------------------------------------------------------------------------- #
+# Pull plan
+# --------------------------------------------------------------------------- #
+def plan_status(entry: Dict[str, Any], fetched_ids: set) -> str:
+    """Status of one listing file for the pull plan."""
+    if common.is_zip(str(entry.get("rel_path", ""))):
+        return "skipped_zip"
+    if str(entry.get("id")) in fetched_ids:
+        return "fetched"
+    return "pending" if _as_int(entry.get("fileSize")) <= CONNECTOR_LIMIT else "blocked_connector_limit"
+
+
+def build_pull_plan(listing: Dict[str, Any], transport: str) -> List[Dict[str, Any]]:
+    """Pull-plan rows for every non-folder entry of ``listing``."""
+    fetched = set(ledger_by_id())
+    rows: List[Dict[str, Any]] = []
+    for entry in listing.get("files", []):
+        size = _as_int(entry.get("fileSize"))
+        eligible = transport == "rclone" or size <= CONNECTOR_LIMIT
+        rows.append({
+            "drive_id": entry.get("id"),
+            "rel_path": entry.get("rel_path"),
+            "bytes": size,
+            "mime_type": entry.get("mimeType", ""),
+            "transport_eligible": "y" if eligible else "n",
+            "status": plan_status(entry, fetched),
+        })
+    return rows
+
+
+def write_pull_plan(rows: Iterable[Dict[str, Any]]) -> Path:
+    """Write ``state/pull_plan.csv`` under the shared lock."""
+    with file_lock(pull_plan_path()):
+        return common.write_csv_dicts(pull_plan_path(), rows, PLAN_COLUMNS)
+
+
+def mark_plan_fetched(drive_id: str) -> None:
+    """Set the plan row for ``drive_id`` to ``fetched`` (no-op when the plan or row is absent)."""
+    with file_lock(pull_plan_path()):
+        rows = common.read_csv_dicts(pull_plan_path())
+        changed = False
+        for row in rows:
+            if row.get("drive_id") == drive_id and row.get("status") != "fetched":
+                row["status"] = "fetched"
+                changed = True
+        if changed:
+            common.write_csv_dicts(pull_plan_path(), rows, PLAN_COLUMNS)
+
+
+def _count_by(rows: List[Dict[str, Any]], key: str) -> Dict[str, int]:
+    """Counts of ``rows`` grouped by ``row[key]``."""
+    counts: Dict[str, int] = {}
+    for row in rows:
+        value = str(row.get(key, ""))
+        counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def print_plan_summary(rows: List[Dict[str, Any]]) -> None:
+    """Human summary of the pull plan: by status and by root."""
+    print("pull plan by status:")
+    for status, count in _count_by(rows, "status").items():
+        print(f"  {status:24s} {count:6d}")
+    print("pull plan by root:")
+    by_root = _count_by([{"root": common.parse_department(str(r["rel_path"]))["root"]} for r in rows], "root")
+    for root, count in by_root.items():
+        print(f"  {root:24s} {count:6d}")
+    pending = [r for r in rows if r["status"] == "pending"]
+    blocked = [r for r in rows if r["status"] == "blocked_connector_limit"]
+    print(f"{len(pending)} pending, {len(blocked)} blocked by the connector limit ({CONNECTOR_LIMIT} bytes)")
+
+
+CONNECTOR_INSTRUCTION = """\
+INSTRUCTION (connector mode): an agent must fetch every row of state/pull_plan.csv whose status is
+'pending' through the Google Drive connector (download by drive_id, save the blob to a scratch directory),
+then run for each saved file:
+    python -m src.drive_io ingest --blob <saved file> --drive-id <drive_id> --move
+or for a batch:
+    python -m src.drive_io ingest-dir --dir <scratch dir> --map <blob-name-to-drive_id json or csv> --move
+Rows with status 'blocked_connector_limit' exceed the connector's 10485760-byte limit and need the
+transport chosen in decisions_needed D-001 (upload or rclone). Finish with: python -m src.drive_io verify
+"""
+
+
+def rclone_pull_commands(root_dir: Path) -> List[Tuple[str, List[str], List[str]]]:
+    """``(root name, copy argv, check argv)`` per source root, exactly as the brief specifies."""
+    ids = drive_folder_ids()
+    commands: List[Tuple[str, List[str], List[str]]] = []
+    for key, root_name, exclude in SOURCE_ROOTS:
+        source, dest = rclone_source(ids[key]), str(root_dir / root_name)
+        flags = ["--exclude", "*.zip", "--ignore-case"] if exclude else []
+        commands.append((root_name, ["rclone", "copy", source, dest, *flags],
+                         ["rclone", "check", source, dest, "--one-way", *flags]))
+    return commands
+
+
+def ingest_rclone_tree(listing: Dict[str, Any]) -> int:
+    """After an rclone copy, append a ledger row (with hashes) for every copied file not yet in the ledger."""
+    by_rel = {str(e.get("rel_path")): e for e in listing.get("files", [])}
+    known = ledger_by_id()
+    root, added = source_dir(), 0
+    for path in sorted(p for p in root.rglob("*") if p.is_file() and not p.name.startswith(".")):
+        rel = path.relative_to(root).as_posix()
+        entry = by_rel.get(rel)
+        drive_id = str(entry.get("id")) if entry else f"path:{rel}"
+        if drive_id in known:
+            continue
+        append_ledger(ledger_row(drive_id, rel, path, entry or {}, "rclone"))
+        added += 1
+    return added
+
+
+def cmd_pull(args: argparse.Namespace) -> int:
+    """``pull``: unlock, plan (connector) or copy+check+ledger (rclone), then lock again."""
+    listing = latest_listing()
+    if listing is None:
+        print("error: no consolidated listing; run `list` first", file=sys.stderr)
+        return 1
+    transport = args.transport or detect_transport()
+    unlock_source()
+    try:
+        if transport == "rclone":
+            return _pull_rclone(listing)
+        rows = build_pull_plan(listing, transport)
+        write_pull_plan(rows)
+        print(f"wrote {pull_plan_path().relative_to(common.project_root())} ({len(rows)} rows)")
+        print_plan_summary(rows)
+        print(CONNECTOR_INSTRUCTION)
+        progress().set("drive_io:pull_plan", "done", hash=common.sha256_file(pull_plan_path()), transport=transport)
+        return 0
+    finally:
+        lock_source()
+
+
+def _pull_rclone(listing: Dict[str, Any]) -> int:
+    """Run the rclone copy and check commands and ledger every copied file."""
+    failures = 0
+    for root_name, copy_argv, check_argv in rclone_pull_commands(source_dir()):
+        for argv in (copy_argv, check_argv):
+            proc = _run(argv)
+            print(f"{root_name}: {argv[1]} exit {proc.returncode}")
+            if proc.returncode != 0:
+                failures += 1
+                print(proc.stderr.strip(), file=sys.stderr)
+    added = ingest_rclone_tree(listing)
+    print(f"ledger: {added} new rows, {len(ledger_by_id())} total")
+    write_pull_plan(build_pull_plan(listing, "rclone"))
+    progress().set("drive_io:pull", "done" if not failures else "failed", transport="rclone")
+    return 1 if failures else 0
+
+
+# --------------------------------------------------------------------------- #
+# Ingest (connector mode)
+# --------------------------------------------------------------------------- #
+def ledger_row(drive_id: str, rel_path: str, local: Path, entry: Dict[str, Any], transport: str) -> Dict[str, Any]:
+    """Hash ``local`` and build a ledger row compared against the Drive metadata in ``entry``."""
+    size = local.stat().st_size
+    drive_size = entry.get("fileSize")
+    drive_md5 = entry.get("md5Checksum") or None
+    md5 = common.md5_file(local)
+    return {
+        "drive_id": drive_id,
+        "rel_path": rel_path,
+        "local_path": local.relative_to(common.project_root()).as_posix(),
+        "bytes": size,
+        "sha256": common.sha256_file(local),
+        "md5": md5,
+        "drive_md5": drive_md5,
+        "size_match": (_as_int(drive_size, -1) == size) if drive_size is not None else True,
+        "md5_match": (md5 == drive_md5) if drive_md5 else None,
+        "fetched_at": common.utc_now_iso(),
+        "transport": transport,
+    }
+
+
+def _writable_chain(dest: Path) -> None:
+    """Make every existing directory from ``data/source`` down to ``dest.parent`` writable, then create the rest.
+
+    ``lock`` may have made the whole tree immutable; a connector ingest only
+    needs the one branch it writes to, and :func:`_relock_if_locked` restores
+    the lock afterwards.
+    """
+    root = common.ensure_dir(source_dir())
+    chain = [root]
+    current = root
+    for part in dest.parent.relative_to(root).parts:
+        current = current / part
+        chain.append(current)
+    for directory in chain:
+        if directory.exists():
+            _make_writable(directory)
+        else:
+            directory.mkdir()
+
+
+def _relock_if_locked() -> None:
+    """Re-apply the source lock when ``state/source_lock.json`` says the tree should be locked."""
+    if lock_state_path().exists() and json.loads(lock_state_path().read_text(encoding="utf-8")).get("locked"):
+        lock_source()
+
+
+def _place_blob(blob: Path, dest: Path, move: bool) -> None:
+    """Copy or move ``blob`` to ``dest`` (parents created and made writable for the write)."""
+    _writable_chain(dest)
+    if move:
+        shutil.move(str(blob), str(dest))
+    else:
+        shutil.copy2(str(blob), str(dest))
+
+
+def _supersede(dest: Path) -> Path:
+    """Rename an existing file to ``<name>.superseded.<sha8>`` and return the new path."""
+    sha8 = common.sha256_file(dest)[:8]
+    kept = dest.with_name(f"{dest.name}.superseded.{sha8}")
+    if not kept.exists():
+        _writable_chain(dest)
+        _make_writable(dest)
+        dest.rename(kept)
+    return kept
+
+
+def _finish_ingest(drive_id: str, rel: str, dest: Path, entry: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    """Hash the placed copy, ledger it and decide the exit code (size mismatch deletes the copy)."""
+    row = ledger_row(drive_id, rel, dest, entry, "connector")
+    if not row["size_match"]:
+        dest.unlink()  # the only deletion under data/source: a just-ingested copy of the wrong size
+        print(f"error: size mismatch for {rel}: Drive {entry.get('fileSize')} bytes, blob {row['bytes']} bytes; "
+              f"copy deleted", file=sys.stderr)
+        return 2, row
+    append_ledger(row)
+    progress().set(f"pull:{drive_id}", "fetched" if row["md5_match"] is not False else "md5_mismatch",
+                   hash=row["sha256"], rel_path=rel)
+    if row["md5_match"] is False:
+        print(f"warning: md5 mismatch for {rel}: Drive {row['drive_md5']}, local {row['md5']}; file kept, "
+              f"plan row left pending, re-fetch with --force", file=sys.stderr)
+        return 3, row
+    mark_plan_fetched(drive_id)
+    return 0, row
+
+
+def ingest_blob(blob: Path, drive_id: str, move: bool = False, force: bool = False,
+                listing: Optional[Dict[str, Any]] = None) -> int:
+    """Ingest one saved download into ``data/source``; returns a process exit code.
+
+    0 success (or already present and identical), 1 usage/refusal, 2 size
+    mismatch (copy deleted), 3 md5 mismatch (file kept, not marked fetched).
+    """
+    listing = listing or latest_listing()
+    if listing is None:
+        print("error: no consolidated listing; run `list` first", file=sys.stderr)
+        return 1
+    entry = listing_index(listing).get(drive_id)
+    if entry is None:
+        print(f"error: drive id {drive_id} not in the latest listing", file=sys.stderr)
+        return 1
+    if not blob.is_file():
+        print(f"error: blob not found: {blob}", file=sys.stderr)
+        return 1
+    rel = local_rel_path(entry, listing)
+    dest = source_dir() / rel
+    if dest.exists():
+        if common.sha256_file(dest) == common.sha256_file(blob):
+            print(f"already present and identical: {rel}")
+            if drive_id not in ledger_by_id():
+                append_ledger(ledger_row(drive_id, rel, dest, entry, "connector"))
+            mark_plan_fetched(drive_id)
+            if move:
+                blob.unlink()
+            return 0
+        if not force:
+            print(f"refused: {rel} exists with a different sha256; use --force to supersede it", file=sys.stderr)
+            return 1
+        kept = _supersede(dest)
+        print(f"superseded: previous copy kept as {kept.name}")
+    _place_blob(blob, dest, move)
+    code, row = _finish_ingest(drive_id, rel, dest, entry)
+    if code == 0:
+        print(f"ingested {rel} ({row['bytes']} bytes, sha256 {row['sha256'][:12]}...)")
+    return code
+
+
+def cmd_ingest(args: argparse.Namespace) -> int:
+    """``ingest --blob <file> --drive-id <id> [--move] [--force]``; the source lock is restored afterwards."""
+    try:
+        return ingest_blob(Path(args.blob), args.drive_id, move=args.move, force=args.force)
+    finally:
+        _relock_if_locked()
+
+
+def read_blob_map(path: Path) -> Dict[str, str]:
+    """``{blob file name: drive_id}`` from a JSON object/list or a CSV with ``blob``/``drive_id`` columns."""
+    if path.suffix.lower() == ".json":
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+        return {str(item.get("blob") or item.get("file") or item.get("name")): str(item.get("drive_id"))
+                for item in data}
+    mapping: Dict[str, str] = {}
+    for row in common.read_csv_dicts(path):
+        name = row.get("blob") or row.get("file") or row.get("name")
+        if name and row.get("drive_id"):
+            mapping[name] = row["drive_id"]
+    return mapping
+
+
+def cmd_ingest_dir(args: argparse.Namespace) -> int:
+    """``ingest-dir --dir <dir> --map <json|csv> [--move] [--force]``: ingest a batch; non-zero if any failed."""
+    listing = latest_listing()
+    mapping = read_blob_map(Path(args.map))
+    if not mapping:
+        print(f"error: empty mapping {args.map}", file=sys.stderr)
+        return 1
+    outcomes: Dict[str, int] = {}
+    try:
+        for name, drive_id in sorted(mapping.items()):
+            code = ingest_blob(Path(args.dir) / name, drive_id, move=args.move, force=args.force, listing=listing)
+            outcomes[name] = code
+    finally:
+        _relock_if_locked()
+    failed = {n: c for n, c in outcomes.items() if c != 0}
+    print(f"ingest-dir: {len(outcomes) - len(failed)} ok, {len(failed)} failed")
+    for name, code in failed.items():
+        print(f"  failed ({code}): {name}")
+    return 1 if failed else 0
+
+
+# --------------------------------------------------------------------------- #
+# Verify
+# --------------------------------------------------------------------------- #
+def verify_row(row: Dict[str, Any], entry: Optional[Dict[str, Any]]) -> List[str]:
+    """Problems with one ledger row: missing file, hash/size drift, disagreement with the listing."""
+    problems: List[str] = []
+    local = common.project_root() / str(row.get("local_path", ""))
+    if not local.is_file():
+        return [f"missing: {row.get('local_path')}"]
+    size, sha = local.stat().st_size, common.sha256_file(local)
+    if size != _as_int(row.get("bytes"), -1):
+        problems.append(f"size differs from ledger: {size} != {row.get('bytes')}")
+    if sha != row.get("sha256"):
+        problems.append("sha256 differs from ledger")
+    if entry is not None:
+        if entry.get("fileSize") is not None and _as_int(entry.get("fileSize"), -1) != size:
+            problems.append(f"size differs from Drive: {size} != {entry.get('fileSize')}")
+        drive_md5 = entry.get("md5Checksum")
+        if drive_md5 and common.md5_file(local) != drive_md5:
+            problems.append("md5 differs from Drive")
+    return problems
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """``verify``: re-hash every ledger file against the ledger and the latest listing; exit 1 on any mismatch."""
+    listing = latest_listing() or {"files": []}
+    index = listing_index(listing)
+    rows = ledger_by_id()
+    if not rows:
+        print("ledger is empty; nothing to verify")
+        return 0
+    mismatches = 0
+    for drive_id, row in sorted(rows.items(), key=lambda kv: str(kv[1].get("rel_path"))):
+        problems = verify_row(row, index.get(drive_id))
+        if problems:
+            mismatches += 1
+            print(f"MISMATCH {row.get('rel_path')}: " + "; ".join(problems))
+    print(f"verified {len(rows)} ledger files: {len(rows) - mismatches} ok, {mismatches} mismatched")
+    progress().set("drive_io:verify", "done" if not mismatches else "failed", mismatches=mismatches)
+    return 1 if mismatches else 0
+
+
+# --------------------------------------------------------------------------- #
+# Push markdown
+# --------------------------------------------------------------------------- #
+def push_ledger_by_path() -> Dict[str, Dict[str, Any]]:
+    """``{rel_path: latest push-ledger row}``."""
+    latest: Dict[str, Dict[str, Any]] = {}
+    for row in common.read_jsonl(push_ledger_path()):
+        if isinstance(row, dict) and row.get("rel_path"):
+            latest[str(row["rel_path"])] = row
+    return latest
+
+
+def markdown_files() -> List[Path]:
+    """Every regular file under ``out/markdown`` (sorted)."""
+    root = markdown_dir()
+    if not root.is_dir():
+        return []
+    return sorted(p for p in root.rglob("*") if p.is_file() and not p.name.startswith("."))
+
+
+def build_push_plan() -> List[Dict[str, Any]]:
+    """Push-plan rows: every markdown file, ``pushed`` when the ledger has it with the same sha256."""
+    pushed = push_ledger_by_path()
+    rows: List[Dict[str, Any]] = []
+    for path in markdown_files():
+        rel = path.relative_to(markdown_dir()).as_posix()
+        sha = common.sha256_file(path)
+        done = pushed.get(rel, {}).get("sha256") == sha
+        rows.append({"rel_path": rel, "sha256": sha, "bytes": path.stat().st_size,
+                     "drive_path": f"{MARKDOWN_DRIVE_ROOT}/{rel}", "status": "pushed" if done else "pending"})
+    return rows
+
+
+def rclone_push_commands() -> List[List[str]]:
+    """The two push commands, exactly as the brief specifies (run from the project root)."""
+    return [["rclone", "copy", "out/markdown", f"{MD_REMOTE}:"],
+            ["rclone", "check", "out/markdown", f"{MD_REMOTE}:", "--one-way"]]
+
+
+def record_push(rel_path: str, drive_id: Optional[str], transport: str) -> Dict[str, Any]:
+    """Append a push-ledger row for ``rel_path`` (sha256 of the local file at this moment)."""
+    local = markdown_dir() / rel_path
+    if not local.is_file():
+        raise FileNotFoundError(f"not under out/markdown: {rel_path}")
+    row = {"rel_path": rel_path, "drive_path": f"{MARKDOWN_DRIVE_ROOT}/{rel_path}", "drive_id": drive_id,
+           "sha256": common.sha256_file(local), "bytes": local.stat().st_size,
+           "pushed_at": common.utc_now_iso(), "transport": transport}
+    with file_lock(push_ledger_path()):
+        common.append_jsonl(push_ledger_path(), row)
+    return row
+
+
+def cmd_push_markdown(args: argparse.Namespace) -> int:
+    """``push-markdown``: rclone copy+check, or a connector push plan."""
+    transport = args.transport or detect_transport()
+    if transport == "rclone":
+        for argv in rclone_push_commands():
+            proc = _run(argv, cwd=common.project_root())
+            print(f"{argv[1]} exit {proc.returncode}")
+            if proc.returncode != 0:
+                print(proc.stderr.strip(), file=sys.stderr)
+                return 1
+        pending = [r for r in build_push_plan() if r["status"] == "pending"]
+        for row in pending:
+            record_push(row["rel_path"], None, "rclone")
+        print(f"push ledger: {len(pending)} new rows")
+        return 0
+    rows = build_push_plan()
+    common.write_csv_dicts(push_plan_path(), rows, PUSH_PLAN_COLUMNS)
+    pending_count = sum(1 for r in rows if r["status"] == "pending")
+    print(f"wrote {push_plan_path().relative_to(common.project_root())}: {len(rows)} files, {pending_count} pending")
+    print("INSTRUCTION (connector mode): an agent copies each pending file to Drive folder MarkDown at drive_path,\n"
+          "then runs: python -m src.drive_io record-push --path <rel_path> --drive-id <new file id>")
+    return 0
+
+
+def cmd_record_push(args: argparse.Namespace) -> int:
+    """``record-push --path <rel> --drive-id <id>``."""
+    row = record_push(args.path, args.drive_id, "connector")
+    print(json.dumps(row, ensure_ascii=False))
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Lock / unlock data/source
+# --------------------------------------------------------------------------- #
+def _chmod_tree(root: Path, writable: bool) -> None:
+    """Add or remove write bits on every directory and file under ``root``."""
+    for path in [root, *root.rglob("*")]:
+        try:
+            mode = path.lstat().st_mode
+            if stat.S_ISLNK(mode):
+                continue
+            bits = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+            path.chmod((mode | stat.S_IWUSR) if writable else (mode & ~bits))
+        except OSError:
+            pass
+
+
+def _make_writable(path: Path) -> None:
+    """Best-effort: clear the immutable flag and add the owner write bit on one file or directory."""
+    try:
+        _run(["chattr", "-i", str(path)])
+        path.chmod(path.stat().st_mode | stat.S_IWUSR)
+    except OSError:
+        pass
+
+
+def _probe_enforced(root: Path) -> bool:
+    """True when creating ``.lock_probe`` under ``root`` fails (the lock really bites, even for root)."""
+    probe = root / ".lock_probe"
+    try:
+        with probe.open("x"):
+            pass
+    except OSError:
+        return True
+    try:
+        probe.unlink()  # our own probe, created a moment ago; never a record document
+    except OSError:
+        pass
+    return False
+
+
+def lock_source() -> Dict[str, Any]:
+    """Lock ``data/source``: ``chattr -R +i`` first, else ``chmod -R a-w``; record and verify honestly."""
+    root = common.ensure_dir(source_dir())
+    proc = _run(["chattr", "-R", "+i", str(root)])
+    if proc.returncode == 0:
+        method = "chattr"
+    else:
+        _chmod_tree(root, writable=False)
+        method = "chmod"
+    enforced = _probe_enforced(root)
+    state: Dict[str, Any] = {"locked": True, "method": method, "enforced": enforced, "uid": os.getuid(),
+             "note": ("chattr +i refused: " + proc.stderr.strip()) if method == "chmod" else "",
+             "at": common.utc_now_iso()}
+    if method == "chmod" and not enforced:
+        state["note"] += "; root ignores chmod bits, so the lock is advisory for this user"
+    common.atomic_write_json(lock_state_path(), state)
+    return state
+
+
+def unlock_source() -> Dict[str, Any]:
+    """Undo :func:`lock_source` (both methods, whichever was recorded) and record the state."""
+    root = common.ensure_dir(source_dir())
+    previous = json.loads(lock_state_path().read_text(encoding="utf-8")) if lock_state_path().exists() else {}
+    notes: List[str] = []
+    if previous.get("method") == "chattr" or not previous:
+        proc = _run(["chattr", "-R", "-i", str(root)])
+        if proc.returncode != 0:
+            notes.append("chattr -i failed: " + proc.stderr.strip())
+    _chmod_tree(root, writable=True)
+    state = {"locked": False, "method": previous.get("method"), "enforced": False,
+             "note": "; ".join(notes), "at": common.utc_now_iso()}
+    common.atomic_write_json(lock_state_path(), state)
+    return state
+
+
+def cmd_lock(_args: argparse.Namespace) -> int:
+    """``lock``."""
+    state = lock_source()
+    print(json.dumps(state, ensure_ascii=False))
+    return 0
+
+
+def cmd_unlock(_args: argparse.Namespace) -> int:
+    """``unlock``."""
+    state = unlock_source()
+    print(json.dumps(state, ensure_ascii=False))
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Doctor
+# --------------------------------------------------------------------------- #
+def _package_report() -> Dict[str, Optional[str]]:
+    """``{lock name: version or None}`` for the required packages."""
+    report: Dict[str, Optional[str]] = {}
+    for lock_name, import_name in REQUIRED_PACKAGES.items():
+        if importlib.util.find_spec(import_name) is None:
+            report[lock_name] = None
+            continue
+        try:
+            report[lock_name] = importlib.metadata.version(lock_name)
+        except importlib.metadata.PackageNotFoundError:
+            report[lock_name] = "present"
+    return report
+
+
+def _soffice_version() -> Optional[str]:
+    """First line of ``soffice --version`` or ``None``."""
+    proc = _run(["soffice", "--version"], timeout=90)
+    return proc.stdout.strip().splitlines()[0] if proc.returncode == 0 and proc.stdout.strip() else None
+
+
+def _rclone_version() -> Optional[str]:
+    """First line of ``rclone version`` or ``None``."""
+    proc = _run(["rclone", "version"])
+    return proc.stdout.strip().splitlines()[0] if proc.returncode == 0 and proc.stdout.strip() else None
+
+
+def _memory_total_bytes() -> Optional[int]:
+    """MemTotal from ``/proc/meminfo`` in bytes (``None`` off Linux)."""
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def doctor_report() -> Dict[str, Any]:
+    """Collect the environment report as a JSON-serialisable dictionary."""
+    root = common.project_root()
+    listing = latest_listing()
+    lock_state = json.loads(lock_state_path().read_text(encoding="utf-8")) if lock_state_path().exists() else {}
+    usage = shutil.disk_usage(root)
+    return {
+        "python": platform.python_version(),
+        "python_executable": sys.executable,
+        "packages": _package_report(),
+        "soffice": _soffice_version(),
+        "rclone": _rclone_version(),
+        "rclone_remotes": rclone_remotes(),
+        "transport": detect_transport(),
+        "disk_free_bytes": usage.free,
+        "cpu_count": os.cpu_count(),
+        "memory_total_bytes": _memory_total_bytes(),
+        "source_locked": bool(lock_state.get("locked")),
+        "source_lock": lock_state,
+        "listing": {"files": len(listing.get("files", [])), "folders": len(listing.get("folders", [])),
+                    "taken_at": listing.get("taken_at")} if listing else None,
+        "ledger_files": len(ledger_by_id()),
+        "project_root": str(root),
+    }
+
+
+def doctor_problems(report: Dict[str, Any]) -> List[str]:
+    """The conditions that make ``doctor`` exit 1."""
+    problems: List[str] = []
+    if not report["soffice"]:
+        problems.append("soffice not found")
+    if not report["packages"].get("markitdown"):
+        problems.append("markitdown not importable")
+    if sys.version_info < (3, 11):
+        problems.append(f"python {report['python']} is older than 3.11")
+    return problems
+
+
+def print_doctor_table(report: Dict[str, Any]) -> None:
+    """Human-readable table of the doctor report."""
+    def gib(value: Optional[int]) -> str:
+        return f"{value / 2**30:.1f} GiB" if value else "n/a"
+    pkgs = ", ".join(f"{k}={v or 'MISSING'}" for k, v in report["packages"].items())
+    rows = [
+        ("python", report["python"]), ("packages", pkgs), ("soffice", report["soffice"] or "MISSING"),
+        ("rclone", report["rclone"] or "MISSING"), ("remotes", ", ".join(report["rclone_remotes"]) or "none"),
+        ("transport", report["transport"]), ("disk free", gib(report["disk_free_bytes"])),
+        ("cpus", str(report["cpu_count"])), ("memory", gib(report["memory_total_bytes"])),
+        ("source locked", str(report["source_locked"]) + (
+            f" (method {report['source_lock'].get('method')}, enforced {report['source_lock'].get('enforced')})"
+            if report["source_lock"] else "")),
+        ("listing", json.dumps(report["listing"]) if report["listing"] else "none"),
+        ("ledger files", str(report["ledger_files"])),
+    ]
+    for key, value in rows:
+        print(f"{key:14s} {value}")
+
+
+def cmd_doctor(_args: argparse.Namespace) -> int:
+    """``doctor``: JSON report, human table, exit 1 when python/soffice/markitdown are missing."""
+    report = doctor_report()
+    problems = doctor_problems(report)
+    report["problems"] = problems
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+    print()
+    print_doctor_table(report)
+    for problem in problems:
+        print(f"PROBLEM: {problem}", file=sys.stderr)
+    return 1 if problems else 0
+
+
+# --------------------------------------------------------------------------- #
+# Command line
+# --------------------------------------------------------------------------- #
+def build_parser() -> argparse.ArgumentParser:
+    """Argument parser with one subcommand per verb."""
+    parser = argparse.ArgumentParser(description="Drive input/output for the AIGH pipeline (the only module that touches Drive).")
+    parser.add_argument("--transport", choices=("connector", "rclone"), default=None,
+                        help="override the automatic transport choice (tests and dry runs)")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("doctor", help="environment report; exit 1 when python, soffice or markitdown are missing")
+    list_cmd = sub.add_parser("list", help="consolidate the Drive listing and detect unstable departments")
+    list_cmd.add_argument("--force", action="store_true", help="write a new snapshot even if the inputs are unchanged")
+    sub.add_parser("pull", help="plan (connector) or copy and check (rclone) the source folders")
+    ingest = sub.add_parser("ingest", help="connector mode: ingest one saved download into data/source")
+    ingest.add_argument("--blob", required=True, help="the saved download")
+    ingest.add_argument("--drive-id", required=True, help="Drive file id of the blob")
+    ingest.add_argument("--move", action="store_true", help="move instead of copy")
+    ingest.add_argument("--force", action="store_true", help="supersede an existing different copy")
+    batch = sub.add_parser("ingest-dir", help="connector mode: ingest a directory of saved downloads")
+    batch.add_argument("--dir", required=True)
+    batch.add_argument("--map", required=True, help="json or csv mapping blob file name to drive_id")
+    batch.add_argument("--move", action="store_true")
+    batch.add_argument("--force", action="store_true")
+    sub.add_parser("verify", help="re-hash every ledger file against ledger and listing")
+    sub.add_parser("push-markdown", help="upload out/markdown (rclone) or write the push plan (connector)")
+    rec = sub.add_parser("record-push", help="connector mode: record one pushed markdown file")
+    rec.add_argument("--path", required=True, help="path relative to out/markdown")
+    rec.add_argument("--drive-id", required=True)
+    sub.add_parser("lock", help="make data/source read-only")
+    sub.add_parser("unlock", help="make data/source writable again")
+    return parser
+
+
+COMMANDS = {
+    "doctor": cmd_doctor, "list": cmd_list, "pull": cmd_pull, "ingest": cmd_ingest, "ingest-dir": cmd_ingest_dir,
+    "verify": cmd_verify, "push-markdown": cmd_push_markdown, "record-push": cmd_record_push,
+    "lock": cmd_lock, "unlock": cmd_unlock,
+}
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Entry point; returns a process exit code (non-zero on any failure)."""
+    args = build_parser().parse_args(argv)
+    try:
+        return COMMANDS[args.command](args)
+    except Exception as exc:  # noqa: BLE001 - surface any failure as a non-zero exit
+        print(f"error: {exc}", file=sys.stderr)
+        _log(f"error: {exc!r}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

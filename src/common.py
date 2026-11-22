@@ -42,10 +42,17 @@ _STRAY_PREFIX = "__"
 def project_root() -> Path:
     """Return the directory that contains ``config/project.yaml``.
 
-    The search starts from this file and walks upwards, so the helpers work
-    whether the pipeline is invoked from the project root, from ``src`` or
-    from a test runner.
+    When the environment variable ``AIGH_ROOT`` is set it names the project
+    root (tests point it at a temporary tree).  Otherwise the search starts
+    from this file and walks upwards, so the helpers work whether the pipeline
+    is invoked from the project root, from ``src`` or from a test runner.
     """
+    override = os.environ.get("AIGH_ROOT")
+    if override:
+        root = Path(override).expanduser().resolve()
+        if (root / "config" / "project.yaml").is_file():
+            return root
+        raise FileNotFoundError("AIGH_ROOT=%s has no config/project.yaml" % root)
     here = Path(__file__).resolve()
     for candidate in (here.parent, *here.parents):
         if (candidate / "config" / "project.yaml").is_file():
@@ -53,10 +60,10 @@ def project_root() -> Path:
     raise FileNotFoundError("config/project.yaml not found above %s" % here)
 
 
-@functools.lru_cache(maxsize=1)
-def load_config() -> Dict[str, Any]:
-    """Load and cache ``config/project.yaml`` as a dictionary."""
-    cfg_path = project_root() / "config" / "project.yaml"
+@functools.lru_cache(maxsize=8)
+def _load_config_for(root: Path) -> Dict[str, Any]:
+    """Load and cache ``<root>/config/project.yaml`` as a dictionary."""
+    cfg_path = root / "config" / "project.yaml"
     with cfg_path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
     if not isinstance(data, dict):
@@ -64,14 +71,25 @@ def load_config() -> Dict[str, Any]:
     return data
 
 
-def _resolve_paths() -> Dict[str, Path]:
-    """Build the absolute path table from ``config.paths``."""
+def load_config() -> Dict[str, Any]:
+    """Load and cache ``config/project.yaml`` for the current project root."""
+    return _load_config_for(project_root())
+
+
+def resolve_paths() -> Dict[str, Path]:
+    """Build the absolute path table from ``config.paths`` for the current root.
+
+    ``PATHS`` holds the table computed at import time; modules that must honour
+    a later change of ``AIGH_ROOT`` (tests) call this function instead.
+    """
     root = project_root()
     paths_cfg = load_config().get("paths", {}) or {}
     return {key: (root / str(value)).resolve() for key, value in paths_cfg.items()}
 
 
-PATHS: Dict[str, Path] = _resolve_paths()
+_resolve_paths = resolve_paths  # backwards-compatible alias
+
+PATHS: Dict[str, Path] = resolve_paths()
 """Absolute ``Path`` objects for every entry under ``paths`` in the config."""
 
 

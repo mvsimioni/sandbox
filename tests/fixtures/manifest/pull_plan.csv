@@ -1,0 +1,17 @@
+drive_id,rel_path,bytes,mime_type,transport_eligible,status
+a1,"DD Sign-OFF/30 - Pharmacy/Submitted/03_SOA/30_Pharmacy_SOA.xlsx",1000,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,y,fetched
+a2,"DD Sign-OFF/30 - Pharmacy/AH sign off with comments/03_SOA/30_Pharmacy_SOA.xlsx",1000,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,y,fetched
+a3,"DD Sign-OFF/30 - Pharmacy/Submitted/47_AN Hub_Drawing List.xlsx",2000,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,y,pending
+a4,"DD Sign-OFF/30 - Pharmacy/DD Closure/47_AN Hub_Drawing List.xlsx",2000,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,y,pending
+a5,"DD Sign-OFF/30 - Pharmacy/Submitted/Pharmacy DD Booklet_Reply.pdf",20000000,application/pdf,n,blocked_connector_limit
+a6,"DD Sign-OFF/30 - Pharmacy/Submitted/14_TRED_Drawing List.xlsx",2000,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,y,pending
+z1,"DD Sign-OFF/30 - Pharmacy/30 - Pharmacy (2).zip",5000,application/zip,y,skipped_zip
+z2,"DD Sign-OFF/30 - Pharmacy/30 - Pharmacy.zip",5000,application/zip,y,skipped_zip
+z3,"DD Sign-OFF/29 - Lab/Submitted/Photos/old photos.zip",700,application/zip,y,skipped_zip
+z4,"DD Sign-OFF/Archive.zip",900,application/zip,y,skipped_zip
+b1,"DD Sign-OFF/29 - Lab/Submitted/29_Lab_RDS.pdf",3000,application/pdf,y,fetched
+s1,"DD Sign-OFF/__29 - Lab/Submitted/29_Lab_RDS.pdf",3000,application/pdf,y,fetched
+s2,"DD Sign-OFF/__29 - Lab/Submitted/29_Lab_extra.pdf",4000,application/pdf,y,pending
+c1,"Basis/App D/Appendix D - ACMV For Common Areas.pdf",500,application/pdf,y,fetched
+t1,"Template/AIGH_C2_L1_OP_Pharmacy_AHU_Thermal_Load_Calc_RevA.xlsx",800,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,y,pending
+n1,"DD Sign-OFF/Misc notes/site note.pdf",100,application/pdf,y,pending
