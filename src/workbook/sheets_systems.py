@@ -63,9 +63,9 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
         put(ws, g("ev"), f"=1+{g('xs')}-{g('zd')}", "Calc", "d3")
         put(ws, g("vot"), f"=IF({g('ev')}>0,{g('vou')}/{g('ev')},0)", "Calc", "d1")
         put(ws, g("oa_ms"), f"=MAX({g('oa_sum')},{g('vot')})", "Calc", "d1")
-        put(ws, g("ret"), f"={g('sa_room')}-{g('oa_rule')}", "Calc", "d1")
+        put(ws, g("ret"), f"={g('sa_ahu')}-{g('oa_rule')}", "Calc", "d1")
         put(ws, g("exh"), f"=SUMIFS({AF.rng('exhaust')},{crit}{inc})", "Calc", "d1")
-        put(ws, g("relief"), f"={g('sa_room')}-{g('ret')}-{g('exh')}", "Calc", "d1")
+        put(ws, g("relief"), f"={g('sa_ahu')}-{g('ret')}-{g('exh')}", "Calc", "d1")
         put(ws, g("sens"), f"=SUMIFS({AF.rng('sens')},{crit}{inc})/WperkW", "Calc", "d2")
         put(ws, g("lat"), f"=SUMIFS({AF.rng('lat')},{crit}{inc})/WperkW", "Calc", "d2")
         ref = f"MATCH({key},{AF.rng('ref1' if after else 'ref0')},0)"
@@ -105,7 +105,7 @@ def write_ahu(ctx: Ctx) -> None:
              H("oa_rule", "AHU outdoor air = fraction × supply", "L/s", 11), H("vou", "Vou (sum of Voc)", "L/s", 9),
              H("vps", "Vps (sum of Vsc)", "L/s", 9), H("xs", "Xs = Vou / Vps", "–", 8), H("zd", "Zd, highest Voc / Vsc", "–", 8),
              H("ev", "Ev = 1 + Xs − Zd", "–", 8), H("vot", "Vot = Vou / Ev", "L/s", 9),
-             H("oa_ms", "Outdoor air as the example: max (sum, Vot)", "L/s", 11), H("ret", "Return = supply − outdoor air", "L/s", 10),
+             H("oa_ms", "Outdoor air as the example: max (sum, Vot)", "L/s", 11), H("ret", "Return = AHU supply − outdoor air", "L/s", 10),
              H("exh", "Exhaust", "L/s", 9), H("relief", "Spill or relief", "L/s", 9), H("sens", "Room sensible", "kW", 9),
              H("lat", "Room latent", "kW", 9), H("rt", "Reference room temperature (first room served)", "°C", 10), H("rh", "Reference room enthalpy (first room served)", "kJ/kg", 10),
              H("oa_sens", "Outdoor air sensible", "kW", 9), H("oa_lat", "Outdoor air latent", "kW", 9), H("fan", "Fan heat", "kW", 8),

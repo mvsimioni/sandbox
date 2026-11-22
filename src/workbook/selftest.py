@@ -181,6 +181,8 @@ def compare_recompute(data: Dict[str, Any], rc: Path, tol_pct: float = TOL_PCT) 
         add(f"AHU {a['tag']} supply", pick("sa_ahu"), a["supply_lps"])
         add(f"AHU {a['tag']} outdoor air", pick("oa_rule"), a["oa_lps"])
         add(f"AHU {a['tag']} coil kW", pick("coil"), a["coil_total_kw"])
+        add(f"AHU {a['tag']} return", pick("ret"), a["return_lps"])
+        add(f"AHU {a['tag']} exhaust", pick("exh"), a["exhaust_lps"])
     ps = wb["Pressure"]
     ph = {}
     for i, c in enumerate(ps[5]):

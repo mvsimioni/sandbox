@@ -61,7 +61,6 @@ def test_door_listed_from_both_sides_counts_once(ka):
 def test_coil_duty_on_the_example_basis_is_rev_a():
     from src.workbook.reva import build_reva_input
     # reference room condition = first space type (Rev A AHU Summary B13/B14), not a supply-weighted mean
-    rows = st.compare_reva  # noqa: F841  (the selftest asserts the 70.966 kW line within 0.5 %)
     data = build_reva_input(ROOT)
     res = recompute(data, "MULTI_SPACE")
     assert res["ahus"][0]["reference_h_kjkg"] == pytest.approx(52.6, abs=0.05)
@@ -82,7 +81,7 @@ def test_print_proof_passes_and_airflow_prints_every_column(ka):
     proof = st.print_proof(ka["rc"], pdf)
     assert proof["problems"] == []
     wb = openpyxl.load_workbook(ka["path"])
-    assert wb["Airflow"].print_area.endswith(f"{openpyxl.utils.get_column_letter(len(af_spec()))}{wb['Airflow'].max_row}") or True
+    assert wb["Airflow"].print_area.split(":")[1].startswith("$" + openpyxl.utils.get_column_letter(len(af_spec())))
     assert all(v["scale"] >= 0.75 for v in proof["sheets"].values())
     import re
     txt = re.sub(r"\s+", " ", __import__("subprocess").run(["pdftotext", "-layout", str(pdf), "-"], capture_output=True, text=True).stdout)
@@ -158,9 +157,9 @@ def test_fcu_capacity_is_tested_with_the_added_air(oa_dept):
     fcu = dict(zip(FCU_KEYS, _rows(oa_dept["rc"], "FCU")[0]))
     assert fcu["oasrc"] == "OAF-1" and fcu["cap"] == "PASS"
     fans = {r[0]: r for r in _rows(oa_dept["rc"], "Fans") if r[0]}
-    ahu_after = dict(zip(AHU_KEYS, _rows(oa_dept["rc"], "AHU")[2 + 6 - 1 + 1 - 1 + 0 if False else 1 + 6 - 1 + 1 - 1]))
+    ahu_after = dict(zip(AHU_KEYS, [r for r in _rows(oa_dept["rc"], "AHU") if r[0] == "AHU-T1"][1]))
     # required airflow of the outdoor-air fan = AHU outdoor air after separation + the separated room's outdoor air
-    assert fans["OAF-1"][3] == pytest.approx(ahu_after["oa_rule"] + fcu["oa"], rel=1e-9) or fans["OAF-1"][3] > fcu["oa"]
+    assert fans["OAF-1"][3] == pytest.approx(ahu_after["oa_rule"] + fcu["oa"], rel=1e-9)
 
 
 def test_mot_specified_room_is_not_resized_and_offset_is_reported(tmp_path):
@@ -178,7 +177,7 @@ def test_mot_specified_room_is_not_resized_and_offset_is_reported(tmp_path):
     assert t1["fix"] == 1 and t1["supply"] == 800.0 and t1["oa"] == 800.0 and t1["gov"] == "SPECIFIED"
     assert t1["extract"] == 700.0                                   # specified exhaust, not supply + offset
     assert t1["spec_off"] == pytest.approx(-100.0)                  # the specified exhaust is below the supply: reported beside the need
-    assert t1["off_chk"] == "SHORT" and t1["status"] == "LIST FOR MARCUS" or t1["status"] in (None, "")
+    assert t1["off_chk"] == "SHORT" and t1["clin"] == "YES"          # never separated automatically
     res = {r["number"]: r for r in recompute(d)["rooms"]}["T1"]
     assert res["supply_lps"] == 800.0 and res["exhaust_lps"] == 700.0 and res["governing_case"] == "specified"
     checks = {r[1]: r[4] for r in _rows(rc, "Checks") if r[1]}
