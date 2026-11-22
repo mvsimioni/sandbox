@@ -1,10 +1,9 @@
 """Adversarial tests for ``src.sidecar_pptx`` (independent review).
 
 Every deck is synthetic (python-pptx plus hand-edited package parts); no
-file under ``data/source`` is read.  Tests that document a confirmed defect
-are marked ``xfail(strict=True)`` with the issue id from
-``out/qa/verify/code_sidecar_pptx_review.md``; once the code is fixed the
-marker must be removed.
+file under ``data/source`` is read.  The tests for issues I-01 to I-05 of
+``out/qa/verify/code_sidecar_pptx_review.md`` were ``xfail(strict=True)``
+until the fixes landed; they now run as ordinary tests.
 """
 
 from __future__ import annotations
@@ -143,7 +142,6 @@ def test_unicode_name_with_spaces_and_brackets(tmp_path: Path, monkeypatch: pyte
 # --------------------------------------------------------------------------- #
 # 4. A picture whose blob PIL cannot identify must not abort the whole deck
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=True, reason="I-01: Image.ext raises outside the try in PictureStore.add_shape; run exits 1")
 def test_corrupt_picture_blob_does_not_abort_run(tmp_path: Path) -> None:
     plain = tmp_path / "pic.pptx"
     _one_picture_deck(plain)
@@ -160,7 +158,6 @@ def test_corrupt_picture_blob_does_not_abort_run(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # 5. Field text (slide number) and line breaks inside a paragraph
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=True, reason="I-02: _paragraphs joins a:r runs only, dropping a:fld text and a:br")
 def test_field_and_line_break_text_preserved(tmp_path: Path) -> None:
     from pptx import Presentation
     from pptx.util import Inches
@@ -186,7 +183,6 @@ def test_field_and_line_break_text_preserved(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # 6. A malformed comment part must be reported, not silently dropped
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=True, reason="I-03: _parse_xml returns None; 0 rows, no summary entry and every check passes")
 def test_malformed_comment_part_is_reported(tmp_path: Path) -> None:
     plain = tmp_path / "pic.pptx"
     _one_picture_deck(plain)
@@ -209,7 +205,6 @@ def test_malformed_comment_part_is_reported(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # 7. Two tables on one slide sharing a (duplicate) shape id
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=True, reason="I-04: table_shapes is keyed by (slide, shape_id); the second table overwrites the first")
 def test_duplicate_shape_ids_tables_keep_own_content(tmp_path: Path) -> None:
     from pptx import Presentation
     from pptx.util import Inches
@@ -375,7 +370,6 @@ def test_source_changed_in_place_reruns_and_updates_manifest(tmp_path: Path, cap
 # --------------------------------------------------------------------------- #
 # 13. sldId lookup must not confuse r:id with id whatever the attribute order
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=True, reason="I-05: _attr matches by local name only, so r:id can shadow id")
 def test_sld_id_lookup_ignores_attribute_order() -> None:
     element = etree.fromstring(b'<p:sldId xmlns:p="p" xmlns:r="r" r:id="rId2" id="256"/>')
     assert sp._attr(element, "id") == "256"  # noqa: SLF001

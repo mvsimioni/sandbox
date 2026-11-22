@@ -199,32 +199,109 @@ def _rels_targets(archive: zipfile.ZipFile, rels_name: str, base_dir: str,
 # --------------------------------------------------------------------------- #
 # Geometry: absolute placement of shapes inside groups
 # --------------------------------------------------------------------------- #
+Matrix = Tuple[float, float, float, float]
+"""Row-major 2 x 2 matrix ``(a, b, c, d)`` = ``[[a, b], [c, d]]``."""
+
+
+def _mat_mul(m: Matrix, n: Matrix) -> Matrix:
+    """Product ``m @ n`` of two 2 x 2 matrices."""
+    return (m[0] * n[0] + m[1] * n[2], m[0] * n[1] + m[1] * n[3],
+            m[2] * n[0] + m[3] * n[2], m[2] * n[1] + m[3] * n[3])
+
+
+def _mat_vec(m: Matrix, v: Tuple[float, float]) -> Tuple[float, float]:
+    """Product ``m @ v``."""
+    return (m[0] * v[0] + m[1] * v[1], m[2] * v[0] + m[3] * v[1])
+
+
 @dataclass(frozen=True)
 class Transform:
-    """Affine map from a (group) child coordinate space to slide EMU: ``abs = o + s * c``."""
+    """Affine map from a (group) child coordinate space to slide EMU: ``abs = M @ c + t``.
 
-    ox: float = 0.0
-    oy: float = 0.0
-    sx: float = 1.0
-    sy: float = 1.0
+    ``matrix`` and ``offset`` carry the exact map (scale, offset, rotation and
+    flips of every enclosing group); ``scale_x``/``scale_y`` are the accumulated
+    size factors, ``rotation`` the accumulated group rotation in degrees and
+    ``flip_h``/``flip_v`` the parity of the accumulated flips, so a child's own
+    rotation can be expressed in slide terms (``rotation_of``).
+    """
+
+    matrix: Matrix = (1.0, 0.0, 0.0, 1.0)
+    offset: Tuple[float, float] = (0.0, 0.0)
+    scale_x: float = 1.0
+    scale_y: float = 1.0
+    rotation: float = 0.0
+    flip_h: bool = False
+    flip_v: bool = False
 
     def point(self, x: float, y: float) -> Tuple[float, float]:
         """Map a point of the child space to slide coordinates."""
-        return (self.ox + self.sx * x, self.oy + self.sy * y)
+        px, py = _mat_vec(self.matrix, (x, y))
+        return (px + self.offset[0], py + self.offset[1])
 
     def size(self, cx: float, cy: float) -> Tuple[float, float]:
-        """Map an extent of the child space to slide coordinates."""
-        return (self.sx * cx, self.sy * cy)
+        """Map an extent of the child space to slide coordinates (magnitudes only)."""
+        return (abs(self.scale_x) * cx, abs(self.scale_y) * cy)
+
+    def box(self, left: float, top: float, width: float, height: float) -> Tuple[float, float, float, float]:
+        """Slide-space ``(left, top, width, height)`` of a child box.
+
+        The box centre goes through the full affine map and the extent through
+        the accumulated scale, which is exact for unrotated groups and keeps the
+        centre exact for rotated ones (the rotation itself is reported through
+        :meth:`rotation_of`, as PowerPoint does for the shape's own rotation).
+        """
+        cx, cy = self.point(left + width / 2.0, top + height / 2.0)
+        w, h = self.size(width, height)
+        return (cx - w / 2.0, cy - h / 2.0, w, h)
+
+    @property
+    def mirrored(self) -> bool:
+        """True when an odd number of single-axis flips is accumulated (rotation sense reverses)."""
+        return self.flip_h != self.flip_v
+
+    def rotation_of(self, own_rotation: float) -> float:
+        """Rotation in slide terms of a child that is rotated by ``own_rotation`` in this space."""
+        signed = -own_rotation if self.mirrored else own_rotation
+        return round((self.rotation + signed) % 360.0, 2)
 
     def child(self, off: Tuple[float, float], ext: Tuple[float, float],
-              ch_off: Tuple[float, float], ch_ext: Tuple[float, float]) -> "Transform":
-        """Transform for the children of a group placed at ``off``/``ext`` in this space."""
+              ch_off: Tuple[float, float], ch_ext: Tuple[float, float],
+              rotation: float = 0.0, flip_h: bool = False, flip_v: bool = False) -> "Transform":
+        """Transform for the children of a group placed at ``off``/``ext`` in this space.
+
+        A child point ``p`` maps to ``off + S (p - chOff)`` in the group's unrotated
+        frame, is then flipped and rotated about the group centre, and finally
+        goes through this (parent) transform.
+        """
         gx = ext[0] / ch_ext[0] if ch_ext[0] else 1.0
         gy = ext[1] / ch_ext[1] if ch_ext[1] else 1.0
-        sx, sy = self.sx * gx, self.sy * gy
-        ox = self.ox + self.sx * off[0] - sx * ch_off[0]
-        oy = self.oy + self.sy * off[1] - sy * ch_off[1]
-        return Transform(ox, oy, sx, sy)
+        local_m: Matrix = (gx, 0.0, 0.0, gy)
+        local_t = (off[0] - gx * ch_off[0], off[1] - gy * ch_off[1])
+        theta = math.radians(rotation)
+        cos_t, sin_t = math.cos(theta), math.sin(theta)
+        rot_flip = _mat_mul((cos_t, -sin_t, sin_t, cos_t), (-1.0 if flip_h else 1.0, 0.0, 0.0, -1.0 if flip_v else 1.0))
+        centre = (off[0] + ext[0] / 2.0, off[1] + ext[1] / 2.0)
+        k = _mat_mul(rot_flip, local_m)
+        rel = _mat_vec(rot_flip, (local_t[0] - centre[0], local_t[1] - centre[1]))
+        k_t = (rel[0] + centre[0], rel[1] + centre[1])
+        matrix = _mat_mul(self.matrix, k)
+        moved = _mat_vec(self.matrix, k_t)
+        offset = (moved[0] + self.offset[0], moved[1] + self.offset[1])
+        group_rotation = (-rotation if self.mirrored else rotation) + (180.0 if flip_h and flip_v else 0.0)
+        return Transform(matrix, offset, self.scale_x * gx, self.scale_y * gy,
+                         (self.rotation + group_rotation) % 360.0,
+                         self.flip_h != flip_h, self.flip_v != flip_v)
+
+
+def _xfrm_flips(xfrm: Any) -> Tuple[float, bool, bool]:
+    """``(rotation degrees, flipH, flipV)`` of an ``a:xfrm``/``p:xfrm`` element (zeros when absent)."""
+    if xfrm is None:
+        return 0.0, False, False
+    try:
+        rotation = float(getattr(xfrm, "rot", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        rotation = 0.0
+    return rotation, bool(getattr(xfrm, "flipH", False)), bool(getattr(xfrm, "flipV", False))
 
 
 def _group_transform(group: Any, parent: Transform) -> Transform:
@@ -236,7 +313,8 @@ def _group_transform(group: Any, parent: Transform) -> Transform:
     ext = (float(xfrm.ext.cx), float(xfrm.ext.cy))
     ch_off = (float(xfrm.chOff.x), float(xfrm.chOff.y)) if xfrm.chOff is not None else off
     ch_ext = (float(xfrm.chExt.cx), float(xfrm.chExt.cy)) if xfrm.chExt is not None else ext
-    return parent.child(off, ext, ch_off, ch_ext)
+    rotation, flip_h, flip_v = _xfrm_flips(xfrm)
+    return parent.child(off, ext, ch_off, ch_ext, rotation, flip_h, flip_v)
 
 
 def _box_emu(shape: Any) -> Optional[Tuple[float, float, float, float]]:
@@ -247,14 +325,25 @@ def _box_emu(shape: Any) -> Optional[Tuple[float, float, float, float]]:
     return tuple(float(v) for v in values)  # type: ignore[return-value]
 
 
-def _absolute_box_pt(shape: Any, transform: Transform) -> Optional[Dict[str, float]]:
-    """Absolute placement in points (slide coordinates) after group transforms."""
-    box = _box_emu(shape)
+def _own_flips(shape: Any) -> Tuple[bool, bool]:
+    """``(flipH, flipV)`` stored on the shape's own transform."""
+    try:
+        xfrm = shape._element.xfrm  # noqa: SLF001
+    except Exception:  # noqa: BLE001 - graphic frames expose xfrm differently
+        xfrm = None
+    _rotation, flip_h, flip_v = _xfrm_flips(xfrm)
+    return flip_h, flip_v
+
+
+def _slide_boxes(box: Optional[Tuple[float, float, float, float]], transform: Transform,
+                 ) -> Tuple[Optional[Dict[str, float]], Optional[Dict[str, float]]]:
+    """``(emu_slide, pt)``: the stored box in slide coordinates after group transforms."""
     if box is None:
-        return None
-    left, top = transform.point(box[0], box[1])
-    width, height = transform.size(box[2], box[3])
-    return {"left": emu_to_pt(left), "top": emu_to_pt(top), "width": emu_to_pt(width), "height": emu_to_pt(height)}
+        return None, None
+    left, top, width, height = transform.box(*box)
+    emu_slide = {"left": round(left, 1), "top": round(top, 1), "width": round(width, 1), "height": round(height, 1)}
+    pt = {"left": emu_to_pt(left), "top": emu_to_pt(top), "width": emu_to_pt(width), "height": emu_to_pt(height)}
+    return emu_slide, pt
 
 
 # --------------------------------------------------------------------------- #
@@ -279,13 +368,43 @@ def _placeholder_type(shape: Any) -> Optional[str]:
         return "PLACEHOLDER"
 
 
+def _element_text(element: Any) -> str:
+    """Concatenated ``a:t`` text under a run or field element."""
+    return "".join(t.text or "" for t in element.iter() if _localname(t) == "t")
+
+
+def _paragraph_text(p_element: Any) -> Tuple[List[str], str, int, int]:
+    """``(runs, text, line breaks, fields)`` of one ``a:p``, walking its children in document order.
+
+    Runs (``a:r``) and fields (``a:fld``: slide number, date) both contribute
+    visible text; a line break (``a:br``) becomes a newline so the words either
+    side stay separate tokens.
+    """
+    runs: List[str] = []
+    pieces: List[str] = []
+    breaks = fields = 0
+    for child in p_element:
+        name = _localname(child)
+        if name in ("r", "fld"):
+            text = _element_text(child)
+            runs.append(text)
+            pieces.append(text)
+            fields += name == "fld"
+        elif name == "br":
+            pieces.append("\n")
+            breaks += 1
+    return runs, "".join(pieces), breaks, fields
+
+
 def _paragraphs(text_frame: Any) -> List[Dict[str, Any]]:
-    """Paragraphs of a text frame with their runs flattened to text."""
+    """Paragraphs of a text frame with their runs and fields flattened to text."""
     out: List[Dict[str, Any]] = []
     for para in text_frame.paragraphs:
-        runs = [run.text for run in para.runs]
-        text = "".join(runs) if runs else para.text
-        out.append({"level": int(para.level or 0), "runs": runs, "text": text})
+        runs, text, breaks, fields = _paragraph_text(para._p)  # noqa: SLF001
+        if not runs and not breaks:
+            text = para.text
+        out.append({"level": int(para.level or 0), "runs": runs, "text": text,
+                    "line_breaks": breaks, "fields": fields})
     return out
 
 
@@ -344,6 +463,8 @@ def shape_record(shape: Any, slide_no: int, z_order: int, parent_id: Optional[in
         rotation = float(shape.rotation)
     except Exception:  # noqa: BLE001
         rotation = 0.0
+    flip_h, flip_v = _own_flips(shape)
+    emu_slide, pt = _slide_boxes(box, transform)
     return {
         "slide": slide_no,
         "shape_id": int(shape.shape_id),
@@ -362,8 +483,15 @@ def shape_record(shape: Any, slide_no: int, z_order: int, parent_id: Optional[in
         "text_chars": len(text),
         "paragraphs": paragraphs,
         "emu": None if box is None else {"left": box[0], "top": box[1], "width": box[2], "height": box[3]},
-        "pt": _absolute_box_pt(shape, transform),
+        "emu_frame": "slide" if depth == 0 else "group",
+        "emu_slide": emu_slide,
+        "pt": pt,
         "rotation": rotation,
+        "rotation_slide": transform.rotation_of(rotation),
+        "flip_h": flip_h,
+        "flip_v": flip_v,
+        "flip_h_slide": transform.flip_h != flip_h,
+        "flip_v_slide": transform.flip_v != flip_v,
     }
 
 
@@ -420,18 +548,19 @@ def _csv_text(grid: List[List[str]]) -> str:
     return buffer.getvalue()
 
 
-def write_tables(out_dir: Path, slide_records: List[Dict[str, Any]], table_shapes: Dict[Tuple[int, int], Any],
-                 ) -> List[Dict[str, Any]]:
-    """Write ``tables_s<N>_<k>.csv`` per table shape and return the entries for ``tables.json``."""
+def write_tables(out_dir: Path, table_shapes: List[Tuple[Dict[str, Any], Any]]) -> List[Dict[str, Any]]:
+    """Write ``tables_s<N>_<k>.csv`` per table shape and return the entries for ``tables.json``.
+
+    ``table_shapes`` pairs each table record with its shape object in paint
+    order, so two tables that share a shape id (which happens in copied decks)
+    each keep their own content.
+    """
     entries: List[Dict[str, Any]] = []
     per_slide: Dict[int, int] = {}
-    for record in slide_records:
-        if not record["is_table"]:
-            continue
+    for record, shape in table_shapes:
         slide_no = record["slide"]
         per_slide[slide_no] = per_slide.get(slide_no, 0) + 1
         k = per_slide[slide_no]
-        shape = table_shapes[(slide_no, record["shape_id"])]
         grid, merged = table_grid(shape.table)
         name = f"tables_s{slide_no}_{k}.csv"
         atomic_write_text(out_dir / name, _csv_text(grid))
@@ -468,14 +597,22 @@ def notes_markdown(file_name: str, notes: Dict[int, str]) -> str:
 # Comments (read from the package zip)
 # --------------------------------------------------------------------------- #
 def _attr(element: Any, name: str) -> Optional[str]:
-    """Attribute by local name (ignores any namespace prefix on the attribute)."""
+    """Attribute by name: the un-namespaced attribute first, then one with any namespace prefix.
+
+    On ``<p:sldId r:id="rId2" id="256"/>`` the answer for ``id`` is ``256``
+    whatever the attribute order.
+    """
+    value = element.get(name)
+    if value is not None:
+        return value
     for key, value in element.attrib.items():
         if key.rsplit("}", 1)[-1] == name:
             return value
     return None
 
 
-def read_comment_authors(archive: zipfile.ZipFile) -> Tuple[Dict[str, Dict[str, str]], Dict[str, Dict[str, str]]]:
+def read_comment_authors(archive: zipfile.ZipFile, errors: Optional[ParseErrors] = None,
+                         ) -> Tuple[Dict[str, Dict[str, str]], Dict[str, Dict[str, str]]]:
     """``(legacy authors by id, modern authors by GUID)`` from the two author parts."""
     legacy: Dict[str, Dict[str, str]] = {}
     modern: Dict[str, Dict[str, str]] = {}
@@ -483,7 +620,7 @@ def read_comment_authors(archive: zipfile.ZipFile) -> Tuple[Dict[str, Dict[str, 
     for part, target, tag in (("ppt/commentAuthors.xml", legacy, "cmAuthor"), ("ppt/authors.xml", modern, "author")):
         if part not in names:
             continue
-        root = _parse_xml(archive.read(part))
+        root = _read_part_xml(archive, part, errors)
         if root is None:
             continue
         for element in root.iter():
@@ -495,7 +632,7 @@ def read_comment_authors(archive: zipfile.ZipFile) -> Tuple[Dict[str, Dict[str, 
     return legacy, modern
 
 
-def slide_numbers(archive: zipfile.ZipFile) -> Tuple[Dict[str, int], Dict[str, int]]:
+def slide_numbers(archive: zipfile.ZipFile, errors: Optional[ParseErrors] = None) -> Tuple[Dict[str, int], Dict[str, int]]:
     """``(slide part name -> slide number, sldId -> slide number)`` from presentation.xml.
 
     Falls back to the number in the part name when the presentation part is
@@ -503,16 +640,17 @@ def slide_numbers(archive: zipfile.ZipFile) -> Tuple[Dict[str, int], Dict[str, i
     """
     by_part: Dict[str, int] = {}
     by_sld_id: Dict[str, int] = {}
-    rels = {rid: target for rid, _type, target in _rels_targets(archive, "ppt/_rels/presentation.xml.rels", "ppt")}
-    root = _parse_xml(archive.read("ppt/presentation.xml")) if "ppt/presentation.xml" in archive.namelist() else None
+    rels = {rid: target for rid, _type, target in
+            _rels_targets(archive, "ppt/_rels/presentation.xml.rels", "ppt", errors)}
+    root = _read_part_xml(archive, "ppt/presentation.xml", errors) if "ppt/presentation.xml" in archive.namelist() else None
     if root is not None:
         number = 0
         for element in root.iter():
             if _localname(element) != "sldId":
                 continue
             number += 1
-            rid = _attr(element, "id")
-            # r:id lives in the relationships namespace; the plain ``id`` is the sldId.
+            # The plain ``id`` is the sldId; ``r:id`` lives in the relationships namespace.
+            rid = element.get("id")
             r_id = next((v for k, v in element.attrib.items() if k.endswith("}id")), None)
             if r_id and r_id in rels:
                 by_part[rels[r_id]] = number
@@ -525,7 +663,8 @@ def slide_numbers(archive: zipfile.ZipFile) -> Tuple[Dict[str, int], Dict[str, i
     return by_part, by_sld_id
 
 
-def comment_parts_by_slide(archive: zipfile.ZipFile, by_part: Dict[str, int]) -> Dict[str, int]:
+def comment_parts_by_slide(archive: zipfile.ZipFile, by_part: Dict[str, int],
+                           errors: Optional[ParseErrors] = None) -> Dict[str, int]:
     """Map each comment part to the slide number whose relationships point at it."""
     mapping: Dict[str, int] = {}
     for name in archive.namelist():
@@ -534,7 +673,7 @@ def comment_parts_by_slide(archive: zipfile.ZipFile, by_part: Dict[str, int]) ->
             continue
         slide_part = f"ppt/slides/slide{match.group(1)}.xml"
         slide_no = by_part.get(slide_part, int(match.group(1)))
-        for _rid, _type, target in _rels_targets(archive, name, "ppt/slides"):
+        for _rid, _type, target in _rels_targets(archive, name, "ppt/slides", errors):
             if _LEGACY_COMMENT_RE.match(target) or _MODERN_COMMENT_RE.match(target):
                 mapping[target] = slide_no
     return mapping
@@ -614,9 +753,12 @@ def _comment_row(kind: str, part: str, slide_no: Optional[int], cm: Any, author:
 
 def parse_comment_part(archive: zipfile.ZipFile, part: str, slide_no: Optional[int],
                        authors: Tuple[Dict[str, Dict[str, str]], Dict[str, Dict[str, str]]],
-                       by_sld_id: Dict[str, int]) -> List[Dict[str, Any]]:
-    """Rows for every comment (and reply) in one legacy or modern comment part."""
-    root = _parse_xml(archive.read(part))
+                       by_sld_id: Dict[str, int], errors: Optional[ParseErrors] = None) -> List[Dict[str, Any]]:
+    """Rows for every comment (and reply) in one legacy or modern comment part.
+
+    A part that does not parse yields no rows and is recorded in ``errors``.
+    """
+    root = _read_part_xml(archive, part, errors)
     if root is None:
         return []
     legacy = bool(_LEGACY_COMMENT_RE.match(part))
@@ -644,16 +786,22 @@ def parse_comment_part(archive: zipfile.ZipFile, part: str, slide_no: Optional[i
 
 
 def read_comments(pptx_path: Path) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """All comments of the package (legacy and modern) and a small summary of the parts read."""
+    """All comments of the package (legacy and modern) and a small summary of the parts read.
+
+    When any comment, author, presentation or relationship part fails to
+    parse, the summary carries ``unreadable_parts`` (part and error rows); the
+    key is absent on a clean deck.
+    """
     rows: List[Dict[str, Any]] = []
+    errors: ParseErrors = []
     with zipfile.ZipFile(pptx_path) as archive:
         names = archive.namelist()
-        authors = read_comment_authors(archive)
-        by_part, by_sld_id = slide_numbers(archive)
-        part_slide = comment_parts_by_slide(archive, by_part)
+        authors = read_comment_authors(archive, errors)
+        by_part, by_sld_id = slide_numbers(archive, errors)
+        part_slide = comment_parts_by_slide(archive, by_part, errors)
         parts = sorted(n for n in names if _LEGACY_COMMENT_RE.match(n) or _MODERN_COMMENT_RE.match(n))
         for part in parts:
-            rows.extend(parse_comment_part(archive, part, part_slide.get(part), authors, by_sld_id))
+            rows.extend(parse_comment_part(archive, part, part_slide.get(part), authors, by_sld_id, errors))
     rows.sort(key=lambda r: (r["slide"] if r["slide"] is not None else 10**9, r["part"], 0 if r["reply_to"] is None else 1))
     for index, row in enumerate(rows, start=1):
         row["index"] = index
@@ -663,6 +811,8 @@ def read_comments(pptx_path: Path) -> Tuple[List[Dict[str, Any]], Dict[str, Any]
         "legacy_authors": len(authors[0]), "modern_authors": len(authors[1]),
         "unlinked_parts": [p for p in parts if p not in part_slide],
     }
+    if errors:  # present only when a part failed, so a clean deck's summary stays minimal
+        summary["unreadable_parts"] = errors
     return rows, summary
 
 
@@ -689,6 +839,31 @@ def _crop(shape: Any) -> Optional[Dict[str, float]]:
     return crop if any(abs(v) > 1e-9 for v in crop.values()) else None
 
 
+def _image_part(shape: Any) -> Tuple[bytes, str, str]:
+    """``(blob, content type, part name)`` of a picture's embedded image part.
+
+    Reads the OPC part directly, so the blob and its declared content type come
+    back even when Pillow cannot identify the image (python-pptx's ``Image.ext``
+    and ``Image.content_type`` both probe the bytes with Pillow and raise on
+    EMF/WMF variants, HD Photo, SVG-only or corrupt blobs).  Raises when the
+    shape has no embedded image (linked picture, empty placeholder).
+    """
+    rid = shape._element.blip_rId  # noqa: SLF001
+    if rid is None:
+        raise ValueError("no embedded image")
+    part = shape.part.related_part(rid)
+    return bytes(part.blob), str(getattr(part, "content_type", "") or ""), str(getattr(part, "partname", "") or "")
+
+
+def _image_ext(content_type: str, part_name: str) -> str:
+    """File extension for an image part from its content type, then its part name, else ``bin``."""
+    ext = _CONTENT_TYPE_EXT.get(content_type.strip().lower())
+    if ext:
+        return ext
+    tail = part_name.rsplit(".", 1)[-1].lower() if "." in part_name else ""
+    return tail if tail in _IMAGE_EXTS else "bin"
+
+
 class PictureStore:
     """Writes each distinct image blob once under ``pictures/`` and records every placement."""
 
@@ -712,23 +887,32 @@ class PictureStore:
         return digest, rel, True
 
     def add_shape(self, shape: Any, record: Dict[str, Any]) -> None:
-        """Record a picture shape (image blob, placement, crop)."""
+        """Record a picture shape (image blob, placement, crop).
+
+        A blob Pillow cannot identify is still exported and hashed; only its
+        pixel size is ``None`` (with ``pixel_note`` saying why).  A shape without
+        an embedded image is recorded with an ``error`` and never aborts the run.
+        """
         try:
-            image = shape.image
-        except Exception as exc:  # noqa: BLE001 - linked or empty picture
+            blob, content_type, part_name = _image_part(shape)
+        except Exception as exc:  # noqa: BLE001 - linked or empty picture, broken relationship
             self.items.append({"slide": record["slide"], "shape_id": record["shape_id"], "shape_name": record["name"],
                                "path": None, "error": f"no embedded image: {exc}", "shape_pt": record["pt"]})
             return
-        blob = image.blob
-        digest, rel, new = self._store(blob, image.ext, f"{record['slide']}_{record['shape_id']}")
+        ext = _image_ext(content_type, part_name)
+        digest, rel, new = self._store(blob, ext, f"{record['slide']}_{record['shape_id']}")
         size = _pixel_size(blob)
-        self.items.append({
+        item = {
             "slide": record["slide"], "shape_id": record["shape_id"], "shape_name": record["name"], "path": rel,
-            "content_type": image.content_type, "bytes": len(blob), "sha256": digest,
-            "pixel_width": size[0] if size else None, "pixel_height": size[1] if size else None,
+            "content_type": content_type or None, "part_name": part_name or None, "bytes": len(blob),
+            "sha256": digest, "pixel_width": size[0] if size else None, "pixel_height": size[1] if size else None,
             "crop": _crop(shape), "shape_pt": record["pt"], "rotation": record["rotation"],
+            "rotation_slide": record["rotation_slide"],
             "duplicate_of_first_placement": not new, "source": "slide shape",
-        })
+        }
+        if size is None:
+            item["pixel_note"] = f"Pillow cannot identify the image ({content_type or ext}); exported as stored"
+        self.items.append(item)
 
     def add_unplaced_media(self, pptx_path: Path) -> None:
         """Export image parts under ``ppt/media`` that no slide shape placed (layouts, masters, backgrounds)."""
@@ -766,27 +950,42 @@ class DeckExtract:
     slide_height_emu: int
     slides: List[Dict[str, Any]]
     notes: Dict[int, str]
-    table_shapes: Dict[Tuple[int, int], Any]
+    table_shapes: List[Tuple[Dict[str, Any], Any]]
     picture_shapes: List[Tuple[Dict[str, Any], Any]]
+    duplicate_shape_ids: List[Dict[str, int]]
+
+
+def _duplicate_shape_ids(slide_no: int, records: List[Dict[str, Any]]) -> List[Dict[str, int]]:
+    """Shape ids used by more than one shape on a slide (ids are not unique in copied decks)."""
+    seen: Dict[int, int] = {}
+    for record in records:
+        seen[record["shape_id"]] = seen.get(record["shape_id"], 0) + 1
+    return [{"slide": slide_no, "shape_id": sid, "count": n} for sid, n in sorted(seen.items()) if n > 1]
 
 
 def extract_deck(pptx_path: Path) -> DeckExtract:
-    """Walk the deck with python-pptx and collect slide, shape, notes, table and picture data."""
+    """Walk the deck with python-pptx and collect slide, shape, notes, table and picture data.
+
+    Table and picture shapes travel with their record (paint order), never
+    looked up again by shape id, because shape ids can repeat.
+    """
     from pptx import Presentation
 
     prs = Presentation(str(pptx_path))
     slides: List[Dict[str, Any]] = []
     notes: Dict[int, str] = {}
-    table_shapes: Dict[Tuple[int, int], Any] = {}
+    table_shapes: List[Tuple[Dict[str, Any], Any]] = []
     picture_shapes: List[Tuple[Dict[str, Any], Any]] = []
+    duplicates: List[Dict[str, int]] = []
     for slide_no, slide in enumerate(prs.slides, start=1):
         records: List[Dict[str, Any]] = []
         for record, shape in iter_shape_records(slide.shapes, slide_no):
             records.append(record)
             if record["is_table"]:
-                table_shapes[(slide_no, record["shape_id"])] = shape
+                table_shapes.append((record, shape))
             if record["is_picture"]:
                 picture_shapes.append((record, shape))
+        duplicates.extend(_duplicate_shape_ids(slide_no, records))
         try:
             layout = slide.slide_layout.name
         except Exception:  # noqa: BLE001
@@ -795,11 +994,14 @@ def extract_deck(pptx_path: Path) -> DeckExtract:
                        "shape_count": len(records), "shapes": records})
         notes[slide_no] = slide_notes(slide)
     return DeckExtract(int(prs.slide_width or 0), int(prs.slide_height or 0), slides, notes, table_shapes,
-                       picture_shapes)
+                       picture_shapes, duplicates)
+
+
+PICTURE_COVERAGE_BASIS = "union of the unrotated picture boxes (pt, slide space) clipped to the slide"
 
 
 def _picture_coverage(records: List[Dict[str, Any]], width_pt: float, height_pt: float) -> float:
-    """Union coverage (%) of the picture shapes of one slide."""
+    """Union coverage (%) of the picture shapes of one slide (see ``PICTURE_COVERAGE_BASIS``)."""
     boxes = []
     for record in records:
         if record["is_picture"] and record["pt"]:
@@ -837,8 +1039,10 @@ def slide_info(deck: DeckExtract, comments: List[Dict[str, Any]], tables: List[D
     totals["comments_without_slide"] = sum(1 for row in comments if row["slide"] is None)
     totals["unique_images"] = pictures["unique_images"]
     totals["table_csv_files"] = len(tables)
+    totals["duplicate_shape_ids"] = len(deck.duplicate_shape_ids)
     return {"slide_width_emu": deck.slide_width_emu, "slide_height_emu": deck.slide_height_emu,
             "slide_width_pt": round(width_pt, 2), "slide_height_pt": round(height_pt, 2),
+            "picture_coverage_basis": PICTURE_COVERAGE_BASIS,
             "slide_count": len(deck.slides), "slides": rows, "totals": totals}
 
 
@@ -882,15 +1086,16 @@ def already_done(out_dir: Path, sha256: str) -> bool:
     return all((out_dir / f).is_file() for f in manifest.get("files", []))
 
 
-def count_comment_elements(pptx_path: Path, parts: Sequence[str]) -> int:
-    """Number of ``cm`` and ``reply`` elements across the given comment parts (independent recount)."""
+def count_comment_elements(pptx_path: Path, parts: Sequence[str]) -> Tuple[int, int]:
+    """``(cm and reply elements, unreadable parts)`` across the given comment parts (independent recount)."""
     total = 0
+    errors: ParseErrors = []
     with zipfile.ZipFile(pptx_path) as archive:
         for part in parts:
-            root = _parse_xml(archive.read(part))
+            root = _read_part_xml(archive, part, errors)
             if root is not None:
                 total += sum(1 for el in root.iter() if _localname(el) in ("cm", "reply"))
-    return total
+    return total, len(errors)
 
 
 def _checks(pptx_path: Path, deck: DeckExtract, comments: List[Dict[str, Any]], summary: Dict[str, Any],
@@ -899,12 +1104,16 @@ def _checks(pptx_path: Path, deck: DeckExtract, comments: List[Dict[str, Any]], 
     table_shapes = sum(1 for s in deck.slides for r in s["shapes"] if r["is_table"])
     csv_ok = all((out_dir / t["path"]).is_file() for t in tables)
     pics_ok = all(i.get("path") is None or (out_dir / i["path"]).is_file() for i in pictures["items"])
-    cm_elements = count_comment_elements(pptx_path, summary["legacy_parts"] + summary["modern_parts"])
+    cm_elements, unreadable = count_comment_elements(pptx_path, summary["legacy_parts"] + summary["modern_parts"])
+    bad_parts = summary.get("unreadable_parts") or []
     return [
         {"check": "table CSV count equals table shape count", "pass": len(tables) == table_shapes and csv_ok,
          "evidence": f"{len(tables)} csv, {table_shapes} table shapes"},
+        {"check": "every comment, author, presentation and relationship part parsed", "pass": not bad_parts,
+         "evidence": "; ".join(f"{e['part']}: {e['error']}" for e in bad_parts) or "all parts parsed"},
         {"check": "comment rows equal comment and reply elements in the package",
-         "pass": len(comments) == cm_elements, "evidence": f"{len(comments)} rows, {cm_elements} elements"},
+         "pass": len(comments) == cm_elements and unreadable == 0,
+         "evidence": f"{len(comments)} rows, {cm_elements} elements, {unreadable} unreadable parts"},
         {"check": "every comment resolved to a slide", "pass": all(r["slide"] is not None for r in comments),
          "evidence": f"{sum(1 for r in comments if r['slide'] is None)} unresolved"},
         {"check": "every exported picture file exists", "pass": pics_ok,
@@ -926,7 +1135,7 @@ def run_one(pptx_path: Path, out_dir: Path, state_dir: Path) -> Dict[str, Any]:
     ensure_dir(out_dir)
     deck = extract_deck(pptx_path)
     comments, comment_summary = read_comments(pptx_path)
-    tables = write_tables(out_dir, [r for s in deck.slides for r in s["shapes"]], deck.table_shapes)
+    tables = write_tables(out_dir, deck.table_shapes)
     store = PictureStore(out_dir)
     for record, shape in deck.picture_shapes:
         store.add_shape(shape, record)
@@ -949,6 +1158,7 @@ def run_one(pptx_path: Path, out_dir: Path, state_dir: Path) -> Dict[str, Any]:
         "converters": [{"name": "python-pptx", "version": _pptx_version()}, {"name": "lxml", "version": _lxml_version()}],
         "methods_used": ["python-pptx", "package-zip-comments"],
         "files": files, "counts": info["totals"], "comment_parts": comment_summary,
+        "duplicate_shape_ids": deck.duplicate_shape_ids,
         "checks": _checks(pptx_path, deck, comments, comment_summary, tables, pictures, out_dir),
     }
     atomic_write_json(out_dir / MANIFEST_NAME, manifest)
