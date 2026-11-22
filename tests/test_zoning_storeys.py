@@ -61,3 +61,79 @@ def test_multi_page_writer_and_verifier(tmp_path):
     assert ver["ok"], ver["problems"]
     assert "Rooms (measured)" in ver["layers_off_by_default"]
     assert pymupdf.open(str(out))[2].rotation == 90
+
+
+# --------------------------------------------------------------------------- #
+# Corrections after the first verification
+# --------------------------------------------------------------------------- #
+import numpy as np
+
+from src import common
+from src.zoning import linework as lw
+
+
+def _stroke_set(segs, widths):
+    styles = []
+    sty = []
+    for w in widths:
+        key = ((0.0, 0.0, 0.0), w)
+        if key not in styles:
+            styles.append(key)
+        sty.append(styles.index(key))
+    return lw.StrokeSet(np.asarray(segs, float), np.asarray(sty, np.int32), styles, np.zeros(len(segs), bool), [])
+
+
+def _dimension(x0, x1, y):
+    """A horizontal dimension string: line y between two tick nodes, oblique ticks and extension stubs as the Arch sheets draw them."""
+    segs, w = [(x0, y, x1, y)], [0.24]
+    for x in (x0, x1):
+        segs += [(x, y, x + 1.8, y + 1.8), (x, y, x - 1.8, y - 1.8)]
+        w += [0.6, 0.6]
+        segs += [(x, y, x, y - 5.64), (x, y, x, y + 6.0)]
+        w += [0.24, 0.24]
+    return segs, w
+
+
+def test_dimension_strings_are_not_walls():
+    wall = [(0, 0, 200, 0), (0, 80, 200, 80), (0, 0, 0, 80), (200, 0, 200, 80)]
+    segs, w = _dimension(0, 200, 60)
+    ss = _stroke_set(wall + segs, [0.84] * 4 + w)
+    out, diag = st.strip_dimension_strokes(ss)
+    assert diag["n_dimension_lines"] == 1 and diag["n_extension_stubs"] == 4
+    assert len(out.seg) == 4                                   # only the four walls remain
+    # a fine-pen partition that is not a dimension (no ticks) stays
+    part = [(50, 0, 50, 80)]
+    ss2 = _stroke_set(wall + part, [0.84] * 4 + [0.24])
+    out2, d2 = st.strip_dimension_strokes(ss2)
+    assert len(out2.seg) == 5 and d2["n_removed"] == 0
+
+
+def test_leaked_region_rule():
+    assert st.is_leaked(96, 2571.0) and st.is_leaked(4, 150.0) and st.is_leaked(2, 1100.0)
+    assert not st.is_leaked(1, 3000.0) and not st.is_leaked(3, 200.0) and not st.is_leaked(10, 126.0)
+
+
+def test_na_mode_label_recovered_from_text_layer():
+    d = pymupdf.open()
+    p = d.new_page(width=400, height=300)
+    p.insert_text((100, 100), "Hydrant Tank 2", fontsize=6)
+    p.insert_text((100, 107), "NA", fontsize=4)
+    p.insert_text((200, 200), "NA", fontsize=4)             # a word under no tag
+    tags = [{"t_index": 0, "text": "Hydrant Tank 2", "mode": "", "box_pv": "100,94,136,100.5"}]
+    n, loose = st.na_modes_from_page(p, tags)
+    assert n == 1 and tags[0]["mode"] == "NA" and "page text layer" in tags[0]["mode_source"] and len(loose) == 1
+    assert st.stub_class(["NA"])[0] == "no information"
+
+
+def test_zone_areas_are_m2(tmp_path):
+    reg = tmp_path / "reg"
+    reg.mkdir()
+    poly = box(0, 0, 100, 50)                                   # 5000 pt2
+    common.write_csv_dicts(reg / "room_polygons_T1.csv", [{"room_id": "T1-R001", "room_tag": "x / MV", "a_area_m2": 50.0, "polygon_pv_wkt": poly.wkt, "method_agreement": "agree"}],
+                           ["room_id", "room_tag", "a_area_m2", "polygon_pv_wkt", "method_agreement"])
+    common.write_csv_dicts(reg / "zone_assignment_T1.csv", [{"room_id": "T1-R001", "class": "MV", "confidence": "1.0", "department": "", "sources": "s"}],
+                           ["room_id", "class", "confidence", "department", "sources"])
+    zones, stats, ann, summ = st.build_page_zones("T1", {}, {"reg": reg}, 0.01)    # 0.01 m2 per pt2
+    assert stats["MV"]["poly_m2"] == pytest.approx(50.0) and stats["MV"]["area_m2"] == pytest.approx(50.0)
+    assert summ["rooms_no_polygon"] == 0
+
