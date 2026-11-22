@@ -1,7 +1,10 @@
 """Record and list engineering decisions in ``out/qa/decisions_needed.md``.
 
-The file is a Markdown document.  Any text before the first entry is a
-preamble that is preserved verbatim.  Each entry has the shared shape::
+The file is a Markdown document that engineers also edit by hand, so every
+operation here works on the raw lines and changes only the lines it must.
+Text before the first entry, free paragraphs under an entry, sub-bullets and
+later ``##`` sections all survive an ``add`` or ``set-status`` untouched.
+Each entry has the shared shape::
 
     ### D-001 Drive transport
     - Status: open
@@ -10,8 +13,15 @@ preamble that is preserved verbatim.  Each entry has the shared shape::
     - Provisional value: what the pipeline assumes meanwhile
     - Asked at: 2026-11-22T10:00:00Z
 
+An entry runs from its ``### D-NNN`` heading to the next heading of level one
+to three.  New entries are inserted after the last entry of the first run of
+entries (so a trailing ``## Resolved`` section stays last).
+
 ``add`` is idempotent on the id: an existing entry is left untouched unless
 ``--update`` is given.  ``list`` prints a table, ``next-id`` the next free id.
+Writes hold the shared advisory lock from :mod:`src.state` and replace the file
+atomically, so several agents may add entries at once.  An id that appears
+twice is a malformed register: ``add`` and ``set-status`` refuse to touch it.
 Nothing here touches the network.
 """
 
@@ -20,14 +30,16 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 try:  # package import (python -m src.decisions, tests)
     from src.common import atomic_write_text, resolve_paths, utc_now_iso
+    from src.state import file_lock
 except ModuleNotFoundError:  # run as a plain script from inside src/
     from common import atomic_write_text, resolve_paths, utc_now_iso  # type: ignore[no-redef]
+    from state import file_lock  # type: ignore[no-redef,attr-defined]
 
 FILE_NAME = "decisions_needed.md"
 DEFAULT_PREAMBLE = (
@@ -38,36 +50,48 @@ DEFAULT_PREAMBLE = (
 FIELDS: Tuple[str, ...] = ("Status", "Context", "Options", "Provisional value", "Asked at")
 """Field labels in the order they are written."""
 
-_HEADING_RE = re.compile(r"^###\s+(D-\d{3,})\s*(.*?)\s*$")
+_HEADING_RE = re.compile(r"^###\s+(D-\d{2,})\s*:?\s*(.*?)\s*$")
+_ANY_HEADING_RE = re.compile(r"^#{1,3}\s")
 _FIELD_RE = re.compile(
     r"^\s*(?:[-*]\s+)?\**(Status|Context|Options|Provisional value|Asked at)\**\s*:\**\s*(.*?)\s*$",
     re.IGNORECASE,
 )
-_ID_RE = re.compile(r"^D-(\d{3,})$")
+_BULLET_RE = re.compile(r"^\s*[-*+]\s+(.*?)\s*$")
+_ID_RE = re.compile(r"^D-(\d{2,})$")
+
+Span = Tuple[int, int]
+"""Half-open line range inside an entry (index 0 is the heading)."""
 
 
 @dataclass
 class Decision:
-    """One entry of the decisions file."""
+    """One entry of the decisions file.
+
+    ``lines`` holds the raw lines of a parsed entry (heading first); a freshly
+    built entry has no raw lines and renders in the canonical shape.
+    """
 
     id: str
     title: str
     fields: Dict[str, str] = field(default_factory=dict)
+    lines: List[str] = field(default_factory=list)
+    spans: Dict[str, Span] = field(default_factory=dict)
+    start: int = -1
 
     def get(self, label: str) -> Optional[str]:
         """Value of a field by its canonical label, or ``None`` when the line is absent."""
         return self.fields.get(label)
 
-    def render(self) -> str:
-        """The entry as Markdown, fields in canonical order followed by any extras."""
+    def canonical_lines(self) -> List[str]:
+        """Heading and field lines in the shared shape, canonical fields first."""
         lines = [f"### {self.id} {self.title}".rstrip()]
-        for label in FIELDS:
-            if label in self.fields:
-                lines.append(f"- {label}: {self.fields[label]}")
-        for label, value in self.fields.items():
-            if label not in FIELDS:
-                lines.append(f"- {label}: {value}")
-        return "\n".join(lines) + "\n"
+        lines += [f"- {label}: {self.fields[label]}" for label in FIELDS if label in self.fields]
+        lines += [f"- {label}: {value}" for label, value in self.fields.items() if label not in FIELDS]
+        return lines
+
+    def render(self) -> str:
+        """The entry as Markdown: raw lines when parsed, canonical lines when new."""
+        return "\n".join(self.lines or self.canonical_lines()) + "\n"
 
 
 def _canonical_label(label: str) -> str:
@@ -80,40 +104,107 @@ def _canonical_label(label: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Location, parsing and rendering
+# Document model: raw lines, entries located by heading
 # --------------------------------------------------------------------------- #
+def _is_continuation(line: str) -> bool:
+    """An indented, non-blank line that is not itself a field line continues the field above."""
+    return bool(line.strip()) and line[:1].isspace() and not _FIELD_RE.match(line)
+
+
+def _parse_fields(lines: Sequence[str]) -> Tuple[Dict[str, str], Dict[str, Span]]:
+    """Fields of one entry (``lines[0]`` is the heading) with the span each one occupies.
+
+    A field value continues over indented lines; indented bullets are joined
+    with ``; `` and plain continuation lines with a space.  The first
+    occurrence of a label wins.
+    """
+    fields: Dict[str, str] = {}
+    spans: Dict[str, Span] = {}
+    index = 1
+    while index < len(lines):
+        match = _FIELD_RE.match(lines[index])
+        if not match:
+            index += 1
+            continue
+        label = _canonical_label(match.group(1))
+        value = match.group(2)
+        end = index + 1
+        while end < len(lines) and _is_continuation(lines[end]):
+            bullet = _BULLET_RE.match(lines[end])
+            text = bullet.group(1) if bullet else lines[end].strip()
+            value = (value + ("; " if bullet else " ") + text) if value else text
+            end += 1
+        if label not in fields:
+            fields[label] = value
+            spans[label] = (index, end)
+        index = end
+    return fields, spans
+
+
+@dataclass
+class Document:
+    """The decisions file as a list of lines plus the entries found in them."""
+
+    lines: List[str] = field(default_factory=list)
+
+    @property
+    def entries(self) -> List[Decision]:
+        """Entries in file order, each with its raw lines and field spans."""
+        starts = [i for i, line in enumerate(self.lines) if _HEADING_RE.match(line)]
+        entries: List[Decision] = []
+        for start in starts:
+            end = next((k for k in range(start + 1, len(self.lines)) if _ANY_HEADING_RE.match(self.lines[k])),
+                       len(self.lines))
+            heading = _HEADING_RE.match(self.lines[start])
+            assert heading is not None  # starts were selected by this regex
+            raw = list(self.lines[start:end])
+            fields, spans = _parse_fields(raw)
+            entries.append(Decision(id=heading.group(1), title=heading.group(2), fields=fields, lines=raw,
+                                    spans=spans, start=start))
+        return entries
+
+    def preamble(self) -> str:
+        """Text before the first entry (``""`` when the file starts with an entry)."""
+        first = next((e.start for e in self.entries), len(self.lines))
+        head = self.lines[:first]
+        return "\n".join(head).rstrip("\n") + ("\n" if head else "")
+
+    def find(self, decision_id: str) -> List[Decision]:
+        """Every entry carrying ``decision_id`` (more than one means the file is malformed)."""
+        return [e for e in self.entries if e.id == decision_id]
+
+    def insert_index(self) -> int:
+        """Where a new entry goes: after the last entry of the first run of entries."""
+        entries = self.entries
+        if not entries:
+            return len(self.lines)
+        for k in range(entries[0].start + 1, len(self.lines)):
+            if _ANY_HEADING_RE.match(self.lines[k]) and not _HEADING_RE.match(self.lines[k]):
+                return k
+        return len(self.lines)
+
+    def render(self) -> str:
+        """The whole document with a single trailing newline."""
+        return ("\n".join(self.lines) + "\n") if self.lines else ""
+
+
 def decisions_path() -> Path:
     """``<qa dir>/decisions_needed.md`` for the current project root."""
     return resolve_paths()["qa"] / FILE_NAME
 
 
-def parse_text(text: str) -> Tuple[str, List[Decision]]:
-    """Split a decisions document into ``(preamble, entries)``.
+def load_document(path: Path) -> Document:
+    """Read ``path`` into a :class:`Document`; a missing or blank file starts from the default preamble."""
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    if not text.strip():
+        text = DEFAULT_PREAMBLE
+    return Document(text.splitlines())
 
-    Lines of an entry that do not look like a field are appended to the last
-    field seen (continuation) or ignored when no field has started yet.
-    """
-    preamble: List[str] = []
-    entries: List[Decision] = []
-    current: Optional[Decision] = None
-    last_label: Optional[str] = None
-    for line in text.splitlines():
-        heading = _HEADING_RE.match(line)
-        if heading:
-            current = Decision(id=heading.group(1), title=heading.group(2))
-            entries.append(current)
-            last_label = None
-            continue
-        if current is None:
-            preamble.append(line)
-            continue
-        match = _FIELD_RE.match(line)
-        if match:
-            last_label = _canonical_label(match.group(1))
-            current.fields[last_label] = match.group(2)
-        elif last_label is not None and line.strip():
-            current.fields[last_label] = (current.fields[last_label] + " " + line.strip()).strip()
-    return "\n".join(preamble).rstrip("\n") + ("\n" if preamble else ""), entries
+
+def parse_text(text: str) -> Tuple[str, List[Decision]]:
+    """Split a decisions document into ``(preamble, entries)``."""
+    doc = Document(text.splitlines())
+    return doc.preamble(), doc.entries
 
 
 def parse_file(path: Path) -> Tuple[str, List[Decision]]:
@@ -123,23 +214,16 @@ def parse_file(path: Path) -> Tuple[str, List[Decision]]:
     return parse_text(path.read_text(encoding="utf-8"))
 
 
-def render_document(preamble: str, entries: Sequence[Decision]) -> str:
-    """Assemble the whole document from its preamble and entries."""
-    head = preamble if preamble.strip() else DEFAULT_PREAMBLE
-    if not head.endswith("\n"):
-        head += "\n"
-    if not head.endswith("\n\n"):
-        head += "\n"
-    return head + "\n".join(entry.render() for entry in entries)
-
-
-def write_file(path: Path, preamble: str, entries: Sequence[Decision]) -> Path:
-    """Write the document atomically."""
-    return atomic_write_text(path, render_document(preamble, entries))
+def duplicate_ids(entries: Sequence[Decision]) -> List[str]:
+    """Ids that appear more than once, in order of first appearance."""
+    seen: Dict[str, int] = {}
+    for entry in entries:
+        seen[entry.id] = seen.get(entry.id, 0) + 1
+    return [decision_id for decision_id, count in seen.items() if count > 1]
 
 
 # --------------------------------------------------------------------------- #
-# Operations
+# Building entries
 # --------------------------------------------------------------------------- #
 def next_id(entries: Sequence[Decision]) -> str:
     """The lowest unused ``D-NNN`` after the highest id present (``D-001`` when empty)."""
@@ -159,14 +243,18 @@ def _normalise_options(options: Sequence[str]) -> str:
     return "; ".join(parts)
 
 
-def build_entry(decision_id: str, title: str, context: str, options: Sequence[str], provisional: str,
+def build_entry(decision_id: Optional[str], title: str, context: str, options: Sequence[str], provisional: str,
                 status: str = "open", asked_at: Optional[str] = None) -> Decision:
-    """Create a :class:`Decision` with every shared field populated."""
-    if not _ID_RE.match(decision_id):
+    """Create a :class:`Decision` with every shared field populated.
+
+    ``decision_id`` may be ``None``: :func:`add_entry` then allocates the next
+    free id under the file lock.
+    """
+    if decision_id is not None and not _ID_RE.match(decision_id):
         raise ValueError(f"decision id must look like D-001, got {decision_id!r}")
     return Decision(
-        id=decision_id,
-        title=title.strip(),
+        id=decision_id or "",
+        title=" ".join(title.split()),
         fields={
             "Status": status.strip() or "open",
             "Context": " ".join(context.split()),
@@ -177,45 +265,102 @@ def build_entry(decision_id: str, title: str, context: str, options: Sequence[st
     )
 
 
+# --------------------------------------------------------------------------- #
+# Line-level edits
+# --------------------------------------------------------------------------- #
+def _set_field(doc: Document, decision_id: str, label: str, value: str) -> bool:
+    """Replace (or insert) one field line of an entry; return True when the text changed."""
+    entry = doc.find(decision_id)[0]
+    line = f"- {label}: {value}"
+    if label in entry.spans:
+        start, end = entry.spans[label]
+        if entry.lines[start:end] == [line]:
+            return False
+        doc.lines[entry.start + start:entry.start + end] = [line]
+        return True
+    after = max((end for _, end in entry.spans.values()), default=1)
+    doc.lines.insert(entry.start + after, line)
+    return True
+
+
+def _set_title(doc: Document, decision_id: str, title: str) -> bool:
+    """Rewrite the heading line of an entry; return True when it changed."""
+    entry = doc.find(decision_id)[0]
+    heading = f"### {decision_id} {title}".rstrip()
+    if doc.lines[entry.start] == heading:
+        return False
+    doc.lines[entry.start] = heading
+    return True
+
+
+def _insert_entry(doc: Document, entry: Decision) -> None:
+    """Insert a new entry at :meth:`Document.insert_index` with blank-line separation."""
+    index = doc.insert_index()
+    block = entry.canonical_lines()
+    if index > 0 and doc.lines[index - 1].strip():
+        block.insert(0, "")
+    if index < len(doc.lines):
+        block.append("")
+    doc.lines[index:index] = block
+
+
+def _single(doc: Document, decision_id: str, path: Path) -> Optional[Decision]:
+    """The one entry with ``decision_id`` (``None`` when absent); raise when the id is duplicated."""
+    matches = doc.find(decision_id)
+    if len(matches) > 1:
+        raise ValueError(f"{decision_id} appears {len(matches)} times in {path}; fix the file by hand")
+    return matches[0] if matches else None
+
+
+# --------------------------------------------------------------------------- #
+# Operations
+# --------------------------------------------------------------------------- #
 def add_entry(path: Path, entry: Decision, update: bool = False) -> Tuple[str, Decision]:
     """Add ``entry`` to the file; return ``("added" | "unchanged" | "updated", entry_on_disk)``.
 
     Idempotent on the id: a second ``add`` with the same id changes nothing
     unless ``update`` is true, in which case the supplied fields replace the
-    old ones (``Asked at`` is kept from the original entry).
+    old ones line by line (``Asked at`` is kept from the original entry).  An
+    entry without an id receives the next free one.  The whole read, modify
+    and write happens under the file lock.
     """
-    preamble, entries = parse_file(path)
-    for index, existing in enumerate(entries):
-        if existing.id != entry.id:
-            continue
+    with file_lock(path):
+        doc = load_document(path)
+        if not entry.id:
+            entry = replace(entry, id=next_id(doc.entries))
+        existing = _single(doc, entry.id, path)
+        if existing is None:
+            _insert_entry(doc, entry)
+            atomic_write_text(path, doc.render())
+            return "added", doc.find(entry.id)[0]
         if not update:
             return "unchanged", existing
-        merged = Decision(id=entry.id, title=entry.title or existing.title, fields=dict(existing.fields))
-        merged.fields.update({k: v for k, v in entry.fields.items() if k != "Asked at"})
-        entries[index] = merged
-        write_file(path, preamble, entries)
-        return "updated", merged
-    entries.append(entry)
-    write_file(path, preamble, entries)
-    return "added", entry
+        changed = bool(entry.title) and _set_title(doc, entry.id, entry.title)
+        for label, value in entry.fields.items():
+            if label != "Asked at":
+                changed = _set_field(doc, entry.id, label, value) or changed
+        if not changed:
+            return "unchanged", existing
+        atomic_write_text(path, doc.render())
+        return "updated", doc.find(entry.id)[0]
 
 
 def set_status(path: Path, decision_id: str, status: str) -> bool:
     """Change the Status line of one entry; return False when the id is unknown."""
-    preamble, entries = parse_file(path)
-    for entry in entries:
-        if entry.id == decision_id:
-            entry.fields["Status"] = status
-            write_file(path, preamble, entries)
-            return True
-    return False
+    with file_lock(path):
+        doc = load_document(path)
+        if _single(doc, decision_id, path) is None:
+            return False
+        if _set_field(doc, decision_id, "Status", status):
+            atomic_write_text(path, doc.render())
+        return True
 
 
 def table_lines(entries: Sequence[Decision], width: int = 48) -> List[str]:
-    """Render the entries as a fixed-width text table."""
+    """Render the entries as a fixed-width text table (ASCII only)."""
     def clip(value: Optional[str]) -> str:
         text = value if value is not None else "(missing)"
-        return text if len(text) <= width else text[: width - 1] + "…"
+        return text if len(text) <= width else text[: width - 3] + "..."
 
     header = f"{'id':7s} {'status':10s} {'title':32s} provisional value"
     lines = [header, "-" * len(header)]
@@ -235,7 +380,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     add = sub.add_parser("add", help="add an entry (no-op when the id already exists)")
-    add.add_argument("--id", dest="decision_id", default=None, help="D-NNN; default: next free id")
+    add.add_argument("--id", dest="decision_id", default=None,
+                     help="D-NNN; default: next free id (only the --id form is idempotent)")
     add.add_argument("--title", required=True)
     add.add_argument("--context", required=True)
     add.add_argument("--options", nargs="+", required=True, help="one or more options; ';' also separates")
@@ -254,12 +400,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _cmd_add(path: Path, args: argparse.Namespace) -> int:
     """``add``."""
-    _, entries = parse_file(path)
-    decision_id = args.decision_id or next_id(entries)
-    entry = build_entry(decision_id, args.title, args.context, args.options, args.provisional,
+    entry = build_entry(args.decision_id, args.title, args.context, args.options, args.provisional,
                         status=args.status, asked_at=args.asked_at)
     outcome, stored = add_entry(path, entry, update=args.update)
     print(f"{outcome}: {stored.id} {stored.title} -> {path}")
+    return 0
+
+
+def _cmd_list(path: Path) -> int:
+    """``list``: a table, with a warning line for duplicated ids."""
+    _, entries = parse_file(path)
+    if not entries:
+        print(f"no entries in {path}")
+        return 0
+    print("\n".join(table_lines(entries)))
+    dupes = duplicate_ids(entries)
+    if dupes:
+        print(f"warning: duplicated id(s): {', '.join(dupes)}", file=sys.stderr)
     return 0
 
 
@@ -271,12 +428,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "add":
             return _cmd_add(path, args)
         if args.command == "list":
-            _, entries = parse_file(path)
-            if not entries:
-                print(f"no entries in {path}")
-                return 0
-            print("\n".join(table_lines(entries)))
-            return 0
+            return _cmd_list(path)
         if args.command == "next-id":
             _, entries = parse_file(path)
             print(next_id(entries))

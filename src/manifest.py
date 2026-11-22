@@ -338,8 +338,9 @@ def stale_reasons(row: Dict[str, Any], record: Dict[str, Any]) -> List[str]:
     """Why the listing no longer matches the fetched copy: Drive size or md5 moved since the fetch.
 
     The ledger ``bytes`` equal Drive's size at fetch time only when ``size_match``
-    was not False, and ``drive_md5`` (else the local ``md5`` when ``md5_match``
-    was not False) stands for Drive's md5 at fetch time; nothing else is compared.
+    was not False, and ``drive_md5`` (else the local ``md5`` only when ``md5_match``
+    is True, i.e. it was verified against Drive) stands for Drive's md5 at fetch
+    time; nothing else is compared, so a transport that transcodes is not flagged.
     """
     reasons: List[str] = []
     fetched_bytes = record.get("bytes")
@@ -347,7 +348,7 @@ def stale_reasons(row: Dict[str, Any], record: Dict[str, Any]) -> List[str]:
         if _to_int(fetched_bytes) != row["bytes"]:
             reasons.append(f"Drive size {_to_int(fetched_bytes)} at fetch, now {row['bytes']}")
     fetched_md5 = str(record.get("drive_md5") or "")
-    if not fetched_md5 and record.get("md5_match") is not False:
+    if not fetched_md5 and record.get("md5_match") is True:
         fetched_md5 = str(record.get("md5") or "")
     if row["drive_md5"] and fetched_md5 and row["drive_md5"] != fetched_md5:
         reasons.append("Drive md5 changed since fetch")
@@ -823,6 +824,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--qa-dir", type=Path, default=PATHS["qa"], help="out/qa directory")
     parser.add_argument("--project-root", type=Path, default=None, help="root that ledger local_path values are relative to")
     parser.add_argument("--listing", type=Path, default=None, help="explicit consolidated listing JSON")
+    parser.add_argument("--transport", choices=TRANSPORTS, default=None,
+                        help="pull transport (default: drive.transport in config/project.yaml)")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("build", help="build the registers (default)")
     sub.add_parser("summary", help="print counts from the existing manifest")
@@ -833,10 +836,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     """Entry point; returns a process exit code."""
     args = build_parser().parse_args(argv)
     command = args.command or "build"
-    root_dir = args.project_root if args.project_root is not None else project_root()
     try:
+        root_dir = args.project_root if args.project_root is not None else project_root()
         if command == "build":
-            result = build(args.state_dir, args.registers_dir, args.qa_dir, root_dir, args.listing)
+            result = build(args.state_dir, args.registers_dir, args.qa_dir, root_dir, args.listing, args.transport)
         else:
             result = summary(args.registers_dir)
         print(json.dumps(result, indent=2, ensure_ascii=False))

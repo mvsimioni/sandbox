@@ -280,3 +280,139 @@ def test_file_timeout_is_recorded_not_raised(tmp_path: Path, fixtures: Dict[str,
     result = census.census_file({"rel_path": "x.pdf", "sha256": "a" * 64, "kind": "pdf",
                                  "local_path": str(fixtures["pdf"]), "file_timeout_s": 0.2})
     assert result["pages"] == [] and result["file"]["error"].startswith("timeout after")
+
+
+# --------------------------------------------------------------------------- #
+# Fixes from the independent review
+# --------------------------------------------------------------------------- #
+def test_hard_budget_runs_the_call_in_a_killable_helper() -> None:
+    assert census.call_with_hard_budget(lambda: 42, 5.0) == 42
+    assert census.call_with_hard_budget(lambda: (time.sleep(3.0), 1)[1], 0.1) is None
+    assert census._DEADLINES == []
+
+
+class _RaisingPage:
+    """A page whose path extraction raises (a genuine pymupdf error must still surface)."""
+
+    def get_cdrawings(self) -> List[Any]:
+        raise ValueError("broken content stream")
+
+
+def test_path_count_helper_failure_falls_back_in_process() -> None:
+    with pytest.raises(ValueError, match="broken content stream"):
+        census._count_paths(_RaisingPage(), 1.0)
+
+
+def test_real_heavy_page_count_survives_and_times_out(tmp_path: Path) -> None:
+    """A real pymupdf page: a generous budget keeps the exact count, a tiny one records -1."""
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    shape = page.new_shape()
+    for i in range(3000):
+        x, y = 5 + (i % 50) * 11, 5 + (i // 50) * 13
+        shape.draw_rect(pymupdf.Rect(x, y, x + 8, y + 8))
+        shape.finish(color=(0, 0, 0), width=0.3)
+    shape.commit()
+    path = tmp_path / "heavy.pdf"
+    doc.save(str(path))
+    rows = census.census_pdf(path, page_budget_s=30.0)
+    assert rows[0]["vector_paths"] == 3000 and rows[0]["page_class"] == "vector_drawing"
+    rows = census.census_pdf(path, page_budget_s=0.0)
+    assert rows[0]["vector_paths"] == -1 and "path_count_timeout" in rows[0]["notes"]
+    assert rows[0]["page_class"] == "vector_drawing"
+
+
+def test_rotated_page_images_are_measured_in_rotated_space(tmp_path: Path) -> None:
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 8, 8), 0)
+    pix.set_rect(pix.irect, (90, 90, 90))
+    page.insert_image(pymupdf.Rect(0, 0, 595, 560), pixmap=pix, keep_proportion=False)  # about 66.5 % of the page
+    page.insert_text((20, 600), "Scanned drawing with a short OCR text layer " * 3, fontsize=8)
+    page.set_rotation(90)
+    path = tmp_path / "rotated_partial.pdf"
+    doc.save(str(path))
+    row = census.census_pdf(path)[0]
+    assert (row["width_pt"], row["height_pt"], row["rotation"]) == (842.0, 595.0, 90)
+    assert row["image_coverage_pct"] == pytest.approx(66.51, abs=0.05)  # 560 / 842
+    assert row["page_class"] == "mixed"  # text >= 50 chars, so not raster_or_scan
+
+
+def test_retry_errors_recensuses_failed_files(workspace: Dict[str, Any], fixtures: Dict[str, Path]) -> None:
+    late = workspace["root"] / "data" / "source" / "Basis" / "late.pdf"
+    with workspace["ledger"].open("a", encoding="utf-8") as handle:  # its own hash, so it is not a duplicate
+        handle.write(json.dumps({"drive_id": "l1", "rel_path": "Basis/late.pdf",
+                                 "local_path": "data/source/Basis/late.pdf", "sha256": "e" * 64}) + "\n")
+    assert _run(workspace) == 1
+    rows = {r["rel_path"]: r for r in _files(workspace)}
+    assert rows["Basis/late.pdf"]["error"].startswith("FileNotFoundError") and len(rows) == 3
+    late.parent.mkdir(parents=True, exist_ok=True)
+    late.write_bytes(fixtures["pdf"].read_bytes())
+    assert _run(workspace) == 0 and len(_files(workspace)) == 3  # still sticky without the switch
+    assert _run(workspace, "--retry-errors") == 0
+    rows = {r["rel_path"]: r for r in _files(workspace)}
+    assert len(rows) == 3 and rows["Basis/late.pdf"]["error"] == "" and rows["Basis/late.pdf"]["pages"] == "4"
+    assert len(_pages(workspace)) == 7 + 4
+    assert "retry: dropped 1 error rows" in (workspace["logs"] / "census.log").read_text()
+    assert _run(workspace, "--retry-errors") == 0 and len(_files(workspace)) == 3  # nothing left to retry
+
+
+def test_unresponsive_worker_is_killed_and_the_slot_reused(workspace: Dict[str, Any],
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    """A worker that ignores its own budget is killed after the grace period and the run carries on."""
+    real_census_pdf = census.census_pdf
+
+    def stubborn(path: Path, page_budget_s: float = 20.0) -> List[Dict[str, Any]]:
+        if path.name.endswith("Booklet.pdf"):
+            while True:  # swallow the budget alarm, like a C call that never returns
+                try:
+                    time.sleep(5.0)
+                except census.BudgetExceeded:
+                    pass
+        return real_census_pdf(path, page_budget_s)
+
+    monkeypatch.setattr(census, "census_pdf", stubborn)
+    started = time.monotonic()
+    assert _run(workspace, "--file-timeout", "0.3", "--kill-grace", "0.5") == 1
+    assert time.monotonic() - started < 20.0
+    files = {r["kind"]: r for r in _files(workspace)}
+    assert "worker unresponsive, killed" in files["pdf"]["error"] and files["pdf"]["pages"] == "0"
+    assert files["pptx"]["error"] == "" and files["pptx"]["pages"] == "3"  # the single slot was freed
+    assert len(_pages(workspace)) == 3
+
+
+def test_torn_register_rows_are_dropped_on_the_next_run(workspace: Dict[str, Any]) -> None:
+    assert _run(workspace) == 0
+    page_csv, file_csv = workspace["registers"] / "page_census.csv", workspace["registers"] / "file_census.csv"
+    good_pages, good_files = page_csv.read_bytes(), file_csv.read_bytes()
+    with file_csv.open("ab") as handle:
+        handle.write(b"Basis/torn.pdf," + b"e" * 64 + b",pdf,3,1")  # crash mid-row: no terminator, too few fields
+    with page_csv.open("ab") as handle:
+        handle.write(b"Basis/torn.pdf," + b"e" * 64 + b",pdf,1,595.0")
+    assert census.Registers(workspace["registers"], workspace["logs"]).done_keys() >= {workspace["pdf_sha"]}
+    assert _run(workspace) == 0
+    assert (page_csv.read_bytes(), file_csv.read_bytes()) == (good_pages, good_files)
+    assert "e" * 64 not in file_csv.read_text()
+    assert "dropped 2 torn rows" in (workspace["logs"] / "census.log").read_text()
+
+
+def test_unattributed_comment_parts_count_towards_the_file_total(tmp_path: Path, fixtures: Dict[str, Path]) -> None:
+    import zipfile
+
+    builder = _load_builder()
+    orphan = tmp_path / "orphan.pptx"
+    with zipfile.ZipFile(fixtures["pptx"]) as src, zipfile.ZipFile(orphan, "w", zipfile.ZIP_DEFLATED) as out:
+        for name in src.namelist():
+            out.writestr(name, src.read(name))
+        out.writestr("ppt/comments/comment7.xml", builder.COMMENTS_XML)  # no slide relationship points at it
+    per_slide, total = census.pptx_comment_counts(orphan)
+    assert per_slide == {1: 2, 2: 1} and total == 5
+    rows = census.census_pptx(orphan)
+    assert rows[0]["annotation_count"] == 4 and rows[0]["annotation_types"] == "comment=4"
+    assert "unattributed_comments=2" in rows[0]["notes"]
+    assert rows[1]["annotation_count"] == 1 and "unattributed" not in rows[2]["notes"]
+    assert sum(r["annotation_count"] for r in rows) == total

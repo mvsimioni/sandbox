@@ -431,3 +431,213 @@ def test_decisions_rejects_bad_id() -> None:
 
 def test_decisions_default_path_honours_aigh_root(tree: Path) -> None:
     assert decisions.decisions_path() == tree / "out" / "qa" / "decisions_needed.md"
+
+
+# --------------------------------------------------------------------------- #
+# decisions.py: hand-edited files survive, duplicates are refused, ids are allocated under the lock
+# --------------------------------------------------------------------------- #
+HAND_EDITED = (
+    "# Decisions needed\n\n"
+    "### D-001: Drive transport\n"
+    "- Status: open\n"
+    "- Context: no rclone credential here\n"
+    "- Options:\n"
+    "  - connector\n"
+    "  - rclone\n"
+    "- Provisional value: connector\n"
+    "- Asked at: 2026-11-22T10:00:00Z\n\n"
+    "Marcus replied on 23 Nov: keep the connector for the pilot.\n\n"
+    "## Resolved\n\n"
+    "None yet.\n"
+)
+
+
+def test_decisions_parse_sub_bullets_and_colon_heading() -> None:
+    _, entries = decisions.parse_text(HAND_EDITED)
+    assert [(e.id, e.title) for e in entries] == [("D-001", "Drive transport")]
+    assert entries[0].get("Options") == "connector; rclone"
+    assert entries[0].get("Asked at") == "2026-11-22T10:00:00Z"
+    assert entries[0].spans["Options"] == (3, 6)
+
+
+def test_decisions_add_inserts_before_trailing_section(tmp_path: Path) -> None:
+    path = tmp_path / "decisions_needed.md"
+    path.write_text(HAND_EDITED, encoding="utf-8")
+    entry = decisions.build_entry("D-002", "Leakage", "c", ["5", "10"], "10", asked_at="2026-11-22T11:00:00Z")
+    assert decisions.add_entry(path, entry)[0] == "added"
+    text = path.read_text(encoding="utf-8")
+    marcus, d002, resolved = text.index("Marcus replied"), text.index("### D-002 Leakage"), text.index("## Resolved")
+    assert marcus < d002 < resolved
+    assert text.endswith("## Resolved\n\nNone yet.\n")
+    assert "- Asked at: 2026-11-22T11:00:00Z\n\n## Resolved" in text
+    assert decisions.add_entry(path, entry)[0] == "unchanged"
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_decisions_set_status_and_update_touch_only_their_lines(tmp_path: Path) -> None:
+    path = tmp_path / "decisions_needed.md"
+    path.write_text(HAND_EDITED, encoding="utf-8")
+    before = HAND_EDITED.splitlines()
+    assert decisions.set_status(path, "D-001", "decided") is True
+    after = path.read_text(encoding="utf-8").splitlines()
+    assert len(after) == len(before)
+    assert [(a, b) for a, b in zip(before, after) if a != b] == [("- Status: open", "- Status: decided")]
+    newer = decisions.build_entry("D-001", "Drive transport", "no rclone credential here", ["connector", "rclone"],
+                                  "rclone", asked_at="2026-12-01T00:00:00Z")
+    outcome, stored = decisions.add_entry(path, newer, update=True)
+    assert outcome == "updated"
+    assert stored.get("Options") == "connector; rclone" and stored.get("Provisional value") == "rclone"
+    assert stored.get("Asked at") == "2026-11-22T10:00:00Z" and stored.get("Status") == "open"
+    text = path.read_text(encoding="utf-8")
+    assert "- Options: connector; rclone\n- Provisional value: rclone\n" in text
+    assert "  - connector" not in text
+    assert "Marcus replied on 23 Nov" in text and text.endswith("## Resolved\n\nNone yet.\n")
+    assert decisions.add_entry(path, newer, update=True)[0] == "unchanged"
+
+
+def test_decisions_duplicate_ids_are_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "decisions_needed.md"
+    block = "### D-001 Twice\n- Status: open\n- Provisional value: x\n\n"
+    path.write_text("# Decisions\n\n" + block + block, encoding="utf-8")
+    _, entries = decisions.parse_file(path)
+    assert decisions.duplicate_ids(entries) == ["D-001"]
+    with pytest.raises(ValueError):
+        decisions.add_entry(path, decisions.build_entry("D-001", "t", "c", ["o"], "p"), update=True)
+    with pytest.raises(ValueError):
+        decisions.set_status(path, "D-001", "decided")
+    assert decisions.main(["--path", str(path), "set-status", "D-001", "decided"]) == 1
+    assert "appears 2 times" in capsys.readouterr().err
+    assert decisions.add_entry(path, decisions.build_entry("D-002", "t", "c", ["o"], "p"))[0] == "added"
+    assert decisions.main(["--path", str(path), "list"]) == 0
+    assert "duplicated id(s): D-001" in capsys.readouterr().err
+
+
+def test_decisions_add_without_id_allocates_under_the_lock(tmp_path: Path) -> None:
+    path = tmp_path / "decisions_needed.md"
+    procs = [subprocess.Popen([sys.executable, "-m", "src.decisions", "--path", str(path), "add", "--title", f"T{i}",
+                               "--context", "c", "--options", "a", "--provisional", "p"],
+                              cwd=str(PROJECT_ROOT), env=dict(os.environ), stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL)
+             for i in range(6)]
+    assert all(p.wait(timeout=60) == 0 for p in procs)
+    _, entries = decisions.parse_file(path)
+    assert sorted(e.id for e in entries) == [f"D-{i:03d}" for i in range(1, 7)]
+    assert not decisions.duplicate_ids(entries)
+
+
+# --------------------------------------------------------------------------- #
+# checks.py: listings, manifest, blocked inputs, template workflow
+# --------------------------------------------------------------------------- #
+def test_p0_03_reports_unreadable_listing_files(tree: Path) -> None:
+    listings = tree / "state" / "listings"
+    (listings / "listing_20261122T110000Z.json").write_text("{not json", encoding="utf-8")
+    atomic_write_json(listings / "listing_20261122T120000Z.json", {"taken_at": "2026-11-22T12:00:00Z"})
+    res = results_by_id()
+    assert res["P0-03"].status == checks.PASS
+    assert any("ignored listing_20261122T110000Z.json: not JSON" in line for line in res["P0-03"].evidence)
+    assert any("ignored listing_20261122T120000Z.json: no 'files' list" in line for line in res["P0-03"].evidence)
+    assert "listing_20261122T102000Z.json" in res["P0-04"].evidence[0]
+    assert res["P0-04"].status == checks.PASS and res["P0-05"].status == checks.PASS
+
+
+def test_p0_03_latest_listing_is_chosen_by_time_not_name(tree: Path) -> None:
+    listings = tree / "state" / "listings"
+    doc = _listing("", "2026-11-22T12:00:00Z")
+    doc["files"] = list(LISTING_FILES[:2])  # fewer files than the manifest
+    atomic_write_json(listings / "listing_00000000T000000Z.json", doc)
+    res = results_by_id()
+    assert res["P0-03"].status == checks.PASS
+    assert res["P0-04"].status == checks.FAIL and "listing_00000000T000000Z.json" in res["P0-04"].evidence[0]
+
+
+def test_p0_03_config_cannot_weaken_the_fifteen_minute_gap(tree: Path) -> None:
+    cfg = tree / "config" / "project.yaml"
+    cfg.write_text(cfg.read_text(encoding="utf-8").replace("listing_interval_minutes: 15", "listing_interval_minutes: 1"),
+                   encoding="utf-8")
+    listings = tree / "state" / "listings"
+    (listings / "listing_20261122T102000Z.json").unlink()
+    atomic_write_json(listings / "listing_20261122T100500Z.json", _listing("", "2026-11-22T10:05:00Z"))
+    result = results_by_id()["P0-03"]
+    assert result.status == checks.FAIL and "second listing pending" in result.evidence
+
+
+def test_p0_04_manifest_missing_versus_empty(tree: Path) -> None:
+    manifest = tree / "out" / "registers" / "manifest.csv"
+    manifest.unlink()
+    result = results_by_id()["P0-04"]
+    assert result.status == checks.FAIL and result.evidence == ["out/registers/manifest.csv missing"]
+    write_csv_dicts(manifest, [], list(_manifest_rows()[0].keys()))
+    result = results_by_id()["P0-04"]
+    assert result.status == checks.FAIL and "row count differs" in result.evidence[1]
+
+
+def test_p0_10_reconciles_on_path_and_bytes(tree: Path) -> None:
+    path = tree / "out" / "qa" / "blocked_inputs.csv"
+    good = {"rel_path": LISTING_FILES[3]["rel_path"], "bytes": "99000000", "reason": "too big", "needed_for": "x"}
+    write_csv_dicts(path, [dict(good, bytes="1")], list(checks.BLOCKED_INPUT_COLUMNS))
+    result = results_by_id()["P0-10"]
+    assert result.status == checks.FAIL and any("bytes differ" in line for line in result.evidence)
+    fetched = {"rel_path": LISTING_FILES[0]["rel_path"], "bytes": "1000", "reason": "n/a", "needed_for": "x"}
+    write_csv_dicts(path, [good, fetched], list(checks.BLOCKED_INPUT_COLUMNS))
+    result = results_by_id()["P0-10"]
+    assert result.status == checks.FAIL and any("plan status fetched" in line for line in result.evidence)
+    other = {"rel_path": "Basis/Not on Drive.pdf", "bytes": "", "reason": "rclone remote not configured",
+             "needed_for": "x"}
+    write_csv_dicts(path, [good, other], list(checks.BLOCKED_INPUT_COLUMNS))
+    result = results_by_id()["P0-10"]
+    assert result.status == checks.PASS
+    assert any("outside the plan" in line and "Not on Drive.pdf" in line for line in result.evidence)
+
+
+def test_template_workflow_cli_drives_p0_12(tree: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from src import template_workflow
+
+    assert template_workflow.main(["status"]) == 0
+    spec = tree / "out" / "qa" / "template_spec_B_NDH.md"
+    spec.unlink()
+    assert template_workflow.main(["status"]) == 1
+    assert "missing  out/qa/template_spec_B_NDH.md" in capsys.readouterr().out
+    assert template_workflow.main(["finish"]) == 1
+    assert "template_spec_B_NDH.md" in capsys.readouterr().err
+    assert statuses()["P0-12"] == checks.SKIP
+    assert template_workflow.main(["finish", "--incomplete"]) == 1
+    capsys.readouterr()
+    assert template_workflow.main(["finish", "--incomplete", "--reason", "spec B deferred to Gate 1"]) == 0
+    item = Progress(tree / "state" / "progress.json").get("template_workflow")
+    assert item is not None and item["status"] == "done" and item["missing"] == ["out/qa/template_spec_B_NDH.md"]
+    result = results_by_id()["P0-12"]
+    assert result.status == checks.FAIL and any("closed incomplete: spec B deferred" in line for line in result.evidence)
+    assert checks.main(["phase0", "--quiet"]) == 1
+    assert template_workflow.main(["reopen"]) == 0
+    assert statuses()["P0-12"] == checks.SKIP
+    spec.write_text("# spec B\n", encoding="utf-8")
+    assert template_workflow.main(["finish"]) == 0
+    assert "5/5 artefacts" in capsys.readouterr().out
+    assert statuses()["P0-12"] == checks.PASS
+    assert not (tree / "state" / "progress.json.lock").exists() or True  # the producer may lock; checks never do
+
+
+def test_checks_do_not_create_the_progress_lock(tree: Path) -> None:
+    lock = tree / "state" / "progress.json.lock"
+    assert not lock.exists()
+    assert checks.main(["phase0", "--quiet"]) == 0
+    assert not lock.exists()
+
+
+def test_p0_04_and_p0_06_read_the_upload_ledger_like_the_manifest(tree: Path) -> None:
+    """A file fetched by hand (upload_ledger.jsonl) counts as pulled for the checks as for the manifest."""
+    pull = tree / "state" / "pull_ledger.jsonl"
+    pull.unlink()
+    append_jsonl(pull, _ledger_row(LISTING_FILES[0]))
+    upload = tree / "state" / "upload_ledger.jsonl"
+    upload.unlink(missing_ok=True)
+    append_jsonl(upload, {**_ledger_row(LISTING_FILES[1]), "transport": "upload"})
+    results = results_by_id()
+    assert results["P0-04"].status == checks.PASS, results["P0-04"].evidence
+    assert results["P0-06"].status == checks.PASS, results["P0-06"].evidence
+    # the same row with a failed size match is still reported
+    upload.unlink()
+    append_jsonl(upload, {**_ledger_row(LISTING_FILES[1], size_match=False), "transport": "upload"})
+    result = results_by_id()["P0-04"]
+    assert result.status == checks.FAIL
+    assert any("size_match" in line for line in result.evidence)

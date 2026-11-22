@@ -7,13 +7,29 @@ slide in ``out/registers/page_census.csv`` and one row per file in
 choice of extraction route (text layer, vector drawing, scan) so they must be
 cheap, deterministic and resumable:
 
-* a file whose ``sha256`` already has a row in ``file_census.csv`` is skipped,
-* files are processed in a ``multiprocessing.Pool`` with a per-file time budget
-  (default 600 s; a timeout is recorded as an error and the run continues),
-* ``page.get_cdrawings()`` has its own per-page budget (default 20 s); when it
-  is exceeded ``vector_paths`` is ``-1`` and the note ``path_count_timeout`` is
-  added,
+* a file whose ``sha256`` already has a row in ``file_census.csv`` is skipped
+  (rows with an error are skipped too unless ``--retry-errors`` is given, which
+  drops those rows and censuses the files again),
+* a ledger entry without a ``sha256`` whose local file is missing cannot be
+  resumed by hash: it is attempted on every run and its error row (keyed by
+  ``rel_path``) is replaced, not appended, so the registers stay idempotent,
+* files run in a fixed-size pool of ``max(1, cpu_count() - 1)`` worker
+  processes (one process per file) with a per-file time budget (default 600 s;
+  a timeout is recorded as an error and the run continues); a worker that does
+  not answer within the budget plus ``--kill-grace`` seconds is killed so it
+  cannot hold a pool slot for the rest of the run,
+* ``page.get_cdrawings()`` has its own per-page budget (default 20 s).  Because
+  it is a single C call that no signal can interrupt, it runs in a forked
+  helper process that is killed when the budget passes; ``vector_paths`` is
+  then ``-1`` with the note ``path_count_timeout``,
+* register appends are one ``write`` plus ``fsync`` per file, and every run
+  starts by dropping torn (incomplete) rows and orphan page rows left by a
+  crash, so a half-written row is never treated as done,
 * one progress line per file goes to stderr and to ``logs/census.log``.
+
+Image coverage on rotated pages: ``page.get_image_info()`` reports bboxes in
+unrotated page space, so they are mapped through ``page.rotation_matrix`` before
+being clipped to the (rotated) ``page.rect``.
 
 Page classes (PDF)::
 
@@ -22,28 +38,41 @@ Page classes (PDF)::
     text            text_chars >= 200 and vector_paths < 500 and image_coverage_pct < 30
     mixed           otherwise
 
+The note ``ocr_like_text`` marks a page with at least 50 text characters where
+one image alone covers at least 90 % of the page (text over a scan).
+
 Page classes (PPTX slides)::
 
     raster_or_scan  one picture covers >= 60 % of the slide and text_chars < 50
     text            text_chars >= 200 and picture coverage < 30 %
     mixed           otherwise
+
+PPTX comments are counted from every ``ppt/comments/*.xml`` part (classic and
+modern ``modernComment_*.xml``) read with ``zipfile``; parts that no slide's
+relationships point at are added to slide 1 with the note
+``unattributed_comments=N`` so the file total is complete.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import multiprocessing
 import os
 import re
+import select
 import signal
+import struct
 import sys
 import time
 import traceback
 import zipfile
 from collections import Counter, defaultdict
 from contextlib import contextmanager
+from dataclasses import dataclass, field
+from multiprocessing import connection as mp_connection
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 try:  # package import (python -m src.census, tests)
     from src.common import (
@@ -90,6 +119,7 @@ CENSUS_KINDS: Tuple[str, ...] = ("pdf", "pptx")
 
 DEFAULT_FILE_TIMEOUT_S: float = 600.0
 DEFAULT_PAGE_BUDGET_S: float = 20.0
+DEFAULT_KILL_GRACE_S: float = 30.0
 EMU_PER_PT: float = 12700.0
 
 VECTOR_THRESHOLD = 500
@@ -99,9 +129,12 @@ TEXT_MIN_CHARS = 200
 TEXT_MAX_COVERAGE_PCT = 30.0
 OCR_LIKE_SINGLE_IMAGE_PCT = 90.0
 
-_MODERN_COMMENT_RE = re.compile(r"^ppt/comments/modernComment_.*\.xml$", re.IGNORECASE)
-_CLASSIC_COMMENT_RE = re.compile(r"^ppt/comments/comment\d*\.xml$", re.IGNORECASE)
+PATH_COUNT_TIMEOUT = "path_count_timeout"
+
+_COMMENT_PART_RE = re.compile(r"^ppt/comments/[^/]+\.xml$", re.IGNORECASE)
 _SLIDE_RELS_RE = re.compile(r"^ppt/slides/_rels/slide(\d+)\.xml\.rels$", re.IGNORECASE)
+
+_PR_SET_PDEATHSIG = 1  # linux prctl option: deliver a signal when the parent dies
 
 
 # --------------------------------------------------------------------------- #
@@ -149,7 +182,8 @@ def time_budget(seconds: float, label: str = "") -> Iterator[None]:
     Budgets nest: the alarm always fires for the earliest active deadline and
     the exception carries that deadline, so an inner block re-raises an outer
     block's timeout untouched.  Uses ``SIGALRM`` and therefore only works in the
-    main thread of a process (which is where pool workers run their tasks).
+    main thread of a process, and only interrupts Python-level code: a single
+    long C call is bounded with :func:`call_with_hard_budget` instead.
     """
     deadline = time.monotonic() + max(float(seconds), 0.001)
     entry = (deadline, label)
@@ -160,6 +194,90 @@ def time_budget(seconds: float, label: str = "") -> Iterator[None]:
     finally:
         _DEADLINES.remove(entry)
         _arm_alarm()
+
+
+# --------------------------------------------------------------------------- #
+# Hard budget: run one integer-valued call in a forked helper that can be killed
+# --------------------------------------------------------------------------- #
+def _die_with_parent() -> None:
+    """Best effort: ask the kernel to kill this process when its parent dies (Linux only)."""
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(_PR_SET_PDEATHSIG, int(signal.SIGKILL), 0, 0, 0)
+    except Exception:  # noqa: BLE001 - optional safety net
+        pass
+
+
+def _reap(pid: int) -> None:
+    """Kill ``pid`` if it is still running and collect its exit status."""
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
+
+
+def _read_exact(fd: int, size: int) -> bytes:
+    """Read exactly ``size`` bytes from ``fd`` (fewer only at end of file)."""
+    chunks: List[bytes] = []
+    remaining = size
+    while remaining > 0:
+        chunk = os.read(fd, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _child_compute(fn: Callable[[], int], write_fd: int) -> None:
+    """Child side of :func:`call_with_hard_budget`: compute, write 8 bytes, exit without cleanup."""
+    status = 1
+    try:
+        _die_with_parent()
+        os.write(write_fd, struct.pack("<q", int(fn())))
+        status = 0
+    except BaseException:  # noqa: BLE001 - never run the parent's handlers in the child
+        status = 1
+    finally:
+        os._exit(status)
+
+
+def call_with_hard_budget(fn: Callable[[], int], budget_s: float) -> Optional[int]:
+    """Run ``fn`` (returning an int) in a forked child; ``None`` when ``budget_s`` passes first.
+
+    A C-level call such as ``page.get_cdrawings()`` cannot be interrupted by a
+    signal, so the only way to bound it is to run it in a process that can be
+    killed.  The child inherits the open document by copy-on-write, writes the
+    result to a pipe and exits with ``os._exit``.  A :class:`BudgetExceeded`
+    raised by an enclosing :func:`time_budget` while waiting still kills the
+    child before propagating.  Raises ``RuntimeError`` when the child fails.
+    Without ``os.fork`` the call runs in-process, unbounded.
+    """
+    if not hasattr(os, "fork"):
+        return int(fn())
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - runs in the child
+        os.close(read_fd)
+        _child_compute(fn, write_fd)
+    os.close(write_fd)
+    try:
+        ready, _, _ = select.select([read_fd], [], [], max(float(budget_s), 0.0))
+        if not ready:
+            return None
+        data = _read_exact(read_fd, 8)
+    finally:
+        os.close(read_fd)
+        _reap(pid)
+    if len(data) != 8:
+        raise RuntimeError("helper process failed before returning a result")
+    return struct.unpack("<q", data)[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -223,23 +341,32 @@ def _format_types(counter: Counter) -> str:
 # PDF census
 # --------------------------------------------------------------------------- #
 def _count_paths(page: Any, budget_s: float) -> Tuple[int, Optional[str]]:
-    """``len(page.get_cdrawings())`` under ``budget_s``; ``(-1, 'path_count_timeout')`` on timeout."""
+    """``len(page.get_cdrawings())`` under a hard budget; ``(-1, 'path_count_timeout')`` when it passes.
+
+    The count runs in a killable helper process (see :func:`call_with_hard_budget`).
+    If that helper fails for any reason other than the budget, the call is made
+    in-process so that a genuine pymupdf error is raised and recorded for the file.
+    """
     try:
-        with time_budget(budget_s, "page_paths"):
-            return len(page.get_cdrawings()), None
-    except BudgetExceeded as exc:
-        if exc.label != "page_paths":
-            raise
-        return -1, "path_count_timeout"
+        count = call_with_hard_budget(lambda: len(page.get_cdrawings()), budget_s)
+    except RuntimeError:
+        count = len(page.get_cdrawings())
+    if count is None:
+        return -1, PATH_COUNT_TIMEOUT
+    return count, None
 
 
 def _image_boxes(page: Any) -> List[Tuple[float, float, float, float]]:
-    """Bounding boxes of every image occurrence on the page."""
+    """Bounding boxes of every image occurrence, in the rotated page space of ``page.rect``."""
+    import pymupdf
+
+    matrix = page.rotation_matrix
     boxes: List[Tuple[float, float, float, float]] = []
     for info in page.get_image_info(xrefs=False):
         bbox = info.get("bbox")
         if bbox and len(bbox) == 4:
-            boxes.append(tuple(float(v) for v in bbox))  # type: ignore[arg-type]
+            rect = pymupdf.Rect(*(float(v) for v in bbox)) * matrix
+            boxes.append((rect.x0, rect.y0, rect.x1, rect.y1))
     return boxes
 
 
@@ -291,11 +418,16 @@ def census_pdf_page(page: Any, number: int, layer_count: int, page_budget_s: flo
 
 
 def census_pdf(path: Path, page_budget_s: float = DEFAULT_PAGE_BUDGET_S) -> List[Dict[str, Any]]:
-    """Per-page rows for a PDF file."""
+    """Per-page rows for a PDF file.
+
+    The document is opened from memory rather than from a file descriptor so
+    the forked path-counting helper never shares (and moves) a file offset with
+    its parent.
+    """
     import pymupdf
 
     rows: List[Dict[str, Any]] = []
-    with pymupdf.open(str(path)) as doc:
+    with pymupdf.open(stream=Path(path).read_bytes(), filetype="pdf") as doc:
         if doc.needs_pass:
             raise RuntimeError("encrypted PDF (password required)")
         try:
@@ -321,6 +453,13 @@ def _count_comment_elements(xml_bytes: bytes) -> int:
     return sum(1 for el in root.iter() if isinstance(el.tag, str) and etree.QName(el).localname == "cm")
 
 
+def _resolve_part(target: str) -> str:
+    """Resolve a slide relationship target (relative to ``ppt/slides``, or package-absolute) to a part name."""
+    if target.startswith("/"):
+        return target.lstrip("/")
+    return os.path.normpath(os.path.join("ppt/slides", target)).replace("\\", "/")
+
+
 def _slide_comment_parts(archive: zipfile.ZipFile) -> Dict[int, List[str]]:
     """Map 1-based slide number -> comment part names, read from each slide's relationships."""
     from lxml import etree
@@ -335,31 +474,23 @@ def _slide_comment_parts(archive: zipfile.ZipFile) -> Dict[int, List[str]]:
         except etree.XMLSyntaxError:
             continue
         for rel in root.iter():
-            target = (rel.get("Target") or "").replace("\\", "/")
-            if "comments/" in target:
-                mapping[int(match.group(1))].append(_resolve_part(target))
+            part = _resolve_part((rel.get("Target") or "").replace("\\", "/"))
+            if _COMMENT_PART_RE.match(part):
+                mapping[int(match.group(1))].append(part)
     return mapping
-
-
-def _resolve_part(target: str) -> str:
-    """Resolve a slide relationship target (relative to ``ppt/slides``, or package-absolute) to a part name."""
-    if target.startswith("/"):
-        return target.lstrip("/")
-    return os.path.normpath(os.path.join("ppt/slides", target)).replace("\\", "/")
 
 
 def pptx_comment_counts(path: Path) -> Tuple[Dict[int, int], int]:
     """Comment counts per slide (by slide number) and the total across the package.
 
-    Reads ``ppt/comments/comment*.xml`` and ``ppt/comments/modernComment_*.xml``
-    straight from the zip.  Parts that no slide relationship points at are
-    counted in the total only.
+    Reads every ``ppt/comments/*.xml`` part (classic ``comment*.xml`` and modern
+    ``modernComment_*.xml``) straight from the zip.  Parts that no slide
+    relationship points at are counted in the total only; :func:`census_pptx`
+    attributes that remainder to slide 1 so the file total is complete.
     """
     per_slide: Dict[int, int] = defaultdict(int)
-    total = 0
     with zipfile.ZipFile(path) as archive:
-        names = set(archive.namelist())
-        comment_parts = [n for n in names if _CLASSIC_COMMENT_RE.match(n) or _MODERN_COMMENT_RE.match(n)]
+        comment_parts = [n for n in archive.namelist() if _COMMENT_PART_RE.match(n)]
         counts = {n: _count_comment_elements(archive.read(n)) for n in comment_parts}
         total = sum(counts.values())
         for slide_no, parts in _slide_comment_parts(archive).items():
@@ -400,64 +531,99 @@ def _shape_box_pt(shape: Any) -> Optional[Tuple[float, float, float, float]]:
     return (x0, y0, x0 + shape.width / EMU_PER_PT, y0 + shape.height / EMU_PER_PT)
 
 
-def census_slide(slide: Any, number: int, width: float, height: float, comments: int) -> Dict[str, Any]:
-    """Measure one slide and return a page-census row (without rel_path/sha256/kind)."""
+def _is_picture(shape: Any) -> bool:
+    """True for picture shapes, including filled picture placeholders."""
     from pptx.enum.shapes import MSO_SHAPE_TYPE, PP_PLACEHOLDER
 
-    text_parts: List[str] = []
-    picture_boxes: List[Tuple[float, float, float, float]] = []
-    tables = charts = drawn = 0
-    for shape in _iter_shapes(slide.shapes):
-        text_parts.append(_shape_text(shape))
-        kind = shape.shape_type
-        is_picture = kind in (MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.LINKED_PICTURE)
-        if not is_picture and kind == MSO_SHAPE_TYPE.PLACEHOLDER:
-            is_picture = getattr(shape, "placeholder_format", None) is not None and \
-                shape.placeholder_format.type == PP_PLACEHOLDER.PICTURE and hasattr(shape, "image")
-        if is_picture:
+    kind = shape.shape_type
+    if kind in (MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.LINKED_PICTURE):
+        return True
+    if kind != MSO_SHAPE_TYPE.PLACEHOLDER:
+        return False
+    fmt = getattr(shape, "placeholder_format", None)
+    return fmt is not None and fmt.type == PP_PLACEHOLDER.PICTURE and hasattr(shape, "image")
+
+
+@dataclass
+class _SlideTally:
+    """Running totals while walking a slide's shapes."""
+
+    text_parts: List[str] = field(default_factory=list)
+    picture_boxes: List[Tuple[float, float, float, float]] = field(default_factory=list)
+    tables: int = 0
+    charts: int = 0
+    drawn: int = 0
+
+    def add(self, shape: Any) -> None:
+        """Account for one (non-group) shape."""
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+        self.text_parts.append(_shape_text(shape))
+        if _is_picture(shape):
             bbox = _shape_box_pt(shape)
             if bbox:
-                picture_boxes.append(bbox)
+                self.picture_boxes.append(bbox)
         elif getattr(shape, "has_table", False) and shape.has_table:
-            tables += 1
+            self.tables += 1
         elif getattr(shape, "has_chart", False) and shape.has_chart:
-            charts += 1
-        elif kind in (MSO_SHAPE_TYPE.AUTO_SHAPE, MSO_SHAPE_TYPE.FREEFORM, MSO_SHAPE_TYPE.LINE):
-            drawn += 1
-    text = "\n".join(p for p in text_parts if p)
+            self.charts += 1
+        elif shape.shape_type in (MSO_SHAPE_TYPE.AUTO_SHAPE, MSO_SHAPE_TYPE.FREEFORM, MSO_SHAPE_TYPE.LINE):
+            self.drawn += 1
+
+
+def _notes_chars(slide: Any) -> int:
+    """Number of characters in the slide's speaker notes."""
+    if not slide.has_notes_slide or slide.notes_slide.notes_text_frame is None:
+        return 0
+    return len(slide.notes_slide.notes_text_frame.text)
+
+
+def census_slide(slide: Any, number: int, width: float, height: float, comments: int,
+                 unattributed: int = 0) -> Dict[str, Any]:
+    """Measure one slide and return a page-census row (without rel_path/sha256/kind).
+
+    ``unattributed`` comments (from parts no slide references) are added to this
+    slide's count and noted, so the file total stays complete.
+    """
+    tally = _SlideTally()
+    for shape in _iter_shapes(slide.shapes):
+        tally.add(shape)
+    text = "\n".join(p for p in tally.text_parts if p)
     text_chars = len(text)
-    words = len(text.split())
-    picture_pct = coverage_pct(picture_boxes, width, height)
-    largest = max((single_box_pct(b, width, height) for b in picture_boxes), default=0.0)
-    notes_chars = len(slide.notes_slide.notes_text_frame.text) if slide.has_notes_slide and \
-        slide.notes_slide.notes_text_frame is not None else 0
+    picture_pct = coverage_pct(tally.picture_boxes, width, height)
+    largest = max((single_box_pct(b, width, height) for b in tally.picture_boxes), default=0.0)
+    total_comments = comments + unattributed
+    notes = [f"tables={tally.tables}", f"charts={tally.charts}", f"notes_chars={_notes_chars(slide)}"]
+    if unattributed:
+        notes.append(f"unattributed_comments={unattributed}")
     return {
         "page": number,
         "width_pt": round(width, 2),
         "height_pt": round(height, 2),
         "rotation": 0,
         "text_chars": text_chars,
-        "words": words,
-        "vector_paths": drawn,
-        "image_count": len(picture_boxes),
+        "words": len(text.split()),
+        "vector_paths": tally.drawn,
+        "image_count": len(tally.picture_boxes),
         "image_coverage_pct": picture_pct,
-        "annotation_count": comments,
-        "annotation_types": f"comment={comments}" if comments else "",
+        "annotation_count": total_comments,
+        "annotation_types": f"comment={total_comments}" if total_comments else "",
         "layer_count": 0,
         "page_class": classify_slide(text_chars, picture_pct, largest),
-        "notes": f"tables={tables};charts={charts};notes_chars={notes_chars}",
+        "notes": ";".join(notes),
     }
 
 
 def census_pptx(path: Path) -> List[Dict[str, Any]]:
-    """Per-slide rows for a PPTX file."""
+    """Per-slide rows for a PPTX file (comments no slide references are attributed to slide 1)."""
     from pptx import Presentation
 
-    per_slide, _total = pptx_comment_counts(path)
+    per_slide, total = pptx_comment_counts(path)
+    unattributed = max(total - sum(per_slide.values()), 0)
     prs = Presentation(str(path))
     width = (prs.slide_width or 0) / EMU_PER_PT
     height = (prs.slide_height or 0) / EMU_PER_PT
-    return [census_slide(slide, index, width, height, per_slide.get(index, 0))
+    return [census_slide(slide, index, width, height, per_slide.get(index, 0), unattributed if index == 1 else 0)
             for index, slide in enumerate(prs.slides, start=1)]
 
 
@@ -487,7 +653,7 @@ def census_file(task: Dict[str, Any]) -> Dict[str, Any]:
     """Census one file; always returns ``{"file": row, "pages": rows}`` (errors go in the row).
 
     ``task`` holds ``rel_path``, ``sha256``, ``kind``, ``local_path``,
-    ``file_timeout_s`` and ``page_budget_s``.  Runs in a pool worker.
+    ``file_timeout_s`` and ``page_budget_s``.  Runs in a worker process.
     """
     started = time.monotonic()
     rel_path, sha256, kind = task["rel_path"], task["sha256"], task["kind"]
@@ -513,9 +679,24 @@ def census_file(task: Dict[str, Any]) -> Dict[str, Any]:
     return {"file": _file_row(rel_path, sha256, kind, pages, seconds, error), "pages": pages}
 
 
+def _worker_entry(task: Dict[str, Any], conn: Any) -> None:
+    """Worker process body: census one file and send the result back over ``conn``."""
+    _die_with_parent()
+    try:
+        conn.send(census_file(task))
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------- #
 # Work list, registers, logging
 # --------------------------------------------------------------------------- #
+def task_key(item: Dict[str, Any]) -> str:
+    """Resume key of a task or register row: its sha256, or ``path:<rel_path>`` when there is none."""
+    sha = str(item.get("sha256") or "")
+    return sha if sha else f"path:{item.get('rel_path', '')}"
+
+
 def _hash_or_fail(path: Path) -> str:
     """SHA-256 of a local file, raising a clear error when it is missing."""
     if not path.is_file():
@@ -558,16 +739,38 @@ def tasks_from_paths(paths: Sequence[str], root_dir: Path) -> List[Dict[str, Any
 
 
 def dedupe_tasks(tasks: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Keep the first task per sha256 (hash-identical copies share one census)."""
+    """Keep the first task per resume key (hash-identical copies share one census)."""
     seen: set[str] = set()
     unique: List[Dict[str, Any]] = []
     for task in tasks:
-        key = task["sha256"] or task["local_path"]
+        key = task_key(task)
         if key in seen:
             continue
         seen.add(key)
         unique.append(task)
     return unique
+
+
+def _valid_rows(path: Path, columns: Sequence[str]) -> Tuple[List[Dict[str, str]], int]:
+    """Rows of a register whose field count matches ``columns``; also the number of torn rows dropped.
+
+    A crash during an append can leave an incomplete last line (or, in theory,
+    any line of the block that was being written).  Such a line has too few
+    fields or lacks its terminator, so it is dropped rather than trusted.
+    """
+    if not path.exists() or path.stat().st_size == 0:
+        return [], 0
+    raw = path.read_bytes()
+    text = raw.decode("utf-8", errors="replace")
+    torn_tail = not raw.endswith(b"\n")
+    records = list(csv.reader(text.splitlines(keepends=True)))
+    if not records:
+        return [], 0
+    body = records[1:]
+    if torn_tail and body:
+        body = body[:-1]
+    kept = [dict(zip(columns, rec)) for rec in body if len(rec) == len(columns)]
+    return kept, len(records) - 1 - len(kept)
 
 
 class Registers:
@@ -578,37 +781,83 @@ class Registers:
         self.file_path = registers_dir / "file_census.csv"
         self.log_path = logs_dir / "census.log"
 
-    def done_hashes(self) -> set[str]:
-        """sha256 values that already have a file-census row."""
-        return {row["sha256"] for row in read_csv_dicts(self.file_path) if row.get("sha256")}
+    def file_rows(self) -> List[Dict[str, str]]:
+        """Every file-census row (after :meth:`repair` these are all complete)."""
+        return read_csv_dicts(self.file_path)
 
-    def repair(self) -> int:
-        """Drop page rows whose file never got its file-census row (interrupted run); return the count."""
-        pages = read_csv_dicts(self.page_path)
-        if not pages:
-            return 0
-        done = self.done_hashes()
-        kept = [row for row in pages if row.get("sha256") in done]
-        dropped = len(pages) - len(kept)
-        if dropped:
-            write_csv_dicts(self.page_path, kept, PAGE_COLUMNS)
-        return dropped
+    def done_keys(self, include_errors: bool = True) -> set[str]:
+        """Resume keys that already have a file-census row (optionally only error-free ones)."""
+        return {task_key(row) for row in self.file_rows() if include_errors or not row.get("error")}
+
+    def done_hashes(self) -> set[str]:
+        """sha256 values that already have a file-census row (kept for callers that key by hash)."""
+        return {row["sha256"] for row in self.file_rows() if row.get("sha256")}
+
+    def repair(self) -> Dict[str, int]:
+        """Drop torn rows from both registers and page rows whose file never got its file row.
+
+        Returns ``{"torn": n, "orphans": m}``.  Runs under the register lock.
+        """
+        with file_lock(self.file_path):
+            files, torn_files = _valid_rows(self.file_path, FILE_COLUMNS)
+            if torn_files:
+                write_csv_dicts(self.file_path, files, FILE_COLUMNS)
+            pages, torn_pages = _valid_rows(self.page_path, PAGE_COLUMNS)
+            done = {task_key(row) for row in files}
+            kept = [row for row in pages if task_key(row) in done]
+            orphans = len(pages) - len(kept)
+            if torn_pages or orphans:
+                write_csv_dicts(self.page_path, kept, PAGE_COLUMNS)
+        return {"torn": torn_files + torn_pages, "orphans": orphans}
+
+    def drop_rows(self, keys: set[str], errors_only: bool) -> int:
+        """Remove the rows (file and page) whose resume key is in ``keys``; return how many file rows went.
+
+        With ``errors_only`` only file rows that record an error are removed.
+        """
+        def goes(row: Dict[str, str]) -> bool:
+            return task_key(row) in keys and (bool(row.get("error")) or not errors_only)
+
+        with file_lock(self.file_path):
+            rows = self.file_rows()
+            kept = [row for row in rows if not goes(row)]
+            if len(kept) != len(rows):
+                write_csv_dicts(self.file_path, kept, FILE_COLUMNS)
+                gone = {task_key(row) for row in rows} - {task_key(row) for row in kept}
+                pages = read_csv_dicts(self.page_path)
+                kept_pages = [row for row in pages if task_key(row) not in gone]
+                if len(kept_pages) != len(pages):
+                    write_csv_dicts(self.page_path, kept_pages, PAGE_COLUMNS)
+        return len(rows) - len(kept)
 
     @staticmethod
     def _append(path: Path, rows: List[Dict[str, Any]], columns: Sequence[str]) -> None:
-        """Append rows to a CSV, writing the header when the file is new or empty."""
-        import csv
+        """Append rows to a CSV as one ``write`` + ``fsync`` (header included when the file is new or empty).
+
+        A single write of a prepared block cannot interleave with another
+        writer and, should the process die mid-write, leaves at most one torn
+        line, which :meth:`repair` drops at the next start.
+        """
+        import io
 
         ensure_dir(path.parent)
         new_file = not path.exists() or path.stat().st_size == 0
-        with path.open("a", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=list(columns), restval="", extrasaction="raise")
-            if new_file:
-                writer.writeheader()
-            for row in rows:
-                writer.writerow({k: ("" if v is None else v) for k, v in row.items()})
-            handle.flush()
-            os.fsync(handle.fileno())
+        buffer = io.StringIO()
+        writer = csv.DictWriter(buffer, fieldnames=list(columns), restval="", extrasaction="raise")
+        if new_file:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow({k: ("" if v is None else v) for k, v in row.items()})
+        block = buffer.getvalue().encode("utf-8")
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            view = memoryview(block)
+            while view:
+                written = os.write(fd, view)
+                view = view[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     def record(self, result: Dict[str, Any]) -> None:
         """Persist one file's result: page rows first, then the file row that marks it complete."""
@@ -636,43 +885,131 @@ def _describe(row: Dict[str, Any]) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Run
+# Run: a fixed-size pool of one-process-per-file workers that can be killed
 # --------------------------------------------------------------------------- #
+@dataclass
+class _Job:
+    """One running worker process."""
+
+    index: int
+    task: Dict[str, Any]
+    process: Any
+    conn: Any
+    started: float
+
+
 def _timeout_result(task: Dict[str, Any], timeout_s: float) -> Dict[str, Any]:
     """Result recorded when the parent gives up waiting on a worker."""
     row = _file_row(task["rel_path"], task["sha256"], task["kind"], [], timeout_s,
-                    f"timeout after {timeout_s:g} s (worker unresponsive)")
+                    f"timeout after {timeout_s:g} s (worker unresponsive, killed)")
     return {"file": row, "pages": []}
 
 
-def _run_pool(tasks: List[Dict[str, Any]], workers: int, file_timeout_s: float,
-              registers: Registers, progress: Progress) -> int:
-    """Census every task in a pool; return the number of files that ended in error."""
-    errors = 0
-    grace = file_timeout_s + 30.0
-    context = multiprocessing.get_context("fork") if "fork" in multiprocessing.get_all_start_methods() \
-        else multiprocessing.get_context()
-    pool = context.Pool(processes=workers)
+def _failure_result(task: Dict[str, Any], detail: str) -> Dict[str, Any]:
+    """Result recorded when a worker died without answering."""
+    row = _file_row(task["rel_path"], task["sha256"], task["kind"], [], 0.0, f"worker failure: {detail}"[:500])
+    return {"file": row, "pages": []}
+
+
+def _mp_context() -> Any:
+    """``fork`` where available (cheap, inherits monkeypatches), else the platform default."""
+    if "fork" in multiprocessing.get_all_start_methods():
+        return multiprocessing.get_context("fork")
+    return multiprocessing.get_context()
+
+
+def _start_job(context: Any, index: int, task: Dict[str, Any]) -> _Job:
+    """Start one worker process for ``task``."""
+    parent_conn, child_conn = context.Pipe(duplex=False)
+    process = context.Process(target=_worker_entry, args=(task, child_conn), name=f"census-{index}")
+    process.start()
+    child_conn.close()
+    return _Job(index=index, task=task, process=process, conn=parent_conn, started=time.monotonic())
+
+
+def _kill_job(job: _Job) -> None:
+    """Terminate a worker (SIGTERM, then SIGKILL), reap it and release its pipe."""
+    if job.process.is_alive():
+        job.process.terminate()
+        job.process.join(2.0)
+    if job.process.is_alive():
+        job.process.kill()
+    job.process.join()
+    job.conn.close()
+
+
+def _collect_job(job: _Job) -> Dict[str, Any]:
+    """Read a finished worker's result, or a failure row when it died without one."""
     try:
-        pending = [(task, pool.apply_async(census_file, (task,))) for task in tasks]
-        for task, handle in pending:
-            try:
-                result = handle.get(timeout=grace)
-            except multiprocessing.TimeoutError:
-                result = _timeout_result(task, file_timeout_s)
-            except Exception as exc:  # noqa: BLE001 - a crashed worker must not stop the run
-                row = _file_row(task["rel_path"], task["sha256"], task["kind"], [], 0.0,
-                                f"worker failure: {type(exc).__name__}: {exc}"[:500])
-                result = {"file": row, "pages": []}
-            registers.record(result)
-            status = "error" if result["file"]["error"] else "done"
-            errors += status == "error"
-            progress.set(f"census:{task['rel_path']}", status, hash=task["sha256"] or None,
-                         pages=result["file"]["pages"], error=result["file"]["error"])
-            registers.log(_describe(result["file"]))
+        result = job.conn.recv()
+    except (EOFError, OSError) as exc:
+        job.process.join(5.0)
+        result = _failure_result(job.task, f"exit code {job.process.exitcode} ({type(exc).__name__})")
+    _kill_job(job)
+    return result
+
+
+def _poll_jobs(jobs: Dict[int, _Job], grace_s: float) -> Dict[int, Dict[str, Any]]:
+    """Wait briefly for workers; return results for those that finished or overran ``grace_s``."""
+    if not jobs:
+        return {}
+    now = time.monotonic()
+    slack = min(grace_s - (now - job.started) for job in jobs.values())
+    ready = set(mp_connection.wait([job.conn for job in jobs.values()], timeout=min(max(slack, 0.0), 1.0)))
+    finished: Dict[int, Dict[str, Any]] = {}
+    for index, job in list(jobs.items()):
+        if job.conn in ready:
+            finished[index] = _collect_job(job)
+        elif time.monotonic() - job.started >= grace_s:
+            _kill_job(job)
+            finished[index] = _timeout_result(job.task, float(job.task.get("file_timeout_s", DEFAULT_FILE_TIMEOUT_S)))
+        else:
+            continue
+        del jobs[index]
+    return finished
+
+
+def _record_result(task: Dict[str, Any], result: Dict[str, Any], registers: Registers, progress: Progress) -> bool:
+    """Persist one result (registers, progress, log); return True when it is an error.
+
+    A task without a sha256 (its local file is missing) cannot be resumed by
+    hash, so it is attempted on every run and its previous row is replaced.
+    """
+    if not task["sha256"]:
+        registers.drop_rows({task_key(task)}, errors_only=False)
+    registers.record(result)
+    error = bool(result["file"]["error"])
+    progress.set(f"census:{task['rel_path']}", "error" if error else "done", hash=task["sha256"] or None,
+                 pages=result["file"]["pages"], error=result["file"]["error"])
+    registers.log(_describe(result["file"]))
+    return error
+
+
+def _run_pool(tasks: List[Dict[str, Any]], workers: int, file_timeout_s: float, registers: Registers,
+              progress: Progress, kill_grace_s: float = DEFAULT_KILL_GRACE_S) -> int:
+    """Census every task with at most ``workers`` concurrent processes; return the number of errors.
+
+    Results are recorded in task order.  A worker that has not answered
+    ``kill_grace_s`` after its own file budget is killed and recorded as a
+    timeout, so it cannot keep a pool slot for the rest of the run.
+    """
+    context = _mp_context()
+    grace = file_timeout_s + kill_grace_s
+    jobs: Dict[int, _Job] = {}
+    results: Dict[int, Dict[str, Any]] = {}
+    errors = next_start = next_record = 0
+    try:
+        while next_record < len(tasks):
+            while next_start < len(tasks) and len(jobs) < max(workers, 1):
+                jobs[next_start] = _start_job(context, next_start, tasks[next_start])
+                next_start += 1
+            results.update(_poll_jobs(jobs, grace))
+            while next_record in results:
+                errors += _record_result(tasks[next_record], results.pop(next_record), registers, progress)
+                next_record += 1
     finally:
-        pool.terminate()
-        pool.join()
+        for job in jobs.values():
+            _kill_job(job)
     return errors
 
 
@@ -681,24 +1018,31 @@ def run(args: argparse.Namespace) -> int:
     root_dir = args.project_root if args.project_root is not None else project_root()
     registers = Registers(args.registers_dir, args.logs_dir)
     progress = Progress(args.progress)
-    dropped = registers.repair()
-    if dropped:
-        registers.log(f"repaired page_census.csv: dropped {dropped} orphan page rows")
+    repaired = registers.repair()
+    if any(repaired.values()):
+        registers.log(f"repaired registers: dropped {repaired['torn']} torn rows and {repaired['orphans']} "
+                      f"orphan page rows")
 
     tasks = tasks_from_paths(args.paths, root_dir) if args.paths else tasks_from_ledger(args.ledger, root_dir)
     tasks = dedupe_tasks(tasks)
-    done = registers.done_hashes()
-    pending = [t for t in tasks if t["sha256"] not in done]
+    done = registers.done_keys(include_errors=not args.retry_errors)
+    pending = [t for t in tasks if not t["sha256"] or task_key(t) not in done]
+    already = len(tasks) - len(pending)
     if args.limit is not None:
         pending = pending[: max(args.limit, 0)]
+    if args.retry_errors and pending:
+        dropped = registers.drop_rows({task_key(t) for t in pending}, errors_only=True)
+        if dropped:
+            registers.log(f"retry: dropped {dropped} error rows to census those files again")
     for task in pending:
         task["file_timeout_s"] = args.file_timeout
         task["page_budget_s"] = args.page_budget
-    registers.log(f"census: {len(tasks)} candidate files, {len(tasks) - len(pending)} already censused, "
-                  f"{len(pending)} to do, {args.workers} workers")
+    limit_note = f" (limit {args.limit})" if args.limit is not None else ""
+    registers.log(f"census: {len(tasks)} candidate files, {already} already censused, "
+                  f"{len(pending)} to do{limit_note}, {args.workers} workers")
     if not pending:
         return 0
-    errors = _run_pool(pending, args.workers, args.file_timeout, registers, progress)
+    errors = _run_pool(pending, args.workers, args.file_timeout, registers, progress, args.kill_grace)
     registers.log(f"census finished: {len(pending) - errors} ok, {errors} errors")
     return 1 if errors else 0
 
@@ -778,11 +1122,17 @@ def build_parser() -> argparse.ArgumentParser:
     run_cmd.add_argument("--ledger", type=Path, default=PATHS["state"] / "pull_ledger.jsonl", help="pull ledger")
     run_cmd.add_argument("--progress", type=Path, default=PATHS["state"] / "progress.json", help="progress file")
     run_cmd.add_argument("--project-root", type=Path, default=None, help="root that ledger local_path values are relative to")
-    run_cmd.add_argument("--paths", nargs="+", default=None, help="ad hoc local pdf/pptx files instead of the ledger")
+    run_cmd.add_argument("--paths", nargs="+", default=None,
+                         help="ad hoc local pdf/pptx files instead of the ledger (rel_path is relative to the "
+                              "project root, or absolute, so the summary buckets them by their first folder)")
     run_cmd.add_argument("--limit", type=int, default=None, help="census at most N pending files (pilots)")
     run_cmd.add_argument("--workers", type=int, default=default_workers(), help="pool size (default cpu_count-1)")
     run_cmd.add_argument("--file-timeout", type=float, default=DEFAULT_FILE_TIMEOUT_S, help="seconds per file")
     run_cmd.add_argument("--page-budget", type=float, default=DEFAULT_PAGE_BUDGET_S, help="seconds for path counting per page")
+    run_cmd.add_argument("--kill-grace", type=float, default=DEFAULT_KILL_GRACE_S,
+                         help="seconds after the file timeout before an unresponsive worker is killed")
+    run_cmd.add_argument("--retry-errors", action="store_true",
+                         help="census again the files whose file-census row records an error (their old rows are dropped)")
     run_cmd.set_defaults(func=run)
 
     sum_cmd = sub.add_parser("summary", help="page counts per root and page class")

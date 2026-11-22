@@ -4,10 +4,9 @@ Every test runs against a throw-away project tree (``AIGH_ROOT`` -> ``tmp_path``
 built from the synthetic fixtures under tests/fixtures/drive_io; the real
 ``data/source`` and ``state`` are never touched.
 
-Tests marked ``xfail(strict=True)`` document confirmed defects: they assert the
-behaviour the specification asks for, fail today, and will flip to an
-unexpected pass (and so fail the suite) once the code is fixed, which is the
-signal to remove the marker.
+Tests that were marked ``xfail(strict=True)`` documented confirmed defects;
+the markers were removed once the fixer made them pass, so every test here
+now asserts the behaviour the specification asks for.
 """
 
 from __future__ import annotations
@@ -137,9 +136,6 @@ def test_list_duplicate_id_across_two_jsonl_files_keeps_latest(project: Path) ->
     assert len(listing["files"]) == 6
 
 
-@pytest.mark.xfail(strict=True, reason="consolidation merges every JSONL by id, so a file that disappeared "
-                                       "from the second capture survives from the first and its department "
-                                       "is reported stable")
 def test_list_file_missing_from_second_capture_is_unstable(project: Path) -> None:
     assert run("list") == 0
     second = [dict(r, listed_at=LISTED_B) for r in fixture_rows() if r["id"] != "fid_twin2"]
@@ -149,8 +145,6 @@ def test_list_file_missing_from_second_capture_is_unstable(project: Path) -> Non
     assert "26 - Diagnostic Imaging" in report["unstable"]
 
 
-@pytest.mark.xfail(strict=True, reason="taken_at is the wall clock of the `list` run, not the listed_at of "
-                                       "the capture, so minutes_apart does not measure the listing interval")
 def test_list_minutes_apart_reflects_capture_times(project: Path) -> None:
     assert run("list") == 0
     rows = [dict(r, listed_at=LISTED_B) for r in fixture_rows()]
@@ -184,9 +178,6 @@ def test_pull_plan_when_nothing_is_fetchable(project: Path, capsys: pytest.Captu
     assert "2 pending, 1 blocked" in out and "INSTRUCTION (connector mode)" in out
 
 
-@pytest.mark.xfail(strict=True, reason="plan_status applies the connector size limit in rclone mode too: a "
-                                       "large file the rclone copy did not deliver is reported "
-                                       "blocked_connector_limit instead of pending")
 def test_rclone_pull_plan_never_reports_connector_limit(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def _fake(argv: Any, cwd: Any = None, timeout: Any = None) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(list(argv), 0, "", "")  # copy delivers nothing
@@ -222,8 +213,6 @@ def test_ingest_unicode_and_spaces_in_path_round_trips(project: Path, tmp_path: 
     assert any(r["rel_path"] == rel for r in common.read_csv_dicts(project / "state" / "pull_plan.csv"))
 
 
-@pytest.mark.xfail(strict=True, reason="rel_path from the listing is joined to data/source without "
-                                       "normalisation, so a '..' segment writes outside the source tree")
 def test_ingest_refuses_rel_path_that_escapes_source(project: Path, tmp_path: Path) -> None:
     data = b"escape"
     rows = fixture_rows() + [file_entry("fid_trav", "Basis/../../escaped.txt", len(data), md5=md5_bytes(data))]
@@ -232,13 +221,13 @@ def test_ingest_refuses_rel_path_that_escapes_source(project: Path, tmp_path: Pa
     blob.write_bytes(data)
     assert run("list") == 0
     code = run("ingest", "--blob", str(blob), "--drive-id", "fid_trav")
-    outside = [p for p in project.rglob("escaped.txt") if (project / "data" / "source") not in p.parents]
+    # tmp_path is the project tree here, so the test's own input blob is excluded from the search
+    outside = [p for p in project.rglob("escaped.txt")
+               if p != blob and (project / "data" / "source") not in p.parents]
     assert code != 0 and outside == []
+    assert blob.is_file() and not (project / "data" / "source").exists()
 
 
-@pytest.mark.xfail(strict=True, reason="--force supersedes (renames away) the existing good copy before the "
-                                       "size check; when the new blob is the wrong size it is deleted and "
-                                       "rel_path is left with no file while the ledger still points at it")
 def test_ingest_force_with_wrong_size_blob_keeps_original_in_place(project: Path) -> None:
     assert run("list") == 0
     assert run("ingest", "--blob", str(BLOBS / "sample_calc.xlsx"), "--drive-id", "fid_tpl") == 0
@@ -249,9 +238,6 @@ def test_ingest_force_with_wrong_size_blob_keeps_original_in_place(project: Path
     assert run("verify") == 0
 
 
-@pytest.mark.xfail(strict=True, reason="ingest --move with a blob that already is the file under data/source "
-                                       "takes the 'already present' branch and unlinks the blob, i.e. the "
-                                       "record document; only an enforced chattr lock prevents it")
 def test_ingest_move_of_blob_already_inside_source_never_deletes_it(project: Path) -> None:
     assert run("list") == 0
     assert run("ingest", "--blob", str(BLOBS / "mot_nsc_c2.pdf"), "--drive-id", "fid_mot") == 0
@@ -261,9 +247,6 @@ def test_ingest_move_of_blob_already_inside_source_never_deletes_it(project: Pat
     assert dest.is_file()
 
 
-@pytest.mark.xfail(strict=True, reason="an md5-mismatched ingest appends a ledger row, and build_pull_plan "
-                                       "treats any ledger row as fetched, so the next `pull` flips the row "
-                                       "from pending to fetched despite the mismatch")
 def test_md5_mismatch_row_stays_pending_after_pull(project: Path, tmp_path: Path) -> None:
     assert run("list") == 0 and run("pull") == 0
     other = tmp_path / "twin_other.xlsx"
@@ -321,8 +304,6 @@ def test_verify_flags_drive_size_change_after_fetch(project: Path, capsys: pytes
 # --------------------------------------------------------------------------- #
 # rclone listing: the hash key rclone really emits
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=True, reason="rclone lsjson --hash emits Hashes.MD5 (upper case); the mapper reads "
-                                       "Hashes.md5, so md5Checksum is never populated in rclone mode")
 def test_rclone_listing_maps_real_md5_hash_key(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def _fake(argv: Any, cwd: Any = None, timeout: Any = None) -> subprocess.CompletedProcess:
         stdout = ""

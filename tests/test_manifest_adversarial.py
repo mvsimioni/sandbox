@@ -2,9 +2,9 @@
 
 Every workspace here is synthetic and built in ``tmp_path``; the only file
 fixture is ``tests/fixtures/manifest_adversarial/listing_unicode.json``.
-Tests marked ``xfail(strict=True)`` document behaviour the reviewer judged
-wrong against the specification; they turn into hard failures (XPASS) the
-moment the code is fixed, so the marker must then be removed.
+The tests that were marked ``xfail(strict=True)`` documented defects M-1 to M-4
+of the review; the markers were removed once the fixes landed, so they now
+run as ordinary tests.
 """
 
 from __future__ import annotations
@@ -107,7 +107,6 @@ def test_empty_listing_builds_header_only_registers_and_full_report(tmp_path: Pa
     assert "No stray folders in this listing." in text
 
 
-@pytest.mark.xfail(strict=True, reason="summary treats an empty (header-only) manifest as missing and exits 1")
 def test_summary_of_an_empty_manifest_succeeds(tmp_path: Path) -> None:
     ws = Workspace(tmp_path, files=[])
     assert ws.build() == 0
@@ -195,8 +194,6 @@ def test_duplicate_drive_ids_keep_both_rows(tmp_path: Path) -> None:
     assert rows[rel_a]["pulled"] == "y" and rows[rel_a]["sha256"] == "b" * 64
 
 
-@pytest.mark.xfail(strict=True, reason="a second listing entry with the same drive id inherits the ledger record "
-                                       "of the first (pulled=y, same sha256) although its size differs; no note")
 def test_duplicate_drive_id_with_different_size_is_not_marked_pulled(tmp_path: Path) -> None:
     rel_a = "DD Sign-OFF/30 - Pharmacy/Submitted/a.pdf"
     rel_b = "DD Sign-OFF/30 - Pharmacy/DD Closure/b.pdf"
@@ -207,8 +204,6 @@ def test_duplicate_drive_id_with_different_size_is_not_marked_pulled(tmp_path: P
     assert row["pulled"] == "n" or "duplicate drive id" in row["notes"].lower()
 
 
-@pytest.mark.xfail(strict=True, reason="listing fileSize/md5Checksum changed since the pull; the row still says "
-                                       "pulled=y with the stale sha256 and carries no stale/size note")
 def test_changed_file_size_since_pull_is_flagged(tmp_path: Path) -> None:
     rel = "DD Sign-OFF/30 - Pharmacy/Submitted/a.pdf"
     ws = Workspace(tmp_path, files=[_file("x1", rel, size="9999", md5Checksum="newmd5")],
@@ -223,8 +218,6 @@ def test_changed_file_size_since_pull_is_flagged(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # Connector limit and zips
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=True, reason="once the pull plan has any blocked entry, an oversize file absent from the "
-                                       "plan (added to Drive after planning) is not flagged")
 def test_oversize_file_missing_from_plan_is_still_blocked(tmp_path: Path) -> None:
     rel1 = "DD Sign-OFF/30 - Pharmacy/Submitted/big.pdf"
     rel2 = "DD Sign-OFF/30 - Pharmacy/Submitted/big2.pdf"

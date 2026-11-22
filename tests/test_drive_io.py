@@ -353,3 +353,84 @@ def test_doctor_report(project: Path, monkeypatch: pytest.MonkeyPatch, capsys: p
 
     monkeypatch.setattr(drive_io, "_soffice_version", lambda: None)
     assert run("doctor") == 1
+
+
+# --------------------------------------------------------------------------- #
+# Fixer regressions: re-planning, branch relock, lock state honesty
+# --------------------------------------------------------------------------- #
+def test_file_modified_on_drive_after_fetch_is_replanned(project: Path) -> None:
+    assert run("list") == 0 and run("pull") == 0
+    assert run("ingest", "--blob", str(BLOBS / "sample_calc.xlsx"), "--drive-id", "fid_tpl") == 0
+    assert plan_by_id(project)["fid_tpl"]["status"] == "fetched"
+    rows = [json.loads(l) for l in (FIXTURES / "listing_b.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+    for row in rows:
+        if row["id"] == "fid_tpl":
+            row["fileSize"], row["modifiedTime"] = "300", "2026-11-23T08:00:00Z"
+    (project / "state" / "drive_listing" / "dd.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    assert run("list") == 0 and run("pull") == 0
+    plan = plan_by_id(project)
+    assert plan["fid_tpl"]["status"] == "pending"  # changed on Drive: re-fetch
+    assert plan["fid_mot"]["status"] == "pending" and plan["fid_zip"]["status"] == "skipped_zip"
+    # The unchanged ledger row is still trusted once Drive reports the old size again.
+    for row in rows:
+        if row["id"] == "fid_tpl":
+            row["fileSize"] = "217"
+    (project / "state" / "drive_listing" / "dd.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    assert run("list") == 0 and run("pull") == 0
+    assert plan_by_id(project)["fid_tpl"]["status"] == "fetched"
+
+
+def test_ingest_relocks_only_the_branch(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert run("list") == 0 and run("pull") == 0  # pull leaves data/source locked
+    state = json.loads((project / "state" / "source_lock.json").read_text())
+    calls: List[List[str]] = []
+    real_run = drive_io._run
+
+    def _recording(argv: Any, cwd: Any = None, timeout: Any = None) -> subprocess.CompletedProcess:
+        calls.append(list(argv))
+        return real_run(argv, cwd=cwd, timeout=timeout)
+
+    monkeypatch.setattr(drive_io, "_run", _recording)
+    assert run("ingest", "--blob", str(BLOBS / "mot_nsc_c2.pdf"), "--drive-id", "fid_mot") == 0
+    assert not any(c[:3] == ["chattr", "-R", "+i"] for c in calls)  # no whole-tree relock per file
+    dest = project / "data" / "source" / "Basis" / "MOT NSC" / "Corrigendum 2" / "Annex B" / "mot_nsc_c2.pdf"
+    assert dest.is_file()
+    if state["method"] == "chattr" and state["enforced"]:
+        with pytest.raises(OSError):
+            dest.write_bytes(b"tamper")
+        with pytest.raises(OSError):
+            (dest.parent / "new.txt").write_bytes(b"x")
+    assert json.loads((project / "state" / "source_lock.json").read_text())["locked"] is True
+    assert run("verify") == 0
+
+
+def test_corrupt_lock_state_does_not_mask_ingest_exit_code(project: Path) -> None:
+    assert run("list") == 0
+    (project / "state" / "source_lock.json").write_text("{not json", encoding="utf-8")
+    assert run("ingest", "--blob", str(BLOBS / "wrong_size.bin"), "--drive-id", "fid_mot") == 2
+    assert run("ingest", "--blob", str(BLOBS / "mot_nsc_c2.pdf"), "--drive-id", "fid_mot") == 0
+    assert drive_io.read_lock_state() == {}
+
+
+def test_lock_state_reports_probe_and_failures(project: Path) -> None:
+    nested = project / "data" / "source" / "Basis" / "App D"
+    nested.mkdir(parents=True)
+    (nested / "x.pdf").write_bytes(b"%PDF")
+    assert run("lock") == 0
+    state = json.loads((project / "state" / "source_lock.json").read_text())
+    assert state["probed_dirs"] == 3 and state["failures"] == 0 and isinstance(state["writable_dirs"], list)
+    assert state["enforced"] == (state["writable_dirs"] == [])
+    assert not list((project / "data" / "source").rglob(".lock_probe"))
+    assert drive_io.relock_branch([]) is True
+    assert run("unlock") == 0
+    assert drive_io.relock_branch([nested / "x.pdf"]) is True  # not locked: nothing to do
+    (nested / "x.pdf").write_bytes(b"%PDF-1.4")
+
+
+def test_rel_path_safety_rules() -> None:
+    assert drive_io.rel_path_is_safe("Basis/App D/x.pdf")
+    assert drive_io.rel_path_is_safe("DD Sign-OFF/30 - Pharmacy/Submitted/Plan – Ebene 2 (révisé).pdf")
+    for bad in ("", "/etc/passwd", "Basis/../x", "./x", "Basis//x.pdf", "Basis/./x.pdf", "..", "a/.."):
+        assert not drive_io.rel_path_is_safe(bad), bad

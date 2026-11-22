@@ -224,3 +224,144 @@ def test_build_without_ledger_or_plan(workspace: Dict[str, Path]) -> None:
     text = (workspace["qa"] / "inventory_anomalies.md").read_text(encoding="utf-8")
     assert "unstable_departments.json not present" in text
     assert "| in both and identical | 1 | Submitted/29_Lab_RDS.pdf (name+size) |" in text
+
+
+# --------------------------------------------------------------------------- #
+# Review fixes M-1 to M-5: stale pulls, plan coverage, duplicate ids, empty summary, transport
+# --------------------------------------------------------------------------- #
+def _args(ws: Dict[str, Path]) -> List[str]:
+    return ["--state-dir", str(ws["state"]), "--registers-dir", str(ws["registers"]),
+            "--qa-dir", str(ws["qa"]), "--project-root", str(ws["root"])]
+
+
+def _rewrite_listing(ws: Dict[str, Path], mutate) -> None:
+    """Apply ``mutate(listing_dict)`` to the workspace listing in place."""
+    path = ws["state"] / "listings" / LISTING_NAME
+    data = json.loads(path.read_text(encoding="utf-8"))
+    mutate(data)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_stale_pull_when_drive_size_or_md5_moved(workspace: Dict[str, Path]) -> None:
+    def mutate(data: dict) -> None:
+        for rec in data["files"]:
+            if rec["id"] == "c1":
+                rec["fileSize"] = "501"  # grew on Drive after the fetch
+            if rec["id"] == "b1":
+                rec["md5Checksum"] = "changed"
+    _rewrite_listing(workspace, mutate)
+    # give b1's ledger record a Drive md5 at fetch time so the md5 comparison is meaningful
+    ledger_path = workspace["state"] / "pull_ledger.jsonl"
+    records = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    for rec in records:
+        if rec["drive_id"] == "b1":
+            rec["drive_md5"] = "original"
+    ledger_path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    rows = _build(workspace)
+    assert rows["c1"]["pulled"] == "n" and rows["c1"]["sha256"] == "" and rows["c1"]["bytes"] == "501"
+    assert manifest.STALE_NOTE in rows["c1"]["notes"] and "Drive size 500 at fetch, now 501" in rows["c1"]["notes"]
+    assert rows["b1"]["pulled"] == "n" and "Drive md5 changed since fetch" in rows["b1"]["notes"]
+    assert rows["a1"]["pulled"] == "y" and manifest.STALE_NOTE not in rows["a1"]["notes"]  # unchanged file
+    # the stray twin s1 is still pulled, so it no longer has a sha256 partner: no duplicate_of by hash
+    assert rows["s1"]["duplicate_of"] == ""
+    text = (workspace["qa"] / "inventory_anomalies.md").read_text(encoding="utf-8")
+    assert "## 10. Listing integrity" in text and "stale pulls: 2;" in text
+    assert "| Basis/App D/Appendix D - ACMV For Common Areas.pdf | 501 | Drive size 500 at fetch, now 501 |" in text
+
+
+def test_size_mismatch_at_fetch_is_not_reported_stale() -> None:
+    row = {"_has_size": True, "bytes": 9999, "drive_md5": ""}
+    assert manifest.stale_reasons(row, {"bytes": 1000, "size_match": False}) == []
+    assert manifest.stale_reasons(row, {"bytes": 1000, "size_match": True}) == ["Drive size 1000 at fetch, now 9999"]
+    row_md5 = {"_has_size": False, "bytes": 0, "drive_md5": "new"}
+    assert manifest.stale_reasons(row_md5, {"md5": "old", "md5_match": None}) == []  # local md5 never verified
+    assert manifest.stale_reasons(row_md5, {"md5": "old", "md5_match": True}) == ["Drive md5 changed since fetch"]
+
+
+def test_oversize_file_absent_from_plan_is_blocked_and_listed(workspace: Dict[str, Path]) -> None:
+    def mutate(data: dict) -> None:
+        data["files"].append({"id": "new1", "title": "Late booklet.pdf", "mimeType": "application/pdf",
+                              "fileSize": "30000000", "fileExtension": "pdf", "modifiedTime": "2026-11-22T11:00:00Z",
+                              "parentId": "f30sub", "rel_path": "DD Sign-OFF/30 - Pharmacy/Submitted/Late booklet.pdf"})
+    _rewrite_listing(workspace, mutate)
+    rows = _build(workspace)
+    assert "blocked: connector limit" in rows["a5"]["notes"]  # from the plan
+    assert "blocked: connector limit" in rows["new1"]["notes"] and "not in pull plan" in rows["new1"]["notes"]
+    text = (workspace["qa"] / "inventory_anomalies.md").read_text(encoding="utf-8")
+    assert "Transport: connector. Blocked files: 2, total 50,000,000" in text
+    assert "files absent from the pull plan: 1." in text
+    assert "| DD Sign-OFF/30 - Pharmacy/Submitted/Late booklet.pdf | 30000000 | n |" in text
+
+
+def test_duplicate_drive_id_only_inherits_matching_ledger_record(workspace: Dict[str, Path]) -> None:
+    twin = "DD Sign-OFF/30 - Pharmacy/DD Closure/Appendix D copy.pdf"
+
+    def mutate(data: dict) -> None:
+        data["files"].append({"id": "c1", "title": "Appendix D copy.pdf", "mimeType": "application/pdf",
+                              "fileSize": "777", "fileExtension": "pdf", "modifiedTime": "2026-11-22T11:00:00Z",
+                              "parentId": "f30dd", "rel_path": twin})
+    _rewrite_listing(workspace, mutate)
+    _build(workspace)  # its drive_id index would collapse the two c1 rows, so index by path
+    by_path = {r["rel_path"]: r for r in read_csv_dicts(workspace["registers"] / "manifest.csv")}
+    assert len(by_path) == 17
+    original = by_path["Basis/App D/Appendix D - ACMV For Common Areas.pdf"]
+    assert original["pulled"] == "y" and manifest.DUPLICATE_ID_NOTE in original["notes"]
+    assert by_path[twin]["pulled"] == "n" and by_path[twin]["sha256"] == "" and by_path[twin]["duplicate_of"] == ""
+    assert f"{manifest.DUPLICATE_ID_NOTE} (2 entries)" in by_path[twin]["notes"]
+    text = (workspace["qa"] / "inventory_anomalies.md").read_text(encoding="utf-8")
+    assert "Drive ids listed more than once: 1 (2 entries)" in text
+    assert f"| c1 | {twin} | 777 | n |" in text
+
+
+def test_ledger_lookup_rules() -> None:
+    ledger = {"id:x": {"drive_id": "x", "rel_path": "A/a.pdf"}, "path:B/b.pdf": {"drive_id": "y", "rel_path": "B/b.pdf"},
+              "path:C/c.pdf": {"rel_path": "C/c.pdf"}}
+    assert manifest.ledger_lookup(ledger, "x", "A/a.pdf") is ledger["id:x"]
+    assert manifest.ledger_lookup(ledger, "x", "A/renamed.pdf") is ledger["id:x"]  # unique id: a rename
+    assert manifest.ledger_lookup(ledger, "x", "A/renamed.pdf", unique_id=False) is None
+    assert manifest.ledger_lookup(ledger, "other", "B/b.pdf") is None  # path record belongs to another id
+    assert manifest.ledger_lookup(ledger, "y", "B/b.pdf") is ledger["path:B/b.pdf"]
+    assert manifest.ledger_lookup(ledger, "z", "C/c.pdf") is ledger["path:C/c.pdf"]  # hand-uploaded, no id
+
+
+def test_renamed_file_keeps_pull_with_a_note(workspace: Dict[str, Path]) -> None:
+    def mutate(data: dict) -> None:
+        for rec in data["files"]:
+            if rec["id"] == "c1":
+                rec["rel_path"] = "Basis/App D/Appendix D - renamed.pdf"
+                rec["title"] = "Appendix D - renamed.pdf"
+    _rewrite_listing(workspace, mutate)
+    rows = _build(workspace)
+    assert rows["c1"]["pulled"] == "y" and "moved or renamed since fetch" in rows["c1"]["notes"]
+
+
+def test_summary_of_empty_manifest_succeeds(workspace: Dict[str, Path], capsys: pytest.CaptureFixture[str]) -> None:
+    _rewrite_listing(workspace, lambda data: data.update(files=[]))
+    assert manifest.main(_args(workspace) + ["build"]) == 0
+    assert manifest.main(_args(workspace) + ["summary"]) == 0
+    assert '"files": 0' in capsys.readouterr().out
+    assert manifest.summary(workspace["registers"]) == {
+        "files": 0, "by_root": {}, "by_stage": {}, "by_doc_class": {}, "pulled": 0, "duplicates": 0,
+        "zips": 0, "departments": 0}
+    (workspace["registers"] / "manifest.csv").unlink()
+    with pytest.raises(FileNotFoundError):
+        manifest.summary(workspace["registers"])
+
+
+def test_rclone_transport_blocks_nothing(workspace: Dict[str, Path]) -> None:
+    assert manifest.main(_args(workspace) + ["--transport", "rclone", "build"]) == 0
+    rows = {r["drive_id"]: r for r in read_csv_dicts(workspace["registers"] / "manifest.csv")}
+    assert "blocked: connector limit" not in rows["a5"]["notes"]
+    assert manifest.OVER_LIMIT_NOTE in rows["a5"]["notes"] and rows["a5"]["pulled"] == "n"
+    text = (workspace["qa"] / "inventory_anomalies.md").read_text(encoding="utf-8")
+    assert "Transport: rclone. Blocked files: 0, total 0" in text
+    assert "rclone has no size limit: 1 unpulled files over the connector limit (20,000,000" in text
+    progress = Progress(workspace["state"] / "progress.json").load()["items"]["manifest"]
+    assert progress["transport"] == "rclone"
+    # the configured default (connector) still blocks
+    assert manifest.main(_args(workspace) + ["build"]) == 0
+    rows = {r["drive_id"]: r for r in read_csv_dicts(workspace["registers"] / "manifest.csv")}
+    assert "blocked: connector limit" in rows["a5"]["notes"]
+    assert manifest.configured_transport() == "connector"
+    with pytest.raises(ValueError):
+        manifest.configured_transport("ftp")

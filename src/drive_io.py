@@ -19,7 +19,9 @@ Verbs: ``doctor``, ``list``, ``pull``, ``push-markdown`` plus the helpers
 
 Everything is idempotent and resumable; all state lives in files under
 ``state/``.  Nothing under ``data/source`` is ever deleted except a
-just-ingested copy whose size did not match Drive's ``fileSize``.
+just-ingested copy whose size did not match Drive's ``fileSize`` (and the
+blob's size is checked before anything is written, so that case only arises
+when the blob changes under us).
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ import importlib.util
 import json
 import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -75,6 +78,9 @@ SOURCE_ROOTS: Tuple[Tuple[str, str, bool], ...] = (
     ("template", common.ROOT_TEMPLATE, False),
     ("basis", common.ROOT_BASIS, False),
 )
+SUPERSEDED_RE = re.compile(r"\.superseded\.[0-9a-f]{8}$")
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_MAX_PROBE_DIRS = 256
 
 
 # --------------------------------------------------------------------------- #
@@ -166,6 +172,32 @@ def _parse_iso(stamp: str) -> datetime:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def _listed_at(entry: Dict[str, Any]) -> datetime:
+    """``listed_at`` of a listing entry as an aware datetime (the epoch when missing or unparsable)."""
+    try:
+        return _parse_iso(str(entry.get("listed_at") or ""))
+    except ValueError:
+        return _EPOCH
+
+
+def _read_json_safe(path: Path) -> Dict[str, Any]:
+    """Read a small JSON state file; a missing, empty or corrupt file is ``{}`` (never raises)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except (OSError, ValueError) as exc:
+        _log(f"unreadable state file {path}: {exc}")
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def rel_path_is_safe(rel_path: str) -> bool:
+    """True when ``rel_path`` is a plain relative path: no empty, ``.`` or ``..`` segments and not absolute."""
+    text = str(rel_path)
+    if not text or text.startswith("/") or "\0" in text:
+        return False
+    return all(seg not in ("", ".", "..") for seg in text.split("/"))
+
+
 # --------------------------------------------------------------------------- #
 # Transport
 # --------------------------------------------------------------------------- #
@@ -222,28 +254,81 @@ def load_listing(path: Path) -> Dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def read_raw_jsonl_listing() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
-    """Consolidate ``state/drive_listing/*.jsonl``: ``(files, folders, inputs)`` deduplicated by id.
+def capture_scope(entry: Dict[str, Any]) -> str:
+    """The folder a listing entry is captured under: ``<root>/<top-level folder>`` or the root itself.
 
-    When an id appears more than once the entry with the latest ``listed_at``
-    wins.  ``inputs`` records the name, size and SHA-256 of each JSONL so a
-    rerun on unchanged inputs can be recognised.
+    Captures are reconciled per scope so that a department re-listed later
+    replaces its earlier rows (a file that vanished is dropped, not merged),
+    while a partial second capture of one folder leaves the others alone.
+    """
+    segs = [s for s in str(entry.get("rel_path", "")).split("/") if s]
+    if not segs:
+        return ""
+    is_folder = entry.get("mimeType") == FOLDER_MIME
+    if len(segs) == 1 or (len(segs) == 2 and not is_folder):
+        return segs[0]
+    return f"{segs[0]}/{segs[1]}"
+
+
+def capture_window_minutes() -> float:
+    """Rows of one scope listed within this many minutes of its newest row belong to the same capture.
+
+    Half the configured listing interval: two deliberate captures are at least
+    the interval apart, while the pages of one capture are seconds apart.
+    """
+    interval = common.load_config().get("drive", {}).get("listing_interval_minutes", 15)
+    return max(float(interval), 1.0) / 2.0
+
+
+def current_capture_rows(rows_by_file: Dict[str, List[Dict[str, Any]]], window: timedelta) -> List[Dict[str, Any]]:
+    """Rows of one scope from the JSONL files whose newest ``listed_at`` is within ``window`` of the latest."""
+    newest = {name: max((_listed_at(r) for r in rows), default=_EPOCH) for name, rows in rows_by_file.items()}
+    latest = max(newest.values(), default=_EPOCH)
+    kept: List[Dict[str, Any]] = []
+    for name, rows in rows_by_file.items():
+        if latest - newest[name] <= window:
+            kept.extend(rows)
+    return kept
+
+
+def read_raw_jsonl_listing(window_minutes: Optional[float] = None,
+                           ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any], Dict[str, int]]:
+    """Consolidate ``state/drive_listing/*.jsonl``: ``(files, folders, inputs, stats)`` deduplicated by id.
+
+    Rows are grouped by capture scope (see :func:`capture_scope`) and JSONL
+    file; within a scope only the latest capture survives, so a file absent
+    from a department's second capture is dropped rather than carried over.
+    When an id still appears more than once the entry with the latest
+    ``listed_at`` wins.  ``inputs`` records the name, size and SHA-256 of each
+    JSONL so a rerun on unchanged inputs can be recognised; ``stats`` counts
+    stale rows dropped, rows without an id and unsafe ``rel_path`` values.
     """
     raw_dir = state_dir() / "drive_listing"
-    by_id: Dict[str, Dict[str, Any]] = {}
+    window = timedelta(minutes=window_minutes if window_minutes is not None else capture_window_minutes())
     inputs: Dict[str, Any] = {}
+    scopes: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+    stats = {"rows": 0, "stale_dropped": 0, "no_id": 0, "unsafe_rel_path": 0}
     for jsonl in sorted(raw_dir.glob("*.jsonl")) if raw_dir.is_dir() else []:
         inputs[jsonl.name] = {"bytes": jsonl.stat().st_size, "sha256": common.sha256_file(jsonl)}
         for entry in common.read_jsonl(jsonl):
             if not isinstance(entry, dict) or not entry.get("id"):
+                stats["no_id"] += 1
                 continue
+            stats["rows"] += 1
+            scopes.setdefault(capture_scope(entry), {}).setdefault(jsonl.name, []).append(entry)
+    by_id: Dict[str, Dict[str, Any]] = {}
+    for rows_by_file in scopes.values():
+        current = current_capture_rows(rows_by_file, window)
+        stats["stale_dropped"] += sum(len(r) for r in rows_by_file.values()) - len(current)
+        for entry in current:
             previous = by_id.get(entry["id"])
-            if previous is None or str(entry.get("listed_at", "")) >= str(previous.get("listed_at", "")):
+            if previous is None or _listed_at(entry) >= _listed_at(previous):
                 by_id[entry["id"]] = entry
+    stats["unsafe_rel_path"] = sum(1 for e in by_id.values() if not rel_path_is_safe(str(e.get("rel_path", ""))))
     files = [e for e in by_id.values() if e.get("mimeType") != FOLDER_MIME]
     folders = [e for e in by_id.values() if e.get("mimeType") == FOLDER_MIME]
     key = lambda e: str(e.get("rel_path", ""))  # noqa: E731
-    return sorted(files, key=key), sorted(folders, key=key), inputs
+    return sorted(files, key=key), sorted(folders, key=key), inputs, stats
 
 
 def _rclone_entry(root_name: str, item: Dict[str, Any], listed_at: str) -> Dict[str, Any]:
@@ -260,9 +345,10 @@ def _rclone_entry(root_name: str, item: Dict[str, Any], listed_at: str) -> Dict[
         "rel_path": rel,
         "listed_at": listed_at,
     }
-    md5 = (item.get("Hashes") or {}).get("md5")
+    hashes = {str(k).lower(): v for k, v in (item.get("Hashes") or {}).items()}
+    md5 = hashes.get("md5")  # rclone emits ``Hashes.MD5``; older notes wrote ``md5``
     if md5:
-        entry["md5Checksum"] = md5
+        entry["md5Checksum"] = str(md5)
     return entry
 
 
@@ -286,29 +372,57 @@ def read_rclone_listing() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], D
     return sorted(files, key=lambda e: e["rel_path"]), folders, {"transport": "rclone"}
 
 
-def _new_listing_path(now: datetime) -> Tuple[Path, str]:
-    """Pick ``listing_<stamp>.json``; bump by a second until the name is free so two runs never collide."""
+def _listing_stamp(path: Path) -> Optional[datetime]:
+    """The timestamp encoded in a ``listing_<stamp>.json`` name, or ``None``."""
+    try:
+        return datetime.strptime(path.stem[len("listing_"):], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _new_listing_path(capture: datetime) -> Path:
+    """Pick ``listing_<stamp>.json`` from the capture time, kept strictly after every existing name.
+
+    Names must sort chronologically (``latest_listing`` relies on it), so a
+    capture older than the newest listing on disk is bumped past it, and the
+    stamp is bumped by a second until the name is free.
+    """
+    stamps = [s for s in (_listing_stamp(p) for p in listing_files()) if s is not None]
+    candidate = capture.replace(microsecond=0)
+    if stamps and candidate <= max(stamps):
+        candidate = max(stamps) + timedelta(seconds=1)
     while True:
-        stamp = now.strftime("%Y%m%dT%H%M%SZ")
-        path = listings_dir() / f"listing_{stamp}.json"
+        path = listings_dir() / f"listing_{candidate.strftime('%Y%m%dT%H%M%SZ')}.json"
         if not path.exists():
-            return path, now.strftime("%Y-%m-%dT%H:%M:%SZ")
-        now += timedelta(seconds=1)
+            return path
+        candidate += timedelta(seconds=1)
+
+
+def capture_time(files: List[Dict[str, Any]], folders: List[Dict[str, Any]]) -> datetime:
+    """When the listing was captured on Drive: the newest ``listed_at`` (the wall clock if none)."""
+    stamps = [_listed_at(e) for e in [*files, *folders]]
+    latest = max(stamps, default=_EPOCH)
+    return latest if latest > _EPOCH else datetime.now(timezone.utc)
 
 
 def write_listing(files: List[Dict[str, Any]], folders: List[Dict[str, Any]], inputs: Dict[str, Any],
                   force: bool = False) -> Tuple[Path, bool]:
     """Write a consolidated listing unless the inputs are unchanged since the latest one.
 
-    Returns ``(path, written)``; when not written ``path`` is the existing latest listing.
+    ``taken_at`` is the capture time (newest ``listed_at``), so ``minutes_apart``
+    measures the interval between Drive captures, not between ``list`` runs;
+    ``written_at`` is the wall clock.  Returns ``(path, written)``; when not
+    written ``path`` is the existing latest listing.
     """
     existing = listing_files()
     if existing and not force:
         last = load_listing(existing[-1])
         if last.get("inputs") == inputs and inputs:
             return existing[-1], False
-    path, taken_at = _new_listing_path(datetime.now(timezone.utc))
-    doc = {"taken_at": taken_at, "inputs": inputs, "files": files, "folders": folders}
+    taken = capture_time(files, folders)
+    path = _new_listing_path(taken)
+    doc = {"taken_at": taken.strftime("%Y-%m-%dT%H:%M:%SZ"), "written_at": common.utc_now_iso(),
+           "inputs": inputs, "files": files, "folders": folders}
     common.atomic_write_json(path, doc)
     return path, True
 
@@ -355,17 +469,26 @@ def compare_listings(previous: Dict[str, Any], current: Dict[str, Any], names: T
 def cmd_list(args: argparse.Namespace) -> int:
     """``list``: consolidate the listing, then compare with the previous one for stability."""
     transport = args.transport or detect_transport()
+    stats: Dict[str, int] = {}
     if transport == "rclone":
         files, folders, inputs = read_rclone_listing()
         inputs["taken"] = common.utc_now_iso()  # every rclone run is a fresh snapshot
     else:
-        files, folders, inputs = read_raw_jsonl_listing()
+        files, folders, inputs, stats = read_raw_jsonl_listing(getattr(args, "capture_window", None))
     if not files and not folders:
-        print("error: no listing data found (state/drive_listing/*.jsonl is empty)", file=sys.stderr)
+        where = "rclone lsjson returned nothing" if transport == "rclone" else "state/drive_listing/*.jsonl is empty"
+        print(f"error: no listing data found ({where})", file=sys.stderr)
         return 1
     path, written = write_listing(files, folders, inputs, force=args.force)
     verb = "wrote" if written else "unchanged, kept"
     print(f"{verb} {path.relative_to(common.project_root())}: {len(files)} files, {len(folders)} folders ({transport})")
+    if stats.get("stale_dropped"):
+        print(f"  {stats['stale_dropped']} rows from earlier captures superseded by a later capture of the same folder")
+    if stats.get("no_id"):
+        print(f"  warning: {stats['no_id']} rows without an id were ignored")
+    if stats.get("unsafe_rel_path"):
+        print(f"  warning: {stats['unsafe_rel_path']} entries have an unsafe rel_path (empty, '.' or '..' segment); "
+              f"ingest will refuse them")
     all_listings = listing_files()
     if len(all_listings) >= 2:
         prev_path, cur_path = all_listings[-2], all_listings[-1]
@@ -428,18 +551,40 @@ def local_rel_path(entry: Dict[str, Any], listing: Dict[str, Any]) -> str:
 # --------------------------------------------------------------------------- #
 # Pull plan
 # --------------------------------------------------------------------------- #
-def plan_status(entry: Dict[str, Any], fetched_ids: set) -> str:
-    """Status of one listing file for the pull plan."""
+def ledger_row_current(row: Optional[Dict[str, Any]], entry: Dict[str, Any]) -> bool:
+    """True when the ledger row is a good fetch of the file as the listing now describes it.
+
+    A row whose size or md5 disagreed with Drive at ingest, or whose bytes/md5
+    no longer match the latest listing (the file changed on Drive since the
+    fetch), does not count as fetched, so ``pull`` re-plans the file.
+    """
+    if not row:
+        return False
+    if row.get("size_match") is False or row.get("md5_match") is False:
+        return False
+    drive_size = entry.get("fileSize")
+    if drive_size is not None and _as_int(drive_size, -1) != _as_int(row.get("bytes"), -2):
+        return False
+    drive_md5 = entry.get("md5Checksum")
+    if drive_md5 and row.get("md5") and str(drive_md5) != str(row.get("md5")):
+        return False
+    return True
+
+
+def plan_status(entry: Dict[str, Any], ledger: Dict[str, Dict[str, Any]], transport: str = "connector") -> str:
+    """Status of one listing file for the pull plan (zip, then fetched, then the transport's size rule)."""
     if common.is_zip(str(entry.get("rel_path", ""))):
         return "skipped_zip"
-    if str(entry.get("id")) in fetched_ids:
+    if ledger_row_current(ledger.get(str(entry.get("id"))), entry):
         return "fetched"
-    return "pending" if _as_int(entry.get("fileSize")) <= CONNECTOR_LIMIT else "blocked_connector_limit"
+    if transport == "rclone" or _as_int(entry.get("fileSize")) <= CONNECTOR_LIMIT:
+        return "pending"
+    return "blocked_connector_limit"
 
 
 def build_pull_plan(listing: Dict[str, Any], transport: str) -> List[Dict[str, Any]]:
     """Pull-plan rows for every non-folder entry of ``listing``."""
-    fetched = set(ledger_by_id())
+    ledger = ledger_by_id()
     rows: List[Dict[str, Any]] = []
     for entry in listing.get("files", []):
         size = _as_int(entry.get("fileSize"))
@@ -450,7 +595,7 @@ def build_pull_plan(listing: Dict[str, Any], transport: str) -> List[Dict[str, A
             "bytes": size,
             "mime_type": entry.get("mimeType", ""),
             "transport_eligible": "y" if eligible else "n",
-            "status": plan_status(entry, fetched),
+            "status": plan_status(entry, ledger, transport),
         })
     return rows
 
@@ -495,6 +640,11 @@ def print_plan_summary(rows: List[Dict[str, Any]]) -> None:
     pending = [r for r in rows if r["status"] == "pending"]
     blocked = [r for r in rows if r["status"] == "blocked_connector_limit"]
     print(f"{len(pending)} pending, {len(blocked)} blocked by the connector limit ({CONNECTOR_LIMIT} bytes)")
+    ledger = ledger_by_id()
+    refetch = [r for r in pending if str(r.get("drive_id")) in ledger]
+    if refetch:
+        print(f"{len(refetch)} pending rows are re-fetches (changed on Drive since the fetch, or mismatched at "
+              f"ingest); ingest them with --force")
 
 
 CONNECTOR_INSTRUCTION = """\
@@ -505,7 +655,9 @@ then run for each saved file:
 or for a batch:
     python -m src.drive_io ingest-dir --dir <scratch dir> --map <blob-name-to-drive_id json or csv> --move
 Rows with status 'blocked_connector_limit' exceed the connector's 10485760-byte limit and need the
-transport chosen in decisions_needed D-001 (upload or rclone). Finish with: python -m src.drive_io verify
+transport chosen in decisions_needed D-001 (upload or rclone). A pending row whose file already exists under
+data/source is a re-fetch (changed on Drive, or mismatched at ingest): ingest it with --force.
+Finish with: python -m src.drive_io verify
 """
 
 
@@ -526,7 +678,8 @@ def ingest_rclone_tree(listing: Dict[str, Any]) -> int:
     by_rel = {str(e.get("rel_path")): e for e in listing.get("files", [])}
     known = ledger_by_id()
     root, added = source_dir(), 0
-    for path in sorted(p for p in root.rglob("*") if p.is_file() and not p.name.startswith(".")):
+    for path in sorted(p for p in root.rglob("*")
+                       if p.is_file() and not p.name.startswith(".") and not SUPERSEDED_RE.search(p.name)):
         rel = path.relative_to(root).as_posix()
         entry = by_rel.get(rel)
         drive_id = str(entry.get("id")) if entry else f"path:{rel}"
@@ -600,30 +753,64 @@ def ledger_row(drive_id: str, rel_path: str, local: Path, entry: Dict[str, Any],
     }
 
 
-def _writable_chain(dest: Path) -> None:
-    """Make every existing directory from ``data/source`` down to ``dest.parent`` writable, then create the rest.
+def safe_dest(rel_path: str) -> Optional[Path]:
+    """``data/source/<rel_path>`` when the path stays inside ``data/source``; ``None`` otherwise.
 
-    ``lock`` may have made the whole tree immutable; a connector ingest only
-    needs the one branch it writes to, and :func:`_relock_if_locked` restores
-    the lock afterwards.
+    The listing is agent-written, so ``rel_path`` is checked segment by segment
+    and again after resolution (symlinks included) before anything is written.
     """
-    root = common.ensure_dir(source_dir())
+    if not rel_path_is_safe(rel_path):
+        return None
+    root = source_dir()
+    dest = root / rel_path
+    try:
+        resolved = dest.resolve()
+    except (OSError, RuntimeError):
+        return None
+    return dest if resolved.is_relative_to(root.resolve()) else None
+
+
+def _inside_source(path: Path) -> bool:
+    """True when ``path`` resolves to somewhere under ``data/source``."""
+    try:
+        return path.resolve().is_relative_to(source_dir().resolve())
+    except (OSError, RuntimeError):
+        return False
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """True when both paths name one and the same existing file."""
+    try:
+        return a.samefile(b)
+    except OSError:
+        return False
+
+
+def _chain_to(dest: Path) -> List[Path]:
+    """``data/source`` and every directory from there down to ``dest.parent`` (existing or not)."""
+    root = source_dir()
     chain = [root]
     current = root
     for part in dest.parent.relative_to(root).parts:
         current = current / part
         chain.append(current)
+    return chain
+
+
+def _writable_chain(dest: Path) -> List[Path]:
+    """Make every existing directory from ``data/source`` down to ``dest.parent`` writable, create the rest.
+
+    ``lock`` may have made the whole tree immutable; a connector ingest only
+    needs the one branch it writes to, and :func:`relock_branch` restores the
+    lock on exactly that branch afterwards.  Returns the directories touched.
+    """
+    common.ensure_dir(source_dir())
+    chain = _chain_to(dest)
+    _make_writable([d for d in chain if d.exists()])
     for directory in chain:
-        if directory.exists():
-            _make_writable(directory)
-        else:
+        if not directory.exists():
             directory.mkdir()
-
-
-def _relock_if_locked() -> None:
-    """Re-apply the source lock when ``state/source_lock.json`` says the tree should be locked."""
-    if lock_state_path().exists() and json.loads(lock_state_path().read_text(encoding="utf-8")).get("locked"):
-        lock_source()
+    return chain
 
 
 def _place_blob(blob: Path, dest: Path, move: bool) -> None:
@@ -641,16 +828,31 @@ def _supersede(dest: Path) -> Path:
     kept = dest.with_name(f"{dest.name}.superseded.{sha8}")
     if not kept.exists():
         _writable_chain(dest)
-        _make_writable(dest)
+        _make_writable([dest])
         dest.rename(kept)
     return kept
 
 
-def _finish_ingest(drive_id: str, rel: str, dest: Path, entry: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
-    """Hash the placed copy, ledger it and decide the exit code (size mismatch deletes the copy)."""
+def _restore_superseded(kept: Optional[Path], dest: Path) -> None:
+    """Put a superseded original back at ``dest`` after a failed replacement."""
+    if kept is not None and kept.exists() and not dest.exists():
+        kept.rename(dest)
+        print(f"restored the previous copy of {dest.name}", file=sys.stderr)
+
+
+def _size_matches(blob: Path, entry: Dict[str, Any]) -> bool:
+    """True when the blob's size equals Drive's ``fileSize`` (or Drive gave none)."""
+    drive_size = entry.get("fileSize")
+    return drive_size is None or _as_int(drive_size, -1) == blob.stat().st_size
+
+
+def _finish_ingest(drive_id: str, rel: str, dest: Path, entry: Dict[str, Any],
+                   kept: Optional[Path]) -> Tuple[int, Dict[str, Any]]:
+    """Hash the placed copy, ledger it and decide the exit code (a size mismatch deletes the copy)."""
     row = ledger_row(drive_id, rel, dest, entry, "connector")
     if not row["size_match"]:
         dest.unlink()  # the only deletion under data/source: a just-ingested copy of the wrong size
+        _restore_superseded(kept, dest)
         print(f"error: size mismatch for {rel}: Drive {entry.get('fileSize')} bytes, blob {row['bytes']} bytes; "
               f"copy deleted", file=sys.stderr)
         return 2, row
@@ -665,12 +867,25 @@ def _finish_ingest(drive_id: str, rel: str, dest: Path, entry: Dict[str, Any]) -
     return 0, row
 
 
+def _ingest_identical(blob: Path, dest: Path, drive_id: str, rel: str, entry: Dict[str, Any], move: bool) -> int:
+    """``dest`` already holds the blob's bytes: ledger it if needed, mark fetched, tidy the blob."""
+    print(f"already present and identical: {rel}")
+    if drive_id not in ledger_by_id():
+        append_ledger(ledger_row(drive_id, rel, dest, entry, "connector"))
+    mark_plan_fetched(drive_id)
+    if move and not _same_file(blob, dest) and not _inside_source(blob):
+        blob.unlink()  # the scratch download only; never a file under data/source
+    return 0
+
+
 def ingest_blob(blob: Path, drive_id: str, move: bool = False, force: bool = False,
-                listing: Optional[Dict[str, Any]] = None) -> int:
+                listing: Optional[Dict[str, Any]] = None, touched: Optional[List[Path]] = None) -> int:
     """Ingest one saved download into ``data/source``; returns a process exit code.
 
     0 success (or already present and identical), 1 usage/refusal, 2 size
-    mismatch (copy deleted), 3 md5 mismatch (file kept, not marked fetched).
+    mismatch (nothing left behind), 3 md5 mismatch (file kept, not marked
+    fetched).  Paths written under ``data/source`` are appended to ``touched``
+    so the caller can re-lock exactly that branch.
     """
     listing = listing or latest_listing()
     if listing is None:
@@ -684,34 +899,43 @@ def ingest_blob(blob: Path, drive_id: str, move: bool = False, force: bool = Fal
         print(f"error: blob not found: {blob}", file=sys.stderr)
         return 1
     rel = local_rel_path(entry, listing)
-    dest = source_dir() / rel
+    dest = safe_dest(rel)
+    if dest is None:
+        print(f"refused: rel_path {rel!r} would leave data/source", file=sys.stderr)
+        return 1
+    if move and _inside_source(blob):
+        print("note: the blob is already under data/source; copying instead of moving")
+        move = False
+    if not _size_matches(blob, entry):
+        print(f"error: size mismatch for {rel}: Drive {entry.get('fileSize')} bytes, blob {blob.stat().st_size} "
+              f"bytes; nothing written", file=sys.stderr)
+        return 2
+    kept: Optional[Path] = None
     if dest.exists():
         if common.sha256_file(dest) == common.sha256_file(blob):
-            print(f"already present and identical: {rel}")
-            if drive_id not in ledger_by_id():
-                append_ledger(ledger_row(drive_id, rel, dest, entry, "connector"))
-            mark_plan_fetched(drive_id)
-            if move:
-                blob.unlink()
-            return 0
+            return _ingest_identical(blob, dest, drive_id, rel, entry, move)
         if not force:
             print(f"refused: {rel} exists with a different sha256; use --force to supersede it", file=sys.stderr)
             return 1
         kept = _supersede(dest)
         print(f"superseded: previous copy kept as {kept.name}")
     _place_blob(blob, dest, move)
-    code, row = _finish_ingest(drive_id, rel, dest, entry)
+    if touched is not None:
+        touched.extend([*_chain_to(dest), dest, *([kept] if kept else [])])
+    code, row = _finish_ingest(drive_id, rel, dest, entry, kept)
     if code == 0:
         print(f"ingested {rel} ({row['bytes']} bytes, sha256 {row['sha256'][:12]}...)")
     return code
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
-    """``ingest --blob <file> --drive-id <id> [--move] [--force]``; the source lock is restored afterwards."""
+    """``ingest --blob <file> --drive-id <id> [--move] [--force]``; the source lock is restored on the branch written."""
+    touched: List[Path] = []
     try:
-        return ingest_blob(Path(args.blob), args.drive_id, move=args.move, force=args.force)
+        code = ingest_blob(Path(args.blob), args.drive_id, move=args.move, force=args.force, touched=touched)
     finally:
-        _relock_if_locked()
+        relocked = relock_branch(touched)
+    return code if code or relocked else 1
 
 
 def read_blob_map(path: Path) -> Dict[str, str]:
@@ -738,17 +962,19 @@ def cmd_ingest_dir(args: argparse.Namespace) -> int:
         print(f"error: empty mapping {args.map}", file=sys.stderr)
         return 1
     outcomes: Dict[str, int] = {}
+    touched: List[Path] = []
     try:
         for name, drive_id in sorted(mapping.items()):
-            code = ingest_blob(Path(args.dir) / name, drive_id, move=args.move, force=args.force, listing=listing)
+            code = ingest_blob(Path(args.dir) / name, drive_id, move=args.move, force=args.force, listing=listing,
+                               touched=touched)
             outcomes[name] = code
     finally:
-        _relock_if_locked()
+        relocked = relock_branch(touched)
     failed = {n: c for n, c in outcomes.items() if c != 0}
     print(f"ingest-dir: {len(outcomes) - len(failed)} ok, {len(failed)} failed")
     for name, code in failed.items():
         print(f"  failed ({code}): {name}")
-    return 1 if failed else 0
+    return 1 if failed or not relocked else 0
 
 
 # --------------------------------------------------------------------------- #
@@ -879,31 +1105,48 @@ def cmd_record_push(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- #
 # Lock / unlock data/source
 # --------------------------------------------------------------------------- #
-def _chmod_tree(root: Path, writable: bool) -> None:
-    """Add or remove write bits on every directory and file under ``root``."""
+_WRITE_BITS = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+
+
+def _chmod_one(path: Path, writable: bool) -> None:
+    """Add the owner write bit or clear every write bit on one path (symlinks are left alone)."""
+    mode = path.lstat().st_mode
+    if stat.S_ISLNK(mode):
+        return
+    path.chmod((mode | stat.S_IWUSR) if writable else (mode & ~_WRITE_BITS))
+
+
+def _chmod_tree(root: Path, writable: bool) -> List[str]:
+    """Add or remove write bits on every directory and file under ``root``; return the paths that failed."""
+    failures: List[str] = []
     for path in [root, *root.rglob("*")]:
         try:
-            mode = path.lstat().st_mode
-            if stat.S_ISLNK(mode):
-                continue
-            bits = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
-            path.chmod((mode | stat.S_IWUSR) if writable else (mode & ~bits))
-        except OSError:
-            pass
+            _chmod_one(path, writable)
+        except OSError as exc:
+            failures.append(f"{path}: {exc.strerror or exc}")
+    return failures
 
 
-def _make_writable(path: Path) -> None:
-    """Best-effort: clear the immutable flag and add the owner write bit on one file or directory."""
-    try:
-        _run(["chattr", "-i", str(path)])
-        path.chmod(path.stat().st_mode | stat.S_IWUSR)
-    except OSError:
-        pass
+def _make_writable(paths: Sequence[Path]) -> List[str]:
+    """Clear the immutable flag (one ``chattr`` call) and add the owner write bit on each path; return failures."""
+    targets = [p for p in paths if p.exists()]
+    if not targets:
+        return []
+    failures: List[str] = []
+    proc = _run(["chattr", "-i", *map(str, targets)])
+    if proc.returncode != 0:
+        _log(f"chattr -i failed: {proc.stderr.strip()}")
+    for path in targets:
+        try:
+            _chmod_one(path, writable=True)
+        except OSError as exc:
+            failures.append(f"{path}: {exc.strerror or exc}")
+    return failures
 
 
-def _probe_enforced(root: Path) -> bool:
-    """True when creating ``.lock_probe`` under ``root`` fails (the lock really bites, even for root)."""
-    probe = root / ".lock_probe"
+def _probe_dir(directory: Path) -> bool:
+    """True when creating ``.lock_probe`` in ``directory`` fails (the lock bites there, even for root)."""
+    probe = directory / ".lock_probe"
     try:
         with probe.open("x"):
             pass
@@ -916,39 +1159,109 @@ def _probe_enforced(root: Path) -> bool:
     return False
 
 
+def _probe_enforced(root: Path) -> Dict[str, Any]:
+    """Probe the root and (a sample of) its sub-directories: ``{enforced, probed_dirs, writable_dirs}``."""
+    directories = [root, *sorted(p for p in root.rglob("*") if p.is_dir() and not p.is_symlink())]
+    if len(directories) > _MAX_PROBE_DIRS:
+        step = len(directories) / _MAX_PROBE_DIRS
+        directories = [directories[int(i * step)] for i in range(_MAX_PROBE_DIRS)]
+    writable = [str(d.relative_to(root)) or "." for d in directories if not _probe_dir(d)]
+    return {"enforced": not writable, "probed_dirs": len(directories), "writable_dirs": writable[:10]}
+
+
+def read_lock_state() -> Dict[str, Any]:
+    """``state/source_lock.json`` as a dictionary (``{}`` when absent or unreadable)."""
+    return _read_json_safe(lock_state_path())
+
+
 def lock_source() -> Dict[str, Any]:
-    """Lock ``data/source``: ``chattr -R +i`` first, else ``chmod -R a-w``; record and verify honestly."""
+    """Lock ``data/source``: ``chattr -R +i`` first, else ``chmod -R a-w``; record and verify honestly.
+
+    ``enforced`` is true only when every probed directory refused a new file
+    and no path failed to change mode; failures are counted and sampled in the
+    state file rather than swallowed.
+    """
     root = common.ensure_dir(source_dir())
     proc = _run(["chattr", "-R", "+i", str(root)])
+    failures: List[str] = []
     if proc.returncode == 0:
         method = "chattr"
     else:
-        _chmod_tree(root, writable=False)
+        failures = _chmod_tree(root, writable=False)
         method = "chmod"
-    enforced = _probe_enforced(root)
-    state: Dict[str, Any] = {"locked": True, "method": method, "enforced": enforced, "uid": os.getuid(),
-             "note": ("chattr +i refused: " + proc.stderr.strip()) if method == "chmod" else "",
-             "at": common.utc_now_iso()}
-    if method == "chmod" and not enforced:
-        state["note"] += "; root ignores chmod bits, so the lock is advisory for this user"
+    probe = _probe_enforced(root)
+    notes: List[str] = []
+    if method == "chmod":
+        notes.append("chattr +i refused: " + proc.stderr.strip())
+        if not probe["enforced"]:
+            notes.append("root ignores chmod bits, so the lock is advisory for this user")
+    if failures:
+        notes.append(f"{len(failures)} paths could not be changed")
+    state: Dict[str, Any] = {"locked": True, "method": method, "enforced": probe["enforced"] and not failures,
+                             "probed_dirs": probe["probed_dirs"], "writable_dirs": probe["writable_dirs"],
+                             "failures": len(failures), "failure_sample": failures[:5], "uid": os.getuid(),
+                             "note": "; ".join(notes), "at": common.utc_now_iso()}
     common.atomic_write_json(lock_state_path(), state)
+    for line in failures[:5]:
+        print(f"warning: lock: {line}", file=sys.stderr)
     return state
 
 
 def unlock_source() -> Dict[str, Any]:
     """Undo :func:`lock_source` (both methods, whichever was recorded) and record the state."""
     root = common.ensure_dir(source_dir())
-    previous = json.loads(lock_state_path().read_text(encoding="utf-8")) if lock_state_path().exists() else {}
+    previous = read_lock_state()
     notes: List[str] = []
     if previous.get("method") == "chattr" or not previous:
         proc = _run(["chattr", "-R", "-i", str(root)])
         if proc.returncode != 0:
             notes.append("chattr -i failed: " + proc.stderr.strip())
-    _chmod_tree(root, writable=True)
-    state = {"locked": False, "method": previous.get("method"), "enforced": False,
-             "note": "; ".join(notes), "at": common.utc_now_iso()}
+    failures = _chmod_tree(root, writable=True)
+    if failures:
+        notes.append(f"{len(failures)} paths could not be made writable")
+    state = {"locked": False, "method": previous.get("method"), "enforced": False, "failures": len(failures),
+             "failure_sample": failures[:5], "note": "; ".join(notes), "at": common.utc_now_iso()}
     common.atomic_write_json(lock_state_path(), state)
+    for line in failures[:5]:
+        print(f"warning: unlock: {line}", file=sys.stderr)
     return state
+
+
+def relock_branch(paths: Sequence[Path]) -> bool:
+    """Re-apply the recorded lock to just the given paths (plus their ancestors under ``data/source``).
+
+    A single-file ingest opens one branch of a locked tree, so re-locking only
+    that branch keeps each ingest O(depth) instead of O(whole tree).  Does
+    nothing when the tree is not recorded as locked.  Returns ``False`` (after
+    printing a warning) when a path could not be locked again; never raises.
+    """
+    state = read_lock_state()
+    if not state.get("locked") or not paths:
+        return True
+    root = source_dir()
+    targets: List[Path] = []
+    for path in paths:
+        candidates = [path, *path.parents]
+        for candidate in candidates:
+            if candidate.exists() and _inside_source(candidate) and candidate not in targets:
+                targets.append(candidate)
+            if candidate == root:
+                break
+    failures: List[str] = []
+    if state.get("method") == "chattr":
+        proc = _run(["chattr", "+i", *map(str, targets)])
+        if proc.returncode != 0:
+            failures.append("chattr +i: " + proc.stderr.strip())
+    else:
+        for target in targets:
+            try:
+                _chmod_one(target, writable=False)
+            except OSError as exc:
+                failures.append(f"{target}: {exc.strerror or exc}")
+    for line in failures:
+        print(f"warning: could not re-lock: {line}", file=sys.stderr)
+        _log(f"relock failure: {line}")
+    return not failures
 
 
 def cmd_lock(_args: argparse.Namespace) -> int:
@@ -1009,7 +1322,7 @@ def doctor_report() -> Dict[str, Any]:
     """Collect the environment report as a JSON-serialisable dictionary."""
     root = common.project_root()
     listing = latest_listing()
-    lock_state = json.loads(lock_state_path().read_text(encoding="utf-8")) if lock_state_path().exists() else {}
+    lock_state = read_lock_state()
     usage = shutil.disk_usage(root)
     return {
         "python": platform.python_version(),
@@ -1088,6 +1401,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("doctor", help="environment report; exit 1 when python, soffice or markitdown are missing")
     list_cmd = sub.add_parser("list", help="consolidate the Drive listing and detect unstable departments")
     list_cmd.add_argument("--force", action="store_true", help="write a new snapshot even if the inputs are unchanged")
+    list_cmd.add_argument("--capture-window", type=float, default=None, metavar="MINUTES",
+                          help="rows of one folder listed within this window count as one capture "
+                               "(default: half of drive.listing_interval_minutes)")
     sub.add_parser("pull", help="plan (connector) or copy and check (rclone) the source folders")
     ingest = sub.add_parser("ingest", help="connector mode: ingest one saved download into data/source")
     ingest.add_argument("--blob", required=True, help="the saved download")

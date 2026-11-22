@@ -1,10 +1,9 @@
 """Adversarial tests for src.pressure written by the independent reviewer.
 
-Plain tests assert behaviour the module must already provide.  Tests marked
-``xfail(strict=True)`` pin defects found in review: they fail today for the
-reason given in ``reason`` and will turn into an XPASS failure (so the marker
-must be removed) once the defect is fixed.  See
-``out/qa/verify/code_pressure_review.md`` for the matching issue list.
+Plain tests assert behaviour the module must already provide.  The tests in
+the second section were written as strict ``xfail`` pins for defects R-01 to
+R-10 of ``out/qa/verify/code_pressure_review.md``; the fixer removed the
+markers once each defect was fixed, so they now run as ordinary tests.
 """
 
 from __future__ import annotations
@@ -196,10 +195,8 @@ def test_selftest_prints_every_known_answer(capsys: pytest.CaptureFixture[str]) 
 
 
 # --------------------------------------------------------------------------- #
-# Defects pinned for the author (strict xfail: remove the marker once fixed)
+# Defects R-01 to R-10 from the review (markers removed once fixed)
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=True, reason="R-01: a negative room with net outward leakage gets ratio inf / PASS and "
-                                       "'no offset needed' although it needs a supply offset")
 def test_negative_room_with_net_outflow_is_not_a_silent_pass() -> None:
     res = Suite("ante by deep room", [Space("A", -15.0, SMALL)], [Link("A", "DEEP", gap_area_m2=cm2_to_m2(200))],
                 externals={"DEEP": -60.0}).solve().space("A")
@@ -209,7 +206,6 @@ def test_negative_room_with_net_outflow_is_not_a_silent_pass() -> None:
     assert not any("no offset needed" in n for n in res.notes)
 
 
-@pytest.mark.xfail(strict=True, reason="R-02: a space named REF or named like an external silently overrides that node's pressure")
 def test_space_name_colliding_with_ref_or_external_is_rejected() -> None:
     with pytest.raises(ValueError):
         Suite("ref clash", [Space("REF", -15.0, SMALL)])
@@ -217,8 +213,6 @@ def test_space_name_colliding_with_ref_or_external_is_rejected() -> None:
         Suite("ext clash", [Space("CORRIDOR", -15.0, SMALL)], externals={"CORRIDOR": 0.0})
 
 
-@pytest.mark.xfail(strict=True, reason="R-03: a free space whose balance never closes inside the bracket keeps its "
-                                       "initial guess with no note on its own row")
 def test_non_converged_free_space_is_noted_on_its_row() -> None:
     result = Suite("runaway", [Space("ROOM", -30.0, SMALL), Space("ENS", None, 1.0, exhaust_m3h=2000.0)],
                    [Link("ROOM", "ENS", gap_area_m2=cm2_to_m2(1))]).solve(sensitivity=False)
@@ -227,7 +221,6 @@ def test_non_converged_free_space_is_noted_on_its_row() -> None:
     assert ens.notes, "the space row must say the balance did not close"
 
 
-@pytest.mark.xfail(strict=True, reason="R-04: unknown keys in a JSON space or link (typos such as 'exhaust') are dropped silently")
 def test_unknown_json_keys_are_rejected() -> None:
     with pytest.raises((ValueError, TypeError, KeyError)):
         Suite.from_dict({"spaces": [{"name": "X", "set_pressure_pa": -15, "surface_m2": 40, "exhaust": 100}]})
@@ -236,16 +229,12 @@ def test_unknown_json_keys_are_rejected() -> None:
                          "links": [{"a": "X", "b": "REF", "gap_area_m2": 0.001, "fixed_flow": 5}]})
 
 
-@pytest.mark.xfail(strict=True, reason="R-05: a suite mixing a positive and a negative room nets the two offsets to 0 "
-                                       "and reports ratio inf / PASS on the SUITE TOTAL row")
 def test_mixed_sign_suite_total_is_not_inf_pass() -> None:
     result = Suite("mixed", [Space("POS", 15.0, SMALL), Space("NEG", -15.0, SMALL)]).solve()
     assert result.ratio is None or math.isfinite(result.ratio)
     assert result.status != "PASS"
 
 
-@pytest.mark.xfail(strict=True, reason="R-06: envelope leakage with leaks_to set to another space is not credited to that "
-                                       "space, so mass is not conserved and the receiving room's offset is understated")
 def test_envelope_leaking_to_a_space_is_credited_to_that_space() -> None:
     result = Suite("nested", [Space("A", -15.0, SMALL, leaks_to="B"), Space("B", -30.0, SMALL)]).solve(sensitivity=False)
     a, b = result.space("A"), result.space("B")
@@ -253,8 +242,6 @@ def test_envelope_leaking_to_a_space_is_credited_to_that_space() -> None:
     assert b.air_in == pytest.approx(pm.envelope_leak(SMALL, 30) + a.envelope_out, abs=0.2)
 
 
-@pytest.mark.xfail(strict=True, reason="R-07: the CLI exit code follows the SUITE TOTAL status only, so a FAIL on one "
-                                       "space behind a passing total exits 0")
 def test_cli_exit_nonzero_when_any_space_fails(tmp_path: Path) -> None:
     data = {
         "externals": {"CORRIDOR": 0.0, "ANTE": -15.0},
@@ -270,20 +257,16 @@ def test_cli_exit_nonzero_when_any_space_fails(tmp_path: Path) -> None:
     assert pm.main(["--suite", str(src), "--json"]) != 0
 
 
-@pytest.mark.xfail(strict=True, reason="R-08: a controlled room with zero surface and no leakage paths is reported FREE")
 def test_zero_surface_controlled_room_is_not_free() -> None:
     res = Suite("zero", [Space("Z", -15.0, 0.0)]).solve().space("Z")
     assert res.status != "FREE"
 
 
-@pytest.mark.xfail(strict=True, reason="R-09: a negative gap area is accepted and silently treated as no gap")
 def test_negative_gap_area_rejected() -> None:
     with pytest.raises(ValueError):
         Suite("neg gap", [Space("A", -15.0, SMALL)], [Link("A", "REF", gap_area_m2=-0.01)])
 
 
-@pytest.mark.xfail(strict=True, reason="R-10: a config whose pressure_method block is not a mapping is silently replaced "
-                                       "by the built-in defaults (the broad except in _config_section)")
 def test_wrong_shaped_config_block_is_not_silently_ignored(tmp_path: Path) -> None:
     root = tmp_path / "root"
     (root / "config").mkdir(parents=True)

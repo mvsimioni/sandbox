@@ -13,16 +13,25 @@ Model
 * Every space has an internal surface (``2 * floor + perimeter * height``)
   whose whole envelope leaks to a reference node (``REF`` at 0 Pa by default):
   the cautious side, because the leakage then always works against the offset.
+  When ``leaks_to`` names another space of the suite the same flow is booked
+  on that space too, so mass is conserved across the suite.
 * Links between spaces carry either a gap (door undercut, louvre) whose flow is
   ``cd * A * sqrt(2 |dP| / rho) * 3600`` or a fixed flow (a sealed shaft door
   with a known transfer).  Air flows from the higher to the lower pressure.
 * A negative room needs extra exhaust ``air_in - air_out``; a positive room
   needs extra supply ``air_out - air_in``.  ``design_offset = limit * surface``
   and ``ratio = design_offset / offset_needed``: FAIL below 1.0, VERIFY from
-  1.0 to 1.2, PASS above.
+  1.0 to 1.2, PASS above.  A room whose leakage runs the wrong way (a negative
+  room with more leakage out than in) is *reversed*: it needs the other kind
+  of offset, is never better than VERIFY, and its row says so.
 * A free-pressure space (no set pressure, its own fixed supply/exhaust) settles
   where its balance closes; the suite solves those by bisection, 60 steps each,
-  swept 60 times (``solve``), or to machine tolerance (``solve_exact``).
+  swept 60 times (``solve``), or to machine tolerance (``solve_exact``).  A
+  free space whose balance does not close is reported UNSOLVED with its residual.
+* Suite totals: when every controlled room needs the same kind of offset the
+  internal links cancel and the suite offset is the sum of the room offsets;
+  a suite mixing supply and exhaust rooms reports the two totals separately
+  (status MIXED) because two fans cannot share one margin.
 * Sensitivity per room: ``n`` at 0.50 and 0.75, every gap doubled, and the
   pressure the room would reach at the design offset with no control.  A room
   that fails only in a sensitivity case is *flagged*, not failed.
@@ -80,11 +89,25 @@ BISECTION_STEPS = 60
 SWEEPS = 60
 PRESSURE_BRACKET_PA = 1000.0
 """Half-width of the pressure bracket used by the bisections."""
+RESIDUAL_TOL_M3H = 0.05
+"""A free space whose balance residual exceeds this is reported UNSOLVED."""
+OFFSET_EPS_M3H = 1e-9
+"""Offsets smaller than this in magnitude count as zero."""
 
 STATUS_FAIL = "FAIL"
 STATUS_VERIFY = "VERIFY"
 STATUS_PASS = "PASS"
 STATUS_FREE = "FREE"
+STATUS_UNSOLVED = "UNSOLVED"
+"""A free space whose balance did not close inside the pressure bracket."""
+STATUS_MIXED = "MIXED"
+"""Suite total of a suite with both supply and exhaust rooms (no single margin)."""
+BAD_STATUSES = frozenset({STATUS_FAIL, STATUS_UNSOLVED})
+"""Statuses that make the command line exit non-zero."""
+
+KIND_EXHAUST = "exhaust"
+KIND_SUPPLY = "supply"
+KIND_FREE = "free"
 
 ROW_FIELDS: Tuple[str, ...] = (
     "suite", "space", "set_pressure_pa", "solved_pressure_pa", "leaks_to", "surface_m2", "limit_m3h_m2",
@@ -97,12 +120,21 @@ ROW_FIELDS: Tuple[str, ...] = (
 
 
 def _config_section() -> Dict[str, Any]:
-    """The ``pressure_method`` block of the project configuration (empty when unavailable)."""
+    """The ``pressure_method`` block of the project configuration (empty when there is none).
+
+    A missing configuration file leaves the built-in defaults in place; a
+    configuration whose ``pressure_method`` block is not a mapping is an error.
+    """
     try:
-        section = load_config().get("pressure_method", {}) or {}
-    except Exception:  # noqa: BLE001 - defaults are good enough without a config
+        config = load_config()
+    except FileNotFoundError:
         return {}
-    return section if isinstance(section, dict) else {}
+    section = config.get("pressure_method")
+    if section is None:
+        return {}
+    if not isinstance(section, dict):
+        raise ValueError("config/project.yaml: pressure_method must be a mapping")
+    return section
 
 
 def _apply_config() -> None:
@@ -221,10 +253,10 @@ def classify_ratio(ratio: Optional[float]) -> str:
     return STATUS_PASS
 
 
-def _ratio(design: float, needed: float) -> Optional[float]:
-    """``design / needed``; ``None`` when nothing is needed (an infinite margin) and the room has no demand."""
-    if needed <= 0.0:
-        return math.inf if design > 0.0 else None
+def _ratio(design: float, needed: float) -> float:
+    """``design / needed``; infinite when nothing is needed (the margin is unlimited)."""
+    if needed <= OFFSET_EPS_M3H:
+        return math.inf
     return design / needed
 
 
@@ -298,6 +330,8 @@ class Link:
             raise ValueError(f"link {self.a}-{self.b}: give exactly one of gap_area_m2 or fixed_flow_m3h")
         if self.a == self.b:
             raise ValueError(f"link {self.a}-{self.b}: both ends are the same node")
+        if self.gap_area_m2 is not None and self.gap_area_m2 < 0.0:
+            raise ValueError(f"link {self.a}-{self.b}: negative gap area {self.gap_area_m2}")
 
     def other(self, name: str) -> str:
         """The node at the far end from ``name``."""
@@ -327,18 +361,25 @@ class SpaceResult:
     fixed_out: float = 0.0
     supply_m3h: float = 0.0
     exhaust_m3h: float = 0.0
-    offset_kind: str = "exhaust"
+    offset_kind: str = KIND_EXHAUST
     offset_needed: float = 0.0
     design_offset: float = 0.0
     tighter_offset: float = 0.0
     ratio: Optional[float] = None
     status: str = STATUS_FREE
+    reversed: bool = False
+    """True when the room needs the opposite kind of offset to its polarity (leakage runs the wrong way)."""
     ratio_n050: Optional[float] = None
     ratio_n075: Optional[float] = None
     ratio_gaps_x2: Optional[float] = None
     uncontrolled_pa: Optional[float] = None
     flagged: bool = False
     notes: List[str] = field(default_factory=list)
+
+    @property
+    def controlled(self) -> bool:
+        """True for a room with a set pressure (its row carries an offset and a ratio)."""
+        return self.set_pressure_pa is not None
 
     @property
     def air_in(self) -> float:
@@ -363,7 +404,14 @@ class SpaceResult:
 
 @dataclass
 class SuiteResult:
-    """Results of a suite solve: per-space results plus suite totals (internal links cancel)."""
+    """Results of a suite solve: per-space results plus suite totals.
+
+    For a suite whose controlled rooms all need the same kind of offset the
+    internal links cancel and ``offset_needed`` is the suite's fan offset with
+    a ratio and a status.  For a mixed suite ``offset_needed`` is the sum of the
+    exhaust and supply totals, ``ratio`` is ``None`` and the status is MIXED;
+    the per-kind figures are in ``exhaust_needed`` / ``supply_needed``.
+    """
 
     suite: str
     spaces: List[SpaceResult]
@@ -373,9 +421,24 @@ class SuiteResult:
     tighter_offset: float = 0.0
     ratio: Optional[float] = None
     status: str = STATUS_FREE
+    offset_kind: str = ""
+    exhaust_needed: float = 0.0
+    exhaust_design: float = 0.0
+    supply_needed: float = 0.0
+    supply_design: float = 0.0
     flagged: bool = False
     sweeps: int = 0
     max_residual: float = 0.0
+    notes: List[str] = field(default_factory=list)
+
+    @property
+    def worst_status(self) -> str:
+        """FAIL or UNSOLVED when any space (or the total) carries it, else the suite status."""
+        statuses = {r.status for r in self.spaces} | {self.status}
+        for bad in (STATUS_FAIL, STATUS_UNSOLVED):
+            if bad in statuses:
+                return bad
+        return self.status
 
     def space(self, name: str) -> SpaceResult:
         """The result for ``name`` (KeyError when absent)."""
@@ -407,14 +470,19 @@ class Suite:
 
     # -- construction ------------------------------------------------------- #
     def _validate(self) -> None:
-        """Reject duplicate names, unknown link ends and unknown ``leaks_to`` nodes."""
+        """Reject duplicate or colliding names, unknown link ends and unknown ``leaks_to`` nodes."""
         names = [s.name for s in self.spaces]
         if len(set(names)) != len(names):
             raise ValueError(f"suite {self.name}: duplicate space names")
+        clashes = sorted(set(names) & set(self.externals))
+        if clashes:
+            raise ValueError(f"suite {self.name}: space name(s) {clashes} collide with REF or an external node")
         known = set(names) | set(self.externals)
         for space in self.spaces:
             if space.leaks_to not in known:
                 raise ValueError(f"space {space.name}: leaks_to '{space.leaks_to}' is not a known node")
+            if space.leaks_to == space.name:
+                raise ValueError(f"space {space.name}: cannot leak to itself")
             if space.surface_m2 < 0.0:
                 raise ValueError(f"space {space.name}: negative surface")
         for link in self.links:
@@ -455,20 +523,41 @@ class Suite:
                 pressures[space.name] = sum(neighbours) / len(neighbours) if neighbours else 0.0
         return pressures
 
+    def _leaking_into(self, name: str) -> List[Space]:
+        """Spaces of the suite whose envelope leaks to the node ``name``."""
+        return [s for s in self.spaces if s.leaks_to == name and s.name != name]
+
+    def _neighbours(self, space: Space) -> List[str]:
+        """Every node whose pressure ``space`` can see: its sink, its links and the spaces leaking into it."""
+        names = [space.leaks_to] + [l.other(space.name) for l in self.links if l.touches(space.name)]
+        return names + [s.name for s in self._leaking_into(space.name)]
+
+    def _book_envelope(self, res: SpaceResult, surface: float, dp: float, n: float, limit: float) -> None:
+        """Add an envelope flow at ``dp`` (own minus other pressure) to ``res``: out when positive, in when negative."""
+        env = envelope_leak(surface, dp, n=n, limit=limit)
+        if dp < 0.0:
+            res.envelope_in += env
+        else:
+            res.envelope_out += env
+
     def _flows(self, space: Space, pressures: Dict[str, float], n_override: Optional[float],
                gap_factor: float, limit_override: Optional[float] = None) -> SpaceResult:
-        """Evaluate every leakage path of ``space`` at the given pressures."""
+        """Evaluate every leakage path of ``space`` at the given pressures.
+
+        The envelope of ``space`` leaks to its ``leaks_to`` node; the envelopes
+        of other spaces that leak *to* ``space`` are booked here as well, so the
+        same flow appears on both rows and mass is conserved.
+        """
         p_self = pressures[space.name]
         n = space.n if n_override is None else n_override
         limit = space.limit if limit_override is None else limit_override
         res = SpaceResult(space.name, space.set_pressure_pa, p_self, space.leaks_to, space.surface_m2, limit, n,
                           supply_m3h=space.supply_m3h, exhaust_m3h=space.exhaust_m3h)
-        dp_env = p_self - pressures[space.leaks_to]
-        env = envelope_leak(space.surface_m2, dp_env, n=n, limit=limit)
-        if dp_env < 0.0:
-            res.envelope_in = env
-        else:
-            res.envelope_out = env
+        self._book_envelope(res, space.surface_m2, p_self - pressures[space.leaks_to], n, limit)
+        for other in self._leaking_into(space.name):
+            other_n = other.n if n_override is None else n_override
+            other_limit = other.limit if limit_override is None else limit_override
+            self._book_envelope(res, other.surface_m2, p_self - pressures[other.name], other_n, other_limit)
         for link in self.links:
             if not link.touches(space.name):
                 continue
@@ -495,12 +584,17 @@ class Suite:
 
     def _bracket(self, space: Space, pressures: Dict[str, float]) -> Tuple[float, float]:
         """Pressure bracket for a free space: well beyond every pressure it can see."""
-        seen = [pressures[space.leaks_to]] + [pressures[l.other(space.name)] for l in self.links if l.touches(space.name)]
+        seen = [pressures[name] for name in self._neighbours(space)]
         return min(seen) - PRESSURE_BRACKET_PA, max(seen) + PRESSURE_BRACKET_PA
 
     def _solve_free(self, space: Space, pressures: Dict[str, float], n_override: Optional[float],
                     gap_factor: float, steps: int) -> float:
-        """Pressure at which the free ``space`` balances, holding every other node fixed (bisection)."""
+        """Pressure at which the free ``space`` balances, holding every other node fixed (bisection).
+
+        When the balance does not close inside the bracket the bracket end
+        nearest to closing is returned; the evaluation then reports the space
+        UNSOLVED with its residual.
+        """
         lo, hi = self._bracket(space, pressures)
 
         def func(p: float) -> float:
@@ -509,7 +603,9 @@ class Suite:
             return self._residual(space, trial, n_override, gap_factor)
 
         root = _bisect(func, lo, hi, steps)
-        return pressures[space.name] if root is None else root
+        if root is not None:
+            return root
+        return lo if abs(func(lo)) <= abs(func(hi)) else hi
 
     def _sweep(self, pressures: Dict[str, float], n_override: Optional[float], gap_factor: float,
                steps: int) -> float:
@@ -551,18 +647,48 @@ class Suite:
             res.design_offset = design_offset(space.surface_m2, res.limit)
             res.tighter_offset = tighter_room_offset(space.surface_m2)
             if space.free:
-                res.offset_kind = "free"
-                res.offset_needed = 0.0
-                res.ratio = None
-                res.status = STATUS_FREE
+                self._evaluate_free(res)
             else:
-                negative = pressures[space.name] < pressures[space.leaks_to]
-                res.offset_kind = "exhaust" if negative else "supply"
-                res.offset_needed = res.signed_offset if negative else -res.signed_offset
-                res.ratio = _ratio(res.design_offset, res.offset_needed)
-                res.status = classify_ratio(res.ratio)
+                self._evaluate_controlled(res, pressures[space.name] < pressures[space.leaks_to])
             results.append(res)
         return results
+
+    @staticmethod
+    def _evaluate_free(res: SpaceResult) -> None:
+        """Status of a free space: FREE when its balance closes, UNSOLVED (and flagged) otherwise."""
+        res.offset_kind = KIND_FREE
+        res.offset_needed = 0.0
+        res.ratio = None
+        residual = res.balance_residual
+        if abs(residual) <= RESIDUAL_TOL_M3H:
+            res.status = STATUS_FREE
+            return
+        res.status = STATUS_UNSOLVED
+        res.flagged = True
+        res.notes.append(f"balance does not close inside +/-{PRESSURE_BRACKET_PA:g} Pa of its neighbours: "
+                         f"residual {residual:.1f} m3/h at {res.pressure_pa:.0f} Pa; check the fixed flows and gaps")
+
+    @staticmethod
+    def _evaluate_controlled(res: SpaceResult, negative: bool) -> None:
+        """Offset, ratio and status of a controlled room; a reversed room is capped at VERIFY and noted."""
+        nominal, other = (KIND_EXHAUST, KIND_SUPPLY) if negative else (KIND_SUPPLY, KIND_EXHAUST)
+        needed = res.signed_offset if negative else -res.signed_offset
+        if needed >= -OFFSET_EPS_M3H:
+            res.offset_kind = nominal
+            res.offset_needed = max(needed, 0.0)
+            res.ratio = _ratio(res.design_offset, res.offset_needed)
+            res.status = classify_ratio(res.ratio)
+            return
+        res.reversed = True
+        res.offset_kind = other
+        res.offset_needed = -needed
+        res.ratio = _ratio(res.design_offset, res.offset_needed)
+        res.status = STATUS_FAIL if classify_ratio(res.ratio) == STATUS_FAIL else STATUS_VERIFY
+        res.flagged = True
+        polarity = "negative" if negative else "positive"
+        res.notes.append(f"leakage runs the wrong way for a {polarity} room (out {res.air_out:.1f}, in "
+                         f"{res.air_in:.1f} m3/h): it needs a {other} offset of {res.offset_needed:.1f} m3/h, "
+                         f"not {nominal}; check the neighbouring pressures")
 
     def _uncontrolled_pressure(self, space: Space, pressures: Dict[str, float]) -> Optional[float]:
         """Pressure the room reaches when the design offset is applied with no control.
@@ -611,19 +737,31 @@ class Suite:
                 res.notes.append("no offset needed at the set pressure")
 
     def _totals(self, results: List[SpaceResult], pressures: Dict[str, float], sweeps: int) -> SuiteResult:
-        """Suite totals: internal gap flows cancel, so the sum of signed offsets is the suite offset."""
-        controlled = [r for r in results if r.offset_kind != "free"]
-        signed = sum(r.signed_offset for r in controlled)
-        kinds = {r.offset_kind for r in controlled}
+        """Suite totals per offset kind; a single-kind suite gets a ratio (internal links cancel), a mixed one MIXED."""
+        controlled = [r for r in results if r.controlled]
+        exhaust = [r for r in controlled if r.offset_kind == KIND_EXHAUST]
+        supply = [r for r in controlled if r.offset_kind == KIND_SUPPLY]
         suite = SuiteResult(self.name, results, pressures, sweeps=sweeps)
-        suite.design_offset = sum(r.design_offset for r in controlled)
+        suite.exhaust_needed, suite.exhaust_design = _kind_totals(exhaust)
+        suite.supply_needed, suite.supply_design = _kind_totals(supply)
+        suite.offset_needed = suite.exhaust_needed + suite.supply_needed
+        suite.design_offset = suite.exhaust_design + suite.supply_design
         suite.tighter_offset = sum(r.tighter_offset for r in controlled)
-        suite.offset_needed = signed if kinds != {"supply"} else -signed
-        if controlled:
+        suite.offset_kind = "+".join(k for k, rows in ((KIND_EXHAUST, exhaust), (KIND_SUPPLY, supply)) if rows)
+        if exhaust and supply:
+            suite.status = STATUS_MIXED
+            suite.notes.append(f"mixed suite: exhaust rooms need {suite.exhaust_needed:.1f} m3/h (design "
+                               f"{suite.exhaust_design:.1f}), supply rooms {suite.supply_needed:.1f} m3/h (design "
+                               f"{suite.supply_design:.1f}); no single margin, see the space rows")
+        elif controlled:
             suite.ratio = _ratio(suite.design_offset, suite.offset_needed)
             suite.status = classify_ratio(suite.ratio)
+            suite.notes.append("internal links cancel")
+        if any(r.reversed for r in controlled):
+            suite.notes.append("includes a reversed room (leakage runs the wrong way)")
         suite.flagged = any(r.flagged for r in results)
-        suite.max_residual = max((abs(r.balance_residual) for r in results if r.offset_kind == "free"), default=0.0)
+        suite.max_residual = max((abs(r.balance_residual) for r in results if not r.controlled), default=0.0)
+        suite.notes.append(f"{sweeps} sweeps; free-space residual {suite.max_residual:.3g} m3/h")
         return suite
 
     def solve(self, sweeps: int = SWEEPS, steps: int = BISECTION_STEPS, sensitivity: bool = True) -> SuiteResult:
@@ -644,25 +782,44 @@ class Suite:
         return self._totals(results, pressures, done)
 
 
+def _kind_totals(rows: List[SpaceResult]) -> Tuple[float, float]:
+    """``(offset_needed, design_offset)`` summed over rooms of one offset kind."""
+    return sum(r.offset_needed for r in rows), sum(r.design_offset for r in rows)
+
+
+SPACE_KEYS = frozenset({"name", "set_pressure_pa", "surface_m2", "leaks_to", "supply_m3h", "exhaust_m3h", "limit", "n"})
+SPACE_GEOMETRY_KEYS = frozenset({"floor_area", "perimeter", "height"})
+LINK_KEYS = frozenset({"a", "b", "gap_area_m2", "gap_area_cm2", "sealed", "fixed_flow_m3h", "kind"})
+
+
+def _reject_unknown_keys(what: str, data: Dict[str, Any], allowed: frozenset) -> None:
+    """Raise ``ValueError`` naming any key of ``data`` outside ``allowed`` (typos must not pass silently)."""
+    unknown = sorted(set(data) - allowed)
+    if unknown:
+        raise ValueError(f"{what}: unknown key(s) {unknown}; allowed: {sorted(allowed)}")
+
+
 def _space_kwargs(item: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalise a JSON space mapping to ``Space`` keyword arguments."""
+    """Normalise a JSON space mapping to ``Space`` keyword arguments (geometry keys accepted)."""
     data = dict(item)
-    if "surface_m2" not in data and {"floor_area", "perimeter", "height"} <= set(data):
+    _reject_unknown_keys(f"space {data.get('name', '?')}", data, SPACE_KEYS | SPACE_GEOMETRY_KEYS)
+    if "surface_m2" not in data and SPACE_GEOMETRY_KEYS <= set(data):
         data["surface_m2"] = internal_surface(float(data.pop("floor_area")), float(data.pop("perimeter")),
                                               float(data.pop("height")))
-    allowed = {"name", "set_pressure_pa", "surface_m2", "leaks_to", "supply_m3h", "exhaust_m3h", "limit", "n"}
-    return {k: v for k, v in data.items() if k in allowed}
+    elif SPACE_GEOMETRY_KEYS & set(data):
+        raise ValueError(f"space {data.get('name', '?')}: give surface_m2 or all of floor_area, perimeter, height")
+    return data
 
 
 def _link_kwargs(item: Dict[str, Any]) -> Dict[str, Any]:
     """Normalise a JSON link mapping to ``Link`` keyword arguments (cm2 and sealed kinds accepted)."""
     data = dict(item)
+    _reject_unknown_keys(f"link {data.get('a', '?')}-{data.get('b', '?')}", data, LINK_KEYS)
     if "gap_area_cm2" in data:
         data["gap_area_m2"] = cm2_to_m2(float(data.pop("gap_area_cm2")))
     if "sealed" in data:
         data["gap_area_m2"] = sealed_gap_area(str(data.pop("sealed")))
-    allowed = {"a", "b", "gap_area_m2", "fixed_flow_m3h", "kind"}
-    return {k: v for k, v in data.items() if k in allowed}
+    return data
 
 
 # --------------------------------------------------------------------------- #
@@ -714,14 +871,13 @@ def _space_row(suite: SuiteResult, res: SpaceResult) -> Dict[str, Any]:
 
 def _suite_row(suite: SuiteResult) -> Dict[str, Any]:
     """The totals row of :func:`to_rows`."""
-    controlled = [r for r in suite.spaces if r.offset_kind != "free"]
-    kinds = sorted({r.offset_kind for r in controlled})
+    controlled = [r for r in suite.spaces if r.controlled]
     row = {key: "" for key in ROW_FIELDS}
     row.update({
         "suite": suite.suite,
         "space": "SUITE TOTAL",
         "surface_m2": _fmt(sum(r.surface_m2 for r in controlled), 2),
-        "offset_kind": "+".join(kinds),
+        "offset_kind": suite.offset_kind,
         "offset_needed_m3h": _fmt(suite.offset_needed),
         "offset_needed_lps": _fmt(lps(suite.offset_needed)),
         "design_offset_m3h": _fmt(suite.design_offset),
@@ -730,7 +886,7 @@ def _suite_row(suite: SuiteResult) -> Dict[str, Any]:
         "ratio": _fmt(suite.ratio, 2),
         "status": suite.status,
         "flagged": "y" if suite.flagged else "n",
-        "notes": f"internal links cancel; {suite.sweeps} sweeps; free-space residual {suite.max_residual:.3g} m3/h",
+        "notes": "; ".join(suite.notes),
     })
     return row
 
@@ -844,7 +1000,13 @@ def _run_suite_file(path: Path, out: Optional[Path], exact: bool, as_json: bool)
             print(f"{row['space']:14s} {str(row['set_pressure_pa']):>7s} Pa  offset {str(row['offset_needed_m3h']):>7s}"
                   f"  design {str(row['design_offset_m3h']):>7s}  ratio {str(row['ratio']):>5s}  {row['status']}"
                   f"{'  flagged' if row['flagged'] == 'y' else ''}")
-    return 0 if result.status != STATUS_FAIL else 3
+    bad = [r.name for r in result.spaces if r.status in BAD_STATUSES]
+    if result.status == STATUS_FAIL:
+        bad.append("SUITE TOTAL")
+    if bad:
+        print(f"pressure: {result.worst_status} in {', '.join(bad)}", file=sys.stderr)
+        return 3
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -859,7 +1021,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """Entry point; returns a process exit code (1 on a self-test miss or error, 3 when a suite FAILs)."""
+    """Entry point; exit code 1 on a self-test miss or error, 3 when any space or the suite FAILs or is UNSOLVED."""
     args = build_parser().parse_args(argv)
     try:
         if args.selftest:

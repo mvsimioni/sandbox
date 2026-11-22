@@ -7,8 +7,8 @@ implemented and exit 2.
 
 Each check is a small function ``(ctx) -> (status, evidence)`` where status is
 ``PASS``, ``FAIL`` or ``SKIP`` and evidence is a list of short lines.  Checks
-only read the project tree; the report is the only file written.  Nothing
-here touches the network.
+only read the project tree (progress.json is read without taking its lock);
+the report is the only file written.  Nothing here touches the network.
 """
 
 from __future__ import annotations
@@ -26,11 +26,9 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tu
 
 try:  # package import (python -m src.checks, tests)
     from src import common, decisions
-    from src.state import Progress
 except ModuleNotFoundError:  # run as a plain script from inside src/
     import common  # type: ignore[no-redef]
     import decisions  # type: ignore[no-redef]
-    from state import Progress  # type: ignore[no-redef,attr-defined]
 
 PASS = "PASS"
 FAIL = "FAIL"
@@ -54,6 +52,13 @@ TEMPLATE_QA_FILES: Tuple[str, ...] = (
 )
 CENSUS_KINDS: Tuple[str, ...] = ("pdf", "pptx")
 SELFTEST_TIMEOUT_S = 300
+MIN_LISTING_GAP_MIN = 15
+"""The spec's minimum gap between the two listings; the config may only widen it."""
+BLOCKED_STATUS = "blocked_connector_limit"
+TEMPLATE_PROGRESS_KEY = "template_workflow"
+"""Progress item set by ``python -m src.template_workflow finish``."""
+_LIMIT_REASON_RE = re.compile(r"connector|limit|10485760|10\s*mib|too\s+large|size", re.IGNORECASE)
+"""Reason wording that claims a file was blocked by the connector transport limit."""
 
 
 class Check(NamedTuple):
@@ -76,6 +81,10 @@ class CheckResult(NamedTuple):
 # --------------------------------------------------------------------------- #
 # Context: lazily loaded, cached views of the project tree
 # --------------------------------------------------------------------------- #
+LEDGER_FILES: Tuple[str, ...] = ("pull_ledger.jsonl", "upload_ledger.jsonl")
+"""Fetch ledgers read by the checks, in the same order as ``manifest.load_ledger``."""
+
+
 class Context:
     """Paths and cached artefacts shared by the checks of one run."""
 
@@ -97,26 +106,59 @@ class Context:
         """The parsed ``config/project.yaml``."""
         return self._memo("config", common.load_config)
 
+    def _scan_listings(self) -> Tuple[List[Tuple[datetime, Path]], List[Tuple[Path, str]]]:
+        """Every ``listing_*.json``: ``(readable sorted by time, unreadable with reason)``."""
+        def scan() -> Tuple[List[Tuple[datetime, Path]], List[Tuple[Path, str]]]:
+            good: List[Tuple[datetime, Path]] = []
+            bad: List[Tuple[Path, str]] = []
+            for path in sorted((self.state / "listings").glob("listing_*.json")):
+                taken, problem = _listing_time(path)
+                if taken is None:
+                    bad.append((path, problem))
+                else:
+                    good.append((taken, path))
+            good.sort(key=lambda item: (item[0], item[1].name))
+            return good, bad
+        return self._memo("listings", scan)
+
+    def listings(self) -> List[Tuple[datetime, Path]]:
+        """Readable consolidated listings as ``(taken_at, path)``, oldest first."""
+        return self._scan_listings()[0]
+
+    def unreadable_listings(self) -> List[Tuple[Path, str]]:
+        """Files matching ``listing_*.json`` that are not consolidated listings, with the reason."""
+        return self._scan_listings()[1]
+
     def listing_paths(self) -> List[Path]:
-        """Consolidated listings, oldest first."""
-        return self._memo("listing_paths", lambda: sorted((self.state / "listings").glob("listing_*.json")))
+        """Paths of the readable consolidated listings, oldest first."""
+        return [path for _, path in self.listings()]
 
     def latest_listing(self) -> Optional[Dict[str, Any]]:
-        """The newest consolidated listing (``files`` without folders), or ``None``."""
+        """The consolidated listing with the latest time (``files`` without folders), or ``None``."""
         def load() -> Optional[Dict[str, Any]]:
-            paths = self.listing_paths()
-            if not paths:
+            readable = self.listings()
+            if not readable:
                 return None
-            data = json.loads(paths[-1].read_text(encoding="utf-8"))
-            files = [f for f in data.get("files", []) if f.get("mimeType") != FOLDER_MIME]
-            return {"path": paths[-1], "taken_at": data.get("taken_at", ""), "files": files,
+            path = readable[-1][1]
+            data = json.loads(path.read_text(encoding="utf-8"))
+            files = [f for f in data.get("files", []) if isinstance(f, dict) and f.get("mimeType") != FOLDER_MIME]
+            return {"path": path, "taken_at": data.get("taken_at", ""), "files": files,
                     "folders": list(data.get("folders", []))}
         return self._memo("latest_listing", load)
 
     def ledger_rows(self) -> List[Dict[str, Any]]:
-        """Rows of ``state/pull_ledger.jsonl`` (dictionaries only)."""
-        return self._memo("ledger", lambda: [r for r in common.read_jsonl(self.state / "pull_ledger.jsonl")
-                                             if isinstance(r, dict)])
+        """Rows of ``state/pull_ledger.jsonl`` then ``state/upload_ledger.jsonl`` (dictionaries only).
+
+        The manifest (``manifest.load_ledger``) treats both files as the fetch
+        record, so the checks read the same pair; files uploaded by hand are
+        otherwise reported as pulled without a ledger row.
+        """
+        def load() -> List[Dict[str, Any]]:
+            rows: List[Dict[str, Any]] = []
+            for name in LEDGER_FILES:
+                rows.extend(r for r in common.read_jsonl(self.state / name) if isinstance(r, dict))
+            return rows
+        return self._memo("ledger", load)
 
     def ledger_index(self) -> Dict[str, Dict[str, Any]]:
         """Ledger rows keyed by ``id:<drive_id>`` and ``path:<rel_path>`` (later rows win)."""
@@ -139,13 +181,21 @@ class Context:
         return self._memo("manifest", lambda: common.read_csv_dicts(self.registers / "manifest.csv"))
 
     def blocked_inputs(self) -> Optional[List[Dict[str, str]]]:
-        """Rows of ``out/qa/blocked_inputs.csv`` or ``None`` when the file is missing."""
+        """Rows of ``out/qa/blocked_inputs.csv`` (BOM tolerated) or ``None`` when the file is missing."""
         path = self.qa / "blocked_inputs.csv"
-        return self._memo("blocked", lambda: common.read_csv_dicts(path) if path.is_file() else None)
+        return self._memo("blocked", lambda: _read_human_csv(path) if path.is_file() else None)
 
-    def progress(self) -> Progress:
-        """Progress tracker for this project root."""
-        return Progress(self.state / "progress.json")
+    def progress_item(self, key: str) -> Optional[Dict[str, Any]]:
+        """One item of ``state/progress.json`` read without taking the lock (checks only read)."""
+        path = self.state / "progress.json"
+        if not path.is_file():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8") or "{}")
+        except ValueError:
+            return None
+        item = (data.get("items") or {}).get(key) if isinstance(data, dict) else None
+        return dict(item) if isinstance(item, dict) else None
 
 
 # --------------------------------------------------------------------------- #
@@ -163,18 +213,39 @@ def _parse_iso(stamp: str) -> Optional[datetime]:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def _listing_time(path: Path) -> Optional[datetime]:
-    """Time of a listing: ``taken_at`` inside the file, else the stamp in its name."""
+def _listing_time(path: Path) -> Tuple[Optional[datetime], str]:
+    """Time of a consolidated listing, or ``(None, reason)`` when the file is not one.
+
+    The file must be a JSON object with a ``files`` list; its time is
+    ``taken_at`` when parseable, else the ``YYYYmmddTHHMMSSZ`` stamp in the name.
+    """
     try:
-        taken = _parse_iso(json.loads(path.read_text(encoding="utf-8")).get("taken_at", ""))
-    except (OSError, ValueError, AttributeError):
-        taken = None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return None, f"not JSON ({type(exc).__name__})"
+    if not isinstance(data, dict) or not isinstance(data.get("files"), list):
+        return None, "no 'files' list"
+    taken = _parse_iso(str(data.get("taken_at", "")))
     if taken:
-        return taken
+        return taken, ""
     match = re.search(r"(\d{8}T\d{6})Z", path.name)
     if not match:
-        return None
-    return datetime.strptime(match.group(1), "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
+        return None, "no taken_at and no time stamp in the name"
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc), ""
+    except ValueError:
+        return None, "time stamp in the name is not a date"
+
+
+def _read_human_csv(path: Path) -> List[Dict[str, str]]:
+    """Rows of a human-maintained CSV, tolerating the UTF-8 BOM that Excel writes.
+
+    The shared ``common.read_csv_dicts`` reads strict UTF-8 and would keep the
+    BOM in the first column name; this variant is used only for files people
+    edit by hand (``blocked_inputs.csv``).
+    """
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        return [dict(row) for row in csv.DictReader(handle)]
 
 
 def _truthy(value: Any) -> bool:
@@ -226,24 +297,21 @@ def check_config_folders(ctx: Context) -> CheckOutcome:
 
 def check_two_listings(ctx: Context) -> CheckOutcome:
     """P0-03: two consolidated listings >= 15 minutes apart and the unstable-departments file."""
-    interval = int(((ctx.config().get("drive") or {}).get("listing_interval_minutes")) or 15)
-    paths = ctx.listing_paths()
-    evidence: List[str] = [f"{len(paths)} consolidated listing(s) under state/listings"]
+    interval = max(MIN_LISTING_GAP_MIN, int(((ctx.config().get("drive") or {}).get("listing_interval_minutes")) or 0))
+    readable = ctx.listings()
+    evidence: List[str] = [f"{len(readable)} consolidated listing(s) under state/listings"]
+    for path, reason in ctx.unreadable_listings():
+        evidence.append(f"ignored {path.name}: {reason}")
     status = PASS
-    if len(paths) < 2:
+    if len(readable) < 2:
         status = FAIL
         evidence.append("second listing pending")
     else:
-        times = [t for t in (_listing_time(p) for p in paths) if t is not None]
-        if len(times) < 2:
+        span = readable[-1][0] - readable[0][0]
+        evidence.append(f"span first to last: {span.total_seconds() / 60:.1f} min (need >= {interval})")
+        if span < timedelta(minutes=interval):
             status = FAIL
-            evidence.append("second listing pending (listing times unreadable)")
-        else:
-            span = max(times) - min(times)
-            evidence.append(f"span first to last: {span.total_seconds() / 60:.1f} min (need >= {interval})")
-            if span < timedelta(minutes=interval):
-                status = FAIL
-                evidence.append("second listing pending")
+            evidence.append("second listing pending")
     unstable = ctx.state / "unstable_departments.json"
     if unstable.is_file():
         evidence.append("state/unstable_departments.json present")
@@ -258,9 +326,9 @@ def check_manifest_matches_listing(ctx: Context) -> CheckOutcome:
     listing = ctx.latest_listing()
     if listing is None:
         return FAIL, ["no consolidated listing"]
+    if not (ctx.registers / "manifest.csv").is_file():
+        return FAIL, ["out/registers/manifest.csv missing"]
     rows = ctx.manifest_rows()
-    if not rows:
-        return FAIL, ["out/registers/manifest.csv missing or empty"]
     evidence = [f"manifest rows {len(rows)}, listing files {len(listing['files'])} ({listing['path'].name})"]
     status = PASS
     if len(rows) != len(listing["files"]):
@@ -332,9 +400,15 @@ def check_decisions(ctx: Context) -> CheckOutcome:
         return FAIL, ["no '### D-NNN' entries"]
     incomplete = [e.id for e in entries if e.get("Status") is None or e.get("Provisional value") is None]
     evidence = [f"{len(entries)} entr{'y' if len(entries) == 1 else 'ies'}: {_sample([e.id for e in entries], 8)}"]
+    status = PASS
     if incomplete:
-        return FAIL, evidence + [f"missing Status or Provisional value: {', '.join(incomplete)}"]
-    return PASS, evidence
+        status = FAIL
+        evidence.append(f"missing Status or Provisional value: {', '.join(incomplete)}")
+    duplicated = decisions.duplicate_ids(entries)
+    if duplicated:
+        status = FAIL
+        evidence.append(f"duplicated id(s): {', '.join(duplicated)} (a register keyed by id must not repeat one)")
+    return status, evidence
 
 
 def check_source_lock(ctx: Context) -> CheckOutcome:
@@ -382,28 +456,63 @@ def check_blocked_inputs(ctx: Context) -> CheckOutcome:
     missing_cols = [c for c in BLOCKED_INPUT_COLUMNS if c not in header]
     if missing_cols:
         return FAIL, [f"columns missing: {', '.join(missing_cols)}"]
-    plan_blocked = {_norm_path(r.get("rel_path", "")) for r in ctx.plan_rows()
-                    if r.get("status") == "blocked_connector_limit"}
-    listed = {_norm_path(r.get("rel_path", "")) for r in rows}
-    connector_listed = {_norm_path(r.get("rel_path", "")) for r in rows if "connector" in str(r.get("reason", "")).lower()}
-    evidence = [f"{len(rows)} blocked input(s), {len(plan_blocked)} plan row(s) blocked_connector_limit"]
-    status = PASS
-    not_listed = sorted(plan_blocked - listed)
+    if not (ctx.state / "pull_plan.csv").is_file():
+        return FAIL, [f"{len(rows)} blocked input(s)", "state/pull_plan.csv missing: nothing to reconcile against"]
+    plan = {_norm_path(r.get("rel_path", "")): r for r in ctx.plan_rows()}
+    plan_blocked = {p for p, r in plan.items() if r.get("status") == BLOCKED_STATUS}
+    listed = {_norm_path(r.get("rel_path", "")): r for r in rows}
+    evidence = [f"{len(rows)} blocked input(s), {len(plan_blocked)} plan row(s) {BLOCKED_STATUS}"]
+    problems = _blocked_row_problems(listed, plan, plan_blocked)
+    not_listed = sorted(plan_blocked - set(listed))
     if not_listed:
-        status = FAIL
-        evidence.append(f"blocked in plan but not listed: {_sample(not_listed)}")
-    stale = sorted(connector_listed - plan_blocked)
+        problems.insert(0, f"blocked in plan but not listed: {_sample(not_listed)}")
+    outside = sorted(p for p in listed if p not in plan and not _claims_transport_limit(listed[p]))
+    if outside:
+        evidence.append(f"listed for reasons outside the plan (not reconciled): {_sample(outside)}")
+    return (FAIL if problems else PASS), evidence + problems
+
+
+def _claims_transport_limit(row: Dict[str, str]) -> bool:
+    """True when a blocked-input row says it was blocked by the connector size limit."""
+    return bool(_LIMIT_REASON_RE.search(str(row.get("reason", ""))))
+
+
+def _blocked_row_problems(listed: Dict[str, Dict[str, str]], plan: Dict[str, Dict[str, str]],
+                          plan_blocked: set) -> List[str]:
+    """Blocked-input rows that disagree with the pull plan, keyed on rel_path and bytes.
+
+    A row whose path is in the plan must be a ``blocked_connector_limit`` row
+    with the same byte count.  A row whose path is not in the plan is stale
+    when its reason claims the transport limit (the plan is the record of
+    that); rows blocked for other reasons are outside the plan's remit.
+    """
+    stale: List[str] = []
+    wrong_status: List[str] = []
+    wrong_bytes: List[str] = []
+    for rel_path, row in listed.items():
+        if rel_path in plan_blocked:
+            plan_bytes = str(plan[rel_path].get("bytes", "")).strip()
+            if plan_bytes and str(row.get("bytes", "")).strip() != plan_bytes:
+                wrong_bytes.append(f"{rel_path} ({row.get('bytes', '')!s} vs plan {plan_bytes})")
+        elif rel_path in plan:
+            wrong_status.append(f"{rel_path} (plan status {plan[rel_path].get('status', '')!s})")
+        elif _claims_transport_limit(row):
+            stale.append(rel_path)
+    problems: List[str] = []
     if stale:
-        status = FAIL
-        evidence.append(f"listed as connector-blocked but not in plan: {_sample(stale)}")
-    return status, evidence
+        problems.append(f"listed as transport-limit-blocked but not in plan: {_sample(stale)}")
+    if wrong_status:
+        problems.append(f"listed but plan status is not {BLOCKED_STATUS}: {_sample(wrong_status)}")
+    if wrong_bytes:
+        problems.append(f"bytes differ from plan: {_sample(wrong_bytes)}")
+    return problems
 
 
 def _csv_header(path: Path) -> List[str]:
-    """Column names of a CSV file (empty when the file is missing or blank)."""
+    """Column names of a CSV file (empty when missing or blank; a UTF-8 BOM is ignored)."""
     if not path.is_file():
         return []
-    with path.open("r", encoding="utf-8", newline="") as handle:
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
         return next(csv.reader(handle), [])
 
 
@@ -426,11 +535,14 @@ def check_template_outputs(ctx: Context) -> CheckOutcome:
     missing = [str(p.relative_to(ctx.root)) for p in expected if not p.is_file()]
     if not missing:
         return PASS, [f"all {len(expected)} template artefacts present"]
-    finished = ctx.progress().status("template_workflow") == "done"
+    item = ctx.progress_item(TEMPLATE_PROGRESS_KEY) or {}
     evidence = [f"missing: {_sample(missing, 6)}"]
-    if finished:
-        return FAIL, evidence + ["progress marks template_workflow done"]
-    return SKIP, evidence + ["template workflow has not finished (progress item 'template_workflow' not done)"]
+    if item.get("status") == "done":
+        reason = str(item.get("reason") or "").strip()
+        return FAIL, evidence + [f"progress marks {TEMPLATE_PROGRESS_KEY} done at {item.get('updated_at', '?')}"
+                                 + (f" (closed incomplete: {reason})" if reason else "")]
+    return SKIP, evidence + [f"template workflow has not finished (progress item '{TEMPLATE_PROGRESS_KEY}' is "
+                             f"{item.get('status') or 'not set'}; python -m src.template_workflow finish sets it)"]
 
 
 PHASE_CHECKS: Dict[int, List[Check]] = {

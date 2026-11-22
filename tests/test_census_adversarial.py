@@ -1,8 +1,9 @@
 """Adversarial tests for src.census written by an independent reviewer.
 
-Tests marked ``xfail(strict=True)`` document defects found during review: they
-fail today and will start passing (and therefore flag the marker for removal)
-once the defect is fixed.
+Tests that were marked ``xfail(strict=True)`` documented defects found during
+review (rotated-page coverage, the uninterruptible path budget, the hash-less
+ledger entry, the ``--limit`` log line); the defects are fixed and the markers
+removed, so every test here must pass.
 """
 
 from __future__ import annotations
@@ -174,8 +175,6 @@ def test_error_rows_are_sticky_and_never_retried(tmp_path: Path, adv_fixtures: D
     assert len(_files(tmp_path)) == 1 and _files(tmp_path)[0]["pages"] == "0"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a ledger entry with no sha256 and no local file is re-censused "
-                                       "(and its error row re-appended) on every run; the run is not idempotent")
 def test_entry_without_sha_and_missing_file_is_idempotent(tmp_path: Path) -> None:
     _write_ledger(tmp_path, [{"drive_id": "n1", "rel_path": "Basis/nohash.pdf",
                               "local_path": "data/source/Basis/nohash.pdf"}])
@@ -245,9 +244,6 @@ def test_pptx_without_comments_part(adv_fixtures: Dict[str, Path]) -> None:
 # --------------------------------------------------------------------------- #
 # Geometry and time-budget defects found in review
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=True, reason="BUG: image bboxes are in unrotated page space but width/height come from the "
-                                       "rotated page.rect, so a full-bleed scan on a /Rotate 90 page is clipped to "
-                                       "70.67 % coverage instead of 100 %")
 def test_rotated_full_bleed_scan_is_fully_covered(adv_fixtures: Dict[str, Path]) -> None:
     rows = census.census_pdf(adv_fixtures["rotated"])
     assert rows[0]["rotation"] == 90 and rows[0]["image_count"] == 1
@@ -255,10 +251,11 @@ def test_rotated_full_bleed_scan_is_fully_covered(adv_fixtures: Dict[str, Path])
 
 
 def test_rotated_scan_coverage_documented_value(adv_fixtures: Dict[str, Path]) -> None:
-    """Pin the current (wrong) value so the fix is visible: 595^2 / (842*595) = 70.67 %."""
+    """Before the fix this pinned 595^2 / (842*595) = 70.67 %; the bboxes are now rotated into page.rect space."""
     rows = census.census_pdf(adv_fixtures["rotated"])
-    assert rows[0]["image_coverage_pct"] == pytest.approx(70.67, abs=0.05)
-    assert rows[0]["page_class"] == "raster_or_scan"  # still classified correctly only because 70.67 >= 60
+    assert rows[0]["image_coverage_pct"] == pytest.approx(100.0, abs=0.05)
+    assert (rows[0]["width_pt"], rows[0]["height_pt"]) == (842.0, 595.0)
+    assert rows[0]["page_class"] == "raster_or_scan"
 
 
 class _OneLongCCall:
@@ -272,8 +269,6 @@ class _OneLongCCall:
         return []
 
 
-@pytest.mark.xfail(strict=True, reason="LIMITATION: the SIGALRM page budget cannot interrupt a single C-level call, "
-                                       "so get_cdrawings runs to completion and a valid count is then thrown away as -1")
 def test_page_budget_interrupts_a_single_c_call() -> None:
     page = _OneLongCCall(40_000_000)
     started = time.monotonic()
@@ -293,8 +288,6 @@ def test_budget_state_is_clean_after_timeout() -> None:
     assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
 
 
-@pytest.mark.xfail(strict=True, reason="LOW: with --limit the start-of-run log line reports the files cut by the limit "
-                                       "as 'already censused'")
 def test_limit_log_line_counts_correctly(tmp_path: Path, adv_fixtures: Dict[str, Path]) -> None:
     records = [_ledger_entry(tmp_path, f"Basis/{i}.pdf", adv_fixtures["text_a" if i else "text_b"], f"l{i}")
                for i in range(2)]
