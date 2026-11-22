@@ -2493,6 +2493,14 @@ def _folder_update_section(results: List[Dict[str, Any]]) -> List[str]:
         L += ["### IGH ORTHO BATCH 1", "",
               "- Same layout as I-CARE (`Ortho – Operation Mode`): %d rows (10 + 9), %d standby rows, keyplans p4 and p5, pressure regime p6. No failed field." % (
                   len(ot["criteria"]), len(ot["standby"])), ""]
+    for fname, label in (("IGH_DD Booklet_Surgical GS_OCP_DPE comments.pdf", "General Surgery (`General Surgery – Operation Mode`, with reviewer comments)"),
+                         ("IGH_DD Booklet_Surgical OPCC_BATCH 1.pdf", "Surgical OPCC (`Surgical OPCC – Operation Mode`)")):
+        sg = part(fname)
+        if sg:
+            L += ["### %s" % sg["department"], "",
+                  "- %s: same layout as I-CARE and Ortho (`AREA / ROOM`, subtitle as the mode). %d criteria rows over %d pages, %d standby rows, no failed field. Pressure `+VE` / `-VE`, Afterhours `24 hrs AC` as above. "
+                  "The first table of the General Surgery file (12 rows) was compared cell by cell with its render; the other pages were not." % (
+                      label, len(sg["criteria"]), sum(1 for pg in sg["pages"] if pg["class"] == "criteria"), len(sg["standby"])), ""]
     ph = part("IGH_DD Booklet_Pharmacy_BATCH 2_New signed.pdf")
     if ph:
         L += ["### IGH Pharmacy BATCH 2 (New signed)", "",
@@ -2520,6 +2528,9 @@ def _corrections_section_3(results: List[Dict[str, Any]]) -> List[str]:
     if "Emergency" not in by:
         return []
     ssc = [(r["pdf_page"], r["booklet_page"]) for r in by["Emergency"]["criteria"] if r["room_type_as_printed"] == "Staff Support Corridor"]
+    four = ("ICU HDU", "IGH I-CARE BATCH 1", "IGH MDU OCP", "Rehab Med Combined")
+    later_names = [r["department"] for r in results if r["department"] not in RELEASED_DEPARTMENTS and r["department"] not in four]
+    later = later_names
     iso = [z["text"] for z in by.get("ISO AH", {}).get("zoning", []) if z["label_kind"] == "room_label" and z["text"].endswith("-1A/B")]
     ha = [z["text"] for z in by.get("Healthy Aging Geriatrics", {}).get("zoning", []) if z["label_kind"] == "room_label"
           and re.match(r"^AHU-A-10-01/04$", z["text"])]
@@ -2531,9 +2542,9 @@ def _corrections_section_3(results: List[Dict[str, Any]]) -> List[str]:
                     "Behaviour is unchanged (they stay room labels). | ISO AH: %d label rows (%s); Healthy Aging: %d label row (`AHU-A-10-01/04`). |" % (
                         len(iso), ", ".join(sorted(set("`%s`" % t for t in iso))), len(ha)),
                     "| The four new PDFs (ICU_HDU, IGH I-CARE BATCH 1, IGH MDU_OCP, Rehab_Med_Combined) were not parsed, and the header named a plain `run` that would now take more files | They are parsed with the existing handlers plus the layout "
-                    "additions listed in the folder update above; four more extracts arrived while this was being done (DI Signed All AH, Ortho, Pharmacy, Data Centre) and are in the same run. "
+                    "additions listed in the folder update above; %d more extracts arrived while this was being done (%s) and are in the same run. "
                     "`python3 -m src.booklet48_parser run` is the command that produced this report; it now skips files that are not booklets. | %d files, %d departments; see the folder update. |" % (
-                        len(results), len(results)),
+                        len(later), ", ".join(later_names), len(results), len(results)),
                     "| `Staff Support Corridor` is printed on both p4 and p5 with the same values and appears twice in `criteria.csv` | Noted; it is kept twice because it is printed twice. | PDF pages %s: both `Neutral`, 6 ACH, single pass `N`, MERV 15. |" % (
                         " and ".join("%s (booklet p. %s)" % t for t in ssc) or "n/a"),
                     "| `test_zone_column_is_blank_for_other_departments_and_signed_pressure_is_kept` checked only the column order | The test now also parses a standard table and checks that every zone is blank and that `-15 Pa` keeps its sign; "

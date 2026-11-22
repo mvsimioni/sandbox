@@ -596,6 +596,7 @@ def test_double_door_closes_on_the_cusp_even_when_the_open_leaf_ends_touch_walls
     cl, diag = rv.door_closers(arcs, lines)
     assert len(arcs) == 2 and all(d["closed"] and d["tip_rule"] == "double door" for d in diag)
     assert np.allclose(sorted(map(tuple, np.round(cl[:, 2:], 1))), [(120.0, 40.0), (120.0, 40.0)], atol=0.2)
+    assert cl[0, 2:].tolist() == cl[1, 2:].tolist()          # exactly one meeting point: a 0.02 pt gap would leave the opening unsealed
 
 
 def double_door_plan_items():
