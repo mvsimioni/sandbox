@@ -38,6 +38,7 @@ import json
 import re
 import sys
 from collections import defaultdict
+from types import SimpleNamespace
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -488,7 +489,8 @@ def classify_page(text: str, heading: str = "", section: str = "", extended: boo
     if re.search(r"DESIGN CRITERIA", flat) or re.search(r"Room conditions\s*[–\-]\s*Part", flat, re.I):
         return "criteria"
     if extended and re.search(r"Pressure\s*Regime", flat) and re.search(r"Single\s*Pass", flat) \
-            and re.search(r"Min\.?\s*Total", flat) and (re.search(r"AREA\s*/\s*ROOM", flat, re.I) or re.search(r"Afterhours", flat, re.I)):
+            and re.search(r"Min\.?\s*Total", flat) and (re.search(r"AREA\s*/\s*ROOM", flat, re.I) or re.search(r"Afterhours", flat, re.I)
+                                                       or re.search(r"DEPARTMENT\s+AREA\s+Pressure", flat)):
         return "criteria"       # I-CARE, Pharmacy: the table has no 'DESIGN CRITERIA' strip or 'Room conditions' caption
     if re.search(r"EQUIPMENT STANDBY CONFIGURATION SUMMARY", flat, re.I) \
             or (extended and (re.search(r"EQUIPMENT CONFIGURATION SUMMARY", flat, re.I)
@@ -1211,6 +1213,89 @@ def parse_criteria_page(words: List[Word], page_h: float, page_w: float,
     return rows, notes, table_part, failures
 
 
+# Plain ruled tables (General Services p6-8: DEPARTMENT | AREA | ..., Admin Workspace p1-5: Location | Room | ...): the
+# headings are cells filled with a colour, the rows are separated by rules, the text layer is clean.  Used only when the
+# header search of ``parse_criteria_page`` finds nothing, so no other booklet is read differently.
+PLAIN_KEYS: List[Tuple[str, str]] = [("zone", r"^(?:location|department)\b"), ("room", r"^(?:area|room)\b")] + HEADER_KEYS
+PLAIN_CORE = ("room", "pressure", "min_oa", "min_total", "single_pass", "air_class", "filter", "rh", "temp")
+
+
+def parse_plain_table_page(words: List[Word], page_h: float,
+                           fills: Sequence[Tuple[float, float, float, float]],
+                           rules: Sequence[Tuple[float, float, float]]
+                           ) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Rows of a ruled criteria table whose heading cells are filled rectangles.  Returns ``(rows, page_failures)``;
+    no rows and no failure text when the page holds no such heading (the caller keeps its own failures)."""
+    body_words = [w for w in words if not is_gutter(w)]
+    anchor = None
+    for w in body_words:
+        if w.text.upper() in ("ROOM", "AREA"):
+            line = [o for o in body_words if abs(o.cy - w.cy) <= 4.0]
+            if any(o.text.upper() in ("LOCATION", "DEPARTMENT") and o.x0 < w.x0 for o in line):
+                anchor = w
+                break
+    if anchor is None:
+        return [], []
+    band = next((f for f in fills if f[0] <= anchor.cx <= f[2] and f[1] <= anchor.cy <= f[3] and f[2] - f[0] < 900.0), None)
+    if band is None:
+        return [], []
+    head = sorted((f for f in fills if abs(f[1] - band[1]) <= 1.5 and abs(f[3] - band[3]) <= 1.5 and f[2] - f[0] < 900.0),
+                  key=lambda f: f[0])
+    if len(head) < 8:
+        return [], []
+    header_bottom = band[3]
+    key_of: Dict[int, str] = {}
+    headings: Dict[str, str] = {}
+    for i, f in enumerate(head):
+        ws = [w for w in body_words if f[0] <= w.cx < f[2] and f[1] <= w.cy <= f[3]]
+        text = " ".join(join_words(ln) for ln in cluster_lines(ws)).lower()
+        closed = text.replace(" ", "")
+        for key, pat in PLAIN_KEYS:
+            if key not in headings and (re.search(pat, text) or re.search(pat, closed)):
+                key_of[i] = key
+                headings[key] = " ".join(join_words(ln) for ln in cluster_lines(ws))
+                break
+    failures = ["header columns not found: %s" % ", ".join(k for k in PLAIN_CORE if k not in headings)] \
+        if any(k not in headings for k in PLAIN_CORE) else []
+    if "room" not in headings or "pressure" not in headings:
+        return [], failures
+    x_lo, x_hi = head[0][0], head[-1][2]
+    bottom = max([f[3] for f in fills if f[0] >= x_lo - 1.0 and f[2] <= x_hi + 1.0 and f[1] >= header_bottom - 1.0
+                  and f[3] - f[1] < 800.0]
+                 + [y for y, x0, x1 in rules if x0 <= head[1][0] + 5.0 and x1 >= x_hi - 100.0 and y > header_bottom + 2.0]
+                 + [header_bottom])
+    cuts = [header_bottom]
+    for y in sorted(y for y, x0, x1 in rules if x0 <= head[1][0] + 5.0 and x1 >= x_hi - 100.0
+                    and header_bottom + 2.0 < y <= bottom + 1.0):
+        if y - cuts[-1] > 2.0:
+            cuts.append(y)
+    if bottom - cuts[-1] > 2.0:
+        cuts.append(bottom + 1.0)
+    pressure_i = next(i for i, k in key_of.items() if k == "pressure")
+    group_cols = SimpleNamespace(clusters={"pressure": (head[pressure_i][0], head[pressure_i][2])})
+    in_table = [w for w in body_words if w.y0 >= header_bottom - 0.5 and x_lo <= w.cx < x_hi]
+    groups, taken = group_cells(in_table, fills, group_cols, header_bottom, bottom)  # type: ignore[arg-type]
+    rows: List[Dict[str, Any]] = []
+    for b0, b1 in zip(cuts, cuts[1:]):
+        ws = [w for w in in_table if b0 <= w.cy < b1 and id(w) not in taken]
+        if not ws:
+            continue
+        cells: Dict[str, List[Word]] = defaultdict(list)
+        for w in ws:
+            i = next((i for i, f in enumerate(head) if f[0] <= w.cx < f[2]), None)
+            if i is not None and i in key_of:
+                cells[key_of[i]].append(w)
+        text = {k: " ".join(join_words(ln) for ln in cluster_lines(v)) for k, v in cells.items()}
+        mid = (b0 + b1) / 2.0
+        zone = next((z for y0, y1, z in groups if y0 - 1.0 <= mid <= y1 + 1.0), text.get("zone", ""))
+        rows.append({
+            "cells": text, "box": union_box(w.box() for w in ws), "marks": [], "note_refs": [], "mode": "",
+            "mode_from_caption": False, "no_pressure": False, "blank_row": False, "pressure_words": cells.get("pressure", []),
+            "zone": zone, "plain": True, "zone_heading": headings.get("zone", ""),
+        })
+    return rows, failures
+
+
 def _row_marks(box: Tuple[float, float, float, float], room_words: Sequence[Word],
                marks: Sequence[Dict[str, Any]], pad: float = 6.0) -> List[Dict[str, Any]]:
     """Reviewer marks that belong to one table row.
@@ -1397,14 +1482,24 @@ def build_criteria_rows(rows: List[Dict[str, Any]], meta: Dict[str, Any], table_
         c = row["cells"]
         failed: List[str] = []
         room = c.get("room", "")
+        plain = bool(row.get("plain"))
         pr = parse_pressure_full(c.get("pressure", ""))
+        if plain and clean(c.get("pressure", "")).upper() in ("NA", "N/A"):
+            pr = {**pr, "ok": True}         # plain ruled tables print 'NA' (not applicable): no Pa, no direction
         pa, direction = pr["pa"], pr["direction"]
         if not pr["ok"]:
             failed.append("pressure")
         oa, ok = parse_count(c.get("min_oa", ""))
+        rate = clean(c.get("min_oa", "")) if plain and re.search(r"l/s", c.get("min_oa", ""), re.I) else ""
+        if rate:
+            oa, ok = "", True               # an outdoor air rate (l/s/person or l/s/m2), not ACH: kept as printed, not converted
+        if plain and clean(c.get("min_oa", "")).upper() in ("NA", "N/A"):
+            ok = True                       # 'NA' (not applicable, toilets): blank
         if not ok:
             failed.append("min_oa")
         tot, ok = parse_count(c.get("min_total", ""))
+        if plain and clean(c.get("min_total", "")).upper() in ("NA", "N/A"):
+            ok = True
         if not ok:
             failed.append("min_total")
         sp, ok = parse_single_pass(c.get("single_pass", ""))
@@ -1472,6 +1567,8 @@ def build_criteria_rows(rows: List[Dict[str, Any]], meta: Dict[str, Any], table_
             "raw_cells": json.dumps({**{k: c.get(k, "") for k in
                                         ("min_oa", "min_total", "single_pass", "afterhours", "setback")},
                                      **({"zone_prefix": zone_prefix} if zoned else {}),
+                                     **({"min_oa_rate_as_printed": rate} if rate else {}),
+                                     **({"zone_column_heading": row["zone_heading"]} if plain and row.get("zone_heading") else {}),
                                      **({"source_flag": flag} if flag else {}),
                                      **({"read_by": "vision: page is an image, cells keyed in from the render"}
                                         if row.get("vision") else {})},
@@ -2302,6 +2399,10 @@ def parse_pdf(path: Path, root: Path) -> Dict[str, Any]:
                 zoned = None if short else zoned_caption(words)
                 rows, notes, part, pfail = parse_criteria_page(words, page_h, page_w, _fills(page), marks, zoned,
                                                                legacy=dept in RELEASED_DEPARTMENTS, short=short)
+                if not rows and "criteria header not found" in pfail:
+                    plain, plain_fail = parse_plain_table_page(words, page_h, _fills(page), _rules(page))
+                    if plain:
+                        rows, notes, part, pfail = plain, [], NO_CAPTION_PART, plain_fail
                 if image_box is not None and not rows:      # no text-layer table: the rows keyed in by eye
                     rows = vision_page_rows(vision, image_box)
                     part, pfail, notes = vision.get("table_part", ""), [], []

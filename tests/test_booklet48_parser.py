@@ -10,6 +10,7 @@ whose 'Level NN wing' heading is a merged cell centred on its group of rows.
 from __future__ import annotations
 
 import csv
+import json
 import shutil
 from pathlib import Path
 
@@ -1972,3 +1973,91 @@ def test_cssd_room_conditions_page_with_wrapped_headings(tmp_path: Path) -> None
     assert '"single_pass": "YES"' in di["raw_cells"] and di["confidence"] == "0.97"
     assert [n["note_number"] for n in res["notes"]] == ["1", "2"]            # the footnotes are notes, not table rows
     assert not res["failures"]
+
+
+# --------------------------------------------------------------------------- #
+# Plain ruled tables: General Services (DEPARTMENT | AREA | ...) and Admin Workspace (Location | Room | ...)
+def _plain_table(doc: "pymupdf.Document", edges, heads, rows, top: float, row_h: float, title: str = "",
+                 group_cells=()) -> Canvas:
+    """Header of filled cells, then one ruled row per entry of ``rows`` (a list of cell-text lists; a cell may hold
+    several lines).  ``group_cells`` are (first_row, n_rows, label) merged cells in the first column."""
+    cv = Canvas(doc)
+    cv.text(700, 60, "4.8 MECHANICAL VENTILATION STRATEGY" + title, 12)
+    for i, lines in enumerate(heads):
+        cv.rect(edges[i], top, edges[i + 1], top + 60, fill=(0.35, 0.6, 0.83))
+        for j, ln in enumerate(lines):
+            cv.text((edges[i] + edges[i + 1]) / 2.0, top + 8 + 12 * j, ln, 10, centre=True)
+    y0 = top + 60
+    for first, n, label in group_cells:
+        cv.rect(edges[0], y0 + first * row_h, edges[1], y0 + (first + n) * row_h, fill=(0.9, 0.9, 0.9))
+        cv.text(edges[0] + 8, y0 + first * row_h + 6, label, 10)
+    for r, cells in enumerate(rows):
+        y = y0 + r * row_h
+        if group_cells:         # the AREA cells are filled rectangles that run on to the Pressure column, as printed
+            cv.rect(edges[1], y, edges[2] + 5, y + row_h, fill=(0.95, 0.95, 0.95))
+        cv.page.draw_line((edges[1] if group_cells else edges[0], y + row_h), (edges[-1], y + row_h), color=(0, 0, 0))
+        for i, cell in enumerate(cells):
+            for j, ln in enumerate(cell if isinstance(cell, list) else [cell]):
+                if ln:
+                    cv.text(edges[i] + 6, y + 6 + 12 * j, ln, 10)
+    cv.text(1150, 808, "139", 14)
+    return cv
+
+
+def test_general_services_layout_group_labels_na_and_wrapped_areas(tmp_path: Path) -> None:
+    edges = [50, 186, 420, 520, 620, 710, 800, 900, 1000, 1100, 1190]
+    heads = [["DEPARTMENT"], ["AREA"], ["Pressure", "Regime Pa"], ["Min.", "Outdoor", "ACH"], ["Min. Total", "ACH"],
+             ["Single Pass"], ["Air Class"], ["Filter"], ["Relative", "Humidity"], ["Temperatur", "e"]]
+    rows = [[[], ["Workshops (BME, FM)"], "NA", "2", "6", "NA", "3", "MERV 15", "≤65", "23-25"],
+            [[], ["Spray Painting Room"], "-VE", "20", "20", "NA", "4", "MERV 15", "≤65", "23-25"],
+            [[], ["Offices / Meeting Rooms / Mail", "Room / Pass Office"], "NA", "2", "6", "NA", "1", "MERV 15", "≤65", "23-25"],
+            [[], ["Store Room"], "NEUTRAL", "2", "12", "YES", "4", "MERV 15", "N/R", "N/R"]]
+    doc = pymupdf.open()
+    _plain_table(doc, edges, heads, rows, 291, 44,
+                 group_cells=[(0, 2, "LEVEL B2 – HPVF"), (2, 2, "GENERAL SERVICES")])
+    res = _parse(_save(doc, tmp_path, "20250714_IGH_DD Booklet_General Services_AH.pdf"), tmp_path)
+    assert res["pages"][0]["class"] == "criteria" and not res["page_failures"] and not res["failures"]
+    got = res["criteria"]
+    assert [(r["zone"], r["room_type_as_printed"]) for r in got] == [
+        ("LEVEL B2 – HPVF", "Workshops (BME, FM)"), ("LEVEL B2 – HPVF", "Spray Painting Room"),
+        ("GENERAL SERVICES", "Offices / Meeting Rooms / Mail Room / Pass Office"), ("GENERAL SERVICES", "Store Room")]
+    w, s, o, n = got
+    assert (w["pressure_regime_as_printed"], w["pressure_pa"], w["pressure_direction"]) == ("NA", "", "")
+    assert (w["min_oa_ach"], w["min_total_ach"], w["single_pass"], w["air_class"], w["filter"], w["rh_as_printed"],
+            w["rh_max_pct"], w["temp_as_printed"], w["temp_min_c"], w["temp_max_c"]) == \
+        ("2", "6", "NA", "3", "MERV 15", "≤65", "65", "23-25", "23", "25")
+    assert (s["pressure_regime_as_printed"], s["pressure_direction"], s["min_oa_ach"]) == ("-VE", "negative", "20")
+    assert w["afterhours"] == "" and w["setback"] == "" and w["confidence"] == "0.97"
+    assert (n["pressure_direction"], n["single_pass"], n["rh_as_printed"], n["rh_max_pct"], n["temp_as_printed"]) == \
+        ("neutral", "Y", "N/R", "", "N/R")
+    assert '"single_pass": "YES"' in n["raw_cells"] and o["table_part"] == b.NO_CAPTION_PART
+
+
+def test_admin_workspace_layout_outdoor_air_rate_zero_width_spaces_and_location(tmp_path: Path) -> None:
+    edges = [60, 130, 330, 400, 540, 620, 700, 780, 860, 940, 1020, 1100, 1180]
+    heads = [["Location"], ["Room"], ["Pressure", "Regime, Pa" + ZW], ["Min. Outdoor ACH" + ZW],
+             ["Min. Total", "ACH" + ZW], ["Single Pass" + ZW], ["Air Class" + ZW], ["Filter" + ZW],
+             ["Relative", "Humidity" + ZW], ["Design", "Temperature", ", C" + ZW],
+             ["Afterhours", "mode, Y/N" + ZW], ["Setback", "mode, Y/N"]]
+    rate = ["10 l/s/person or 0.6 l/s/m2,", "whichever higher"]
+    rows = [["IP Level 2", ["ED Admin Workspace", "Office"], "Neutral", rate, "6", "NA", "1", "MERV 15", "≤65", "23-25", "N", "N"],
+            ["IP Level 2", ["ED Admin Workspace", "Meeting" + ZW + " Room"], "Neutral", rate, "6", "NA", "1", "MERV 15", "≤65", "23-25", "N", "N"],
+            ["IP Level  7", ["L7 Admin Workspace", "Toilet"], "Negative", "NA", "20", "Y", "4", "MERV 8", "NA", "NA", "N", "N"]]
+    doc = pymupdf.open()
+    _plain_table(doc, edges, heads, rows, 82, 33, title=" | DESIGN CRITERIA")
+    res = _parse(_save(doc, tmp_path, "IGH_DD Booklet_AW_R2_30 June 2025 _AH 20250707.pdf"), tmp_path)
+    assert res["pages"][0]["class"] == "criteria" and not res["page_failures"] and not res["failures"]
+    got = res["criteria"]
+    assert [(r["zone"], r["room_type_as_printed"]) for r in got] == [
+        ("IP Level 2", "ED Admin Workspace Office"), ("IP Level 2", "ED Admin Workspace Meeting Room"),
+        ("IP Level 7", "L7 Admin Workspace Toilet")]
+    assert not any(ZW in str(v) for r in got for v in r.values())
+    o, m, t = got
+    assert o["min_oa_ach"] == "" and o["min_total_ach"] == "6" and o["pressure_direction"] == "neutral"
+    raw = json.loads(o["raw_cells"])
+    assert raw["min_oa"] == raw["min_oa_rate_as_printed"] == "10 l/s/person or 0.6 l/s/m2, whichever higher"
+    assert (o["afterhours"], o["setback"], o["filter"], o["rh_max_pct"], o["temp_min_c"], o["confidence"]) == \
+        ("N", "N", "MERV 15", "65", "23", "0.97")
+    assert (t["pressure_direction"], t["min_oa_ach"], t["min_total_ach"], t["single_pass"], t["rh_as_printed"]) == \
+        ("negative", "", "20", "Y", "NA")
+    assert json.loads(t["raw_cells"])["min_oa"] == "NA" and "min_oa_rate_as_printed" not in json.loads(t["raw_cells"])
