@@ -261,6 +261,68 @@ def strip_dimension_strokes(ss: lw.StrokeSet) -> Tuple[lw.StrokeSet, dict]:
              "n_extension_stubs": int(len(stub)), "n_removed": int(remove.sum())})
 
 
+DASH_MIN_LEN_PT, DASH_MAX_LEN_PT, DASH_MAX_GAP_PT, DASH_MIN_RUN = 3.0, 14.0, 6.0, 3
+
+
+def dash_bridge_segments(thin: np.ndarray, tol: float = 0.16) -> np.ndarray:
+    """Closers across the gaps of dashed fine-pen lines.
+
+    A dashed line (three or more collinear axis-aligned fine-pen dashes of 3 to 14 pt, separated by gaps of 0.3 to 6 pt) is one continuous boundary drawn
+    with a dash pattern (a bulkhead or a screen line, for example the open side of an operating theatre suite).  Returns one closing segment per gap.
+    """
+    dx, dy = thin[:, 2] - thin[:, 0], thin[:, 3] - thin[:, 1]
+    ln = np.hypot(dx, dy)
+    ang = np.degrees(np.arctan2(np.abs(dy), np.abs(dx)))
+    out: List[Tuple[float, float, float, float]] = []
+    for horiz in (True, False):
+        sel = (ln >= DASH_MIN_LEN_PT) & (ln <= DASH_MAX_LEN_PT) & ((ang < 0.5) if horiz else (ang > 89.5))
+        sg = thin[sel]
+        if not len(sg):
+            continue
+        if horiz:
+            pos = (sg[:, 1] + sg[:, 3]) / 2; a = np.minimum(sg[:, 0], sg[:, 2]); b = np.maximum(sg[:, 0], sg[:, 2])
+        else:
+            pos = (sg[:, 0] + sg[:, 2]) / 2; a = np.minimum(sg[:, 1], sg[:, 3]); b = np.maximum(sg[:, 1], sg[:, 3])
+        key = np.round(pos / tol).astype(np.int64)
+        order = np.lexsort((a, key))
+        key, a, b, pos = key[order], a[order], b[order], pos[order]
+
+        def flush(ch):
+            if len(ch) >= DASH_MIN_RUN:
+                for p_, q_ in zip(ch[:-1], ch[1:]):
+                    if 0.3 < a[q_] - b[p_] <= DASH_MAX_GAP_PT:
+                        out.append((b[p_], pos[p_], a[q_], pos[q_]) if horiz else (pos[p_], b[p_], pos[q_], a[q_]))
+        i, n = 0, len(key)
+        while i < n:
+            j = i
+            while j + 1 < n and key[j + 1] == key[i]:
+                j += 1
+            chain = [i]
+            for k in range(i + 1, j + 1):
+                if -0.3 <= a[k] - b[chain[-1]] <= DASH_MAX_GAP_PT:
+                    chain.append(k)
+                else:
+                    flush(chain)
+                    chain = [k]
+            flush(chain)
+            i = j + 1
+    return np.asarray(out, float).reshape(-1, 4)
+
+
+def with_extra_strokes(ss: lw.StrokeSet, extra: np.ndarray, style=((0.0, 0.0, 0.0), 0.24)) -> lw.StrokeSet:
+    """The stroke set with extra straight segments of one style (default: black 0.24 pt fine pen)."""
+    styles = list(ss.styles)
+    if style not in styles:
+        styles.append(style)
+    sid = styles.index(style)
+    return lw.StrokeSet(np.concatenate([ss.seg, extra]), np.concatenate([ss.style, np.full(len(extra), sid, np.int32)]), styles,
+                        np.concatenate([ss.curve, np.zeros(len(extra), bool)]), ss.fills)
+
+
+def leaked_region_indices(vec: rv.VectorResult, k2: float) -> List[int]:
+    return [i for i, r in enumerate(vec.regions) if is_leaked(len(r.tags), r.polygon.area * k2)]
+
+
 def stage_vector(ctx: dict) -> dict:
     P = ctx["P"]
     bg = _open(P["root"], BG_PDF, ctx["info"]["page0"])
@@ -283,7 +345,18 @@ def stage_vector(ctx: dict) -> dict:
     if ctx.get("fixes", True):
         wreg = rv.regions_with_tags(rv.polygonise(vec.wall_segments), tags, k2)
     vec.diagnostics["n_w_only_regions"] = len(wreg)
-    return {"vec": vec, "wreg": wreg}
+    # leaked regions (several rooms not separated by walls): second pass with the gaps of dashed fine-pen lines closed.  Only the tags of leaked
+    # regions take their region from this pass (a dashed line inside an ordinary room must not cut it).
+    vec2, bridges, leaked_idx = None, np.zeros((0, 4)), []
+    if ctx.get("fixes", True):
+        leaked_idx = leaked_region_indices(vec, k2)
+        if leaked_idx:
+            bridges = dash_bridge_segments(vec.thin_segments)
+            if len(bridges):
+                vec2 = rv.measure_rooms(with_extra_strokes(ss, bridges), tags, k2, blocker_tags=ctx["codes"])
+    vec.diagnostics["n_leaked_regions_pass1"] = len(leaked_idx)
+    vec.diagnostics["n_dash_bridges"] = int(len(bridges))
+    return {"vec": vec, "wreg": wreg, "vec2": vec2, "dash_bridges": bridges, "leaked_idx": leaked_idx}
 
 
 def w_adoption_map(vec: rv.VectorResult, wreg: Sequence, k2: float) -> Dict[int, Polygon]:
@@ -310,6 +383,31 @@ def w_adoption_map(vec: rv.VectorResult, wreg: Sequence, k2: float) -> Dict[int,
         if same and inside and grows and w_area <= min(W_ADOPT_MAX_M2, W_ADOPT_MAX_RATIO * first.area * k2 + 20.0):
             out[i] = wr.polygon
     return out
+
+
+def dash_entries(vr: dict) -> List[Tuple[str, int]]:
+    """Region entries of the dashed-line pass that replace the leaked regions of the first pass: ``("d", index into vec2.regions)``."""
+    vec, vec2 = vr["vec"], vr.get("vec2")
+    if vec2 is None:
+        return []
+    leaked_tags = {t["t_index"] for i in vr["leaked_idx"] for t in vec.regions[i].tags}
+    return [("d", j) for j, r in enumerate(vec2.regions) if all(t["t_index"] in leaked_tags for t in r.tags)]
+
+
+def dash_tags(vr: dict) -> List[dict]:
+    return [t for _, j in dash_entries(vr) for t in vr["vec2"].regions[j].tags]
+
+
+def region_entries(vr: dict) -> List[Tuple[str, int]]:
+    """All region entries of a storey: first-pass regions (except the leaked ones that the dashed-line pass split) and the dashed-line regions."""
+    vec = vr["vec"]
+    d = dash_entries(vr)
+    replaced = set(vr["leaked_idx"]) if vr.get("vec2") is not None else set()
+    # a leaked region none of whose tags is covered by a dash region stays as it was (still leaked)
+    covered = {t["t_index"] for _, j in d for t in vr["vec2"].regions[j].tags}
+    keep_leaked = {i for i in replaced if not any(t["t_index"] in covered for t in vec.regions[i].tags)}
+    replaced -= keep_leaked
+    return [("p", i) for i in range(len(vec.regions)) if i not in replaced] + d
 
 
 def stage_raster(ctx: dict) -> dict:
@@ -348,8 +446,22 @@ def stage_raster(ctx: dict) -> dict:
             finally:
                 rr.MAX_MM_PER_PX = old_cap
             diag["n_tags_second_pass_heavy_walls_only"] = len(tags_w)
+    # leaked regions split by the dashed-line closure: method B grown on the same closure (dash bridges are fine-pen lines like the rest)
+    res_d = []
+    vec2 = ctx["vector"].get("vec2")
+    if ctx.get("fixes", True) and vec2 is not None:
+        tags_d = dash_tags(ctx["vector"])
+        if tags_d:
+            old_cap = rr.MAX_MM_PER_PX
+            rr.MAX_MM_PER_PX = max(old_cap, mm_px)
+            try:
+                res_d, _ = rr.measure_rooms(vec2.wall_segments, vec2.thin_segments, tags_d, mm_pt, target_mm_per_px=mm_px,
+                                            blocker_tags=ctx["codes"], wall_bands=vec2.wall_bands)
+            finally:
+                rr.MAX_MM_PER_PX = old_cap
+            diag["n_tags_third_pass_dash_closure"] = len(tags_d)
     diag["seconds"] = round(time.time() - t0, 1)
-    return {"regions": res, "diag": diag, "regions_w": res_w}
+    return {"regions": res, "diag": diag, "regions_w": res_w, "regions_d": res_d}
 
 
 def _sorted_regions(vec: rv.VectorResult) -> List[int]:
@@ -358,7 +470,7 @@ def _sorted_regions(vec: rv.VectorResult) -> List[int]:
 
 
 LEAK_MIN_TAGS = 4          # a closed region that holds this many tags ...
-LEAK_MIN_M2 = 150.0        # ... and is at least this large is several rooms that the walls did not separate (an opening left unclosed)
+LEAK_MIN_M2 = 600.0        # ... and is at least this large is several rooms that the walls did not separate (an opening left unclosed)
 LEAK_BIG_M2 = 1000.0       # two or more tags in a region this large: also a leak
 W_ADOPT_MAX_M2 = 400.0
 W_ADOPT_MAX_RATIO = 4.0
@@ -371,51 +483,63 @@ def is_leaked(n_tags: int, area_m2: float) -> bool:
 def assemble_rooms(ctx: dict) -> List[dict]:
     """Room dicts for the comparison (same rules and ordering as the pilot ``pipeline.assemble_rooms``; ids ``<KEY>-Rnnn``).
 
-    Two corrections (``ctx['fixes']``, on by default; off in the pilot-compatible regression run):
+    Corrections (``ctx['fixes']``, on by default; off in the pilot-compatible regression run):
 
     * heavy-wall closure: when the wall-only region (no fine-pen lines) holds exactly the same tags as the first closed region, contains it and is larger,
       the fine-pen line that closed the first region is not a wall (a finish or annotation line) and the wall-only region is the room (flag, both areas kept);
-    * leaked regions: a region of several tags and much larger than a room (``is_leaked``) is not a room; it is not measured (``leaked`` True).
+    * leaked regions (``is_leaked``: several rooms that the walls did not separate): split by a second pass that closes the gaps of dashed fine-pen
+      lines; what is still leaked after that is not a room and not measured (``leaked`` True).
     """
     key = ctx["info"]["key"]
     fixes = ctx.get("fixes", True)
-    vec: rv.VectorResult = ctx["vector"]["vec"]
+    vr = ctx["vector"]
+    vec: rv.VectorResult = vr["vec"]
+    vec2: Optional[rv.VectorResult] = vr.get("vec2")
     ras = ctx["raster"]
     cb: cal.Calibration = ctx["calibrate"]["cal_bg"]
     k2 = cb.area_scale_mm2_per_pt2() / 1e6
     by_tag = {sr.tag_index: sr for sr in ras["regions"]}
-    adopt = w_adoption_map(vec, ctx["vector"].get("wreg", []), k2) if fixes else {}
-    wmap = {t["t_index"]: wr for wr in ctx["vector"].get("wreg", []) for t in wr.tags}
-    by_tag_w = {sr.tag_index: sr for sr in ras.get("regions_w", [])}
-    # tag index of the second pass refers to the position in its own tag list: map back through the tag identity
+    adopt = w_adoption_map(vec, vr.get("wreg", []), k2) if fixes else {}
+    wmap = {t["t_index"]: wr for wr in vr.get("wreg", []) for t in wr.tags}
     w_tags = [t for i in adopt for t in vec.regions[i].tags]
     by_tag_w = {w_tags[sr.tag_index]["t_index"]: sr for sr in ras.get("regions_w", []) if sr.tag_index < len(w_tags)}
-    gaps = vec.wall_gaps_pt
-    like = [f for f, ok in zip(vec.faces, rv._room_like(vec.faces, k2)) if ok]
-    tree = STRtree(like)
+    d_tags = dash_tags(vr) if vec2 is not None else []
+    by_tag_d = {d_tags[sr.tag_index]["t_index"]: sr for sr in ras.get("regions_d", []) if sr.tag_index < len(d_tags)}
+    ctxs = {}
+    for src, v in (("p", vec), ("d", vec2)):
+        if v is None:
+            continue
+        like = [f for f, ok in zip(v.faces, rv._room_like(v.faces, k2)) if ok]
+        ctxs[src] = (v, like, STRtree(like))
+    entries = region_entries(vr)
+    cent = {e: (ctxs[e[0]][0].regions[e[1]].polygon.centroid.y, ctxs[e[0]][0].regions[e[1]].polygon.centroid.x) for e in entries}
+    entries.sort(key=lambda e: (round(cent[e][0] / 60.0), cent[e][1]))
     rooms = []
-    for n, i in enumerate(_sorted_regions(vec), start=1):
-        reg = vec.regions[i]
+    for n, e in enumerate(entries, start=1):
+        src, i = e
+        v, like, tree = ctxs[src]
+        reg = v.regions[i]
         face = first = reg.polygon
-        half = float(gaps[i]) / 2.0
+        half = float(v.wall_gaps_pt[i]) / 2.0
         flags = []
         w_area = None
-        if i in adopt:
+        basis = "first closed region (heavy walls and fine-pen lines)"
+        check = ""
+        if src == "d":
+            basis = "closed region with the gaps of dashed fine-pen lines bridged (the first closed region was a leaked region of several rooms)"
+            check = "dashed-line closure: the boundary includes dashed fine-pen lines taken as continuous (bulkhead or screen line); check on the drawing"
+            flags.append("split from a leaked region by closing dashed fine-pen lines")
+        elif i in adopt:
             face = adopt[i]
             w_area = face.area * k2
             basis = "heavy wall strokes only (the fine-pen line(s) that closed the first region are not walls)"
             flags.append("boundary re-derived from heavy wall strokes: first closed region %.1f m2 (fine-pen boundary), wall-only region %.1f m2 adopted"
                          % (first.area * k2, w_area))
-        else:
-            basis = "first closed region (heavy walls and fine-pen lines)"
-            w_area = None
-        check = ""
-        if fixes:
+            check = "wall-only region adopted (fine-pen line closed the first region)"
+        elif fixes:
             wr = wmap.get(reg.tags[0]["t_index"])
             fa = first.area * k2
-            if i in adopt:
-                check = "wall-only region adopted (fine-pen line closed the first region)"
-            elif wr is None:
+            if wr is None:
                 check = "fine-pen lines needed to close: the heavy walls alone give no region of plausible size"
             elif wr.polygon.area * k2 - fa <= max(0.3, 0.02 * fa):
                 check = "wall-closed: heavy walls alone give the same region"
@@ -427,7 +551,8 @@ def assemble_rooms(ctx: dict) -> List[dict]:
         a_cl = rv.centreline_polygon(face, half, tree, like)
         c = face.representative_point()
         tg = sorted(reg.tags, key=lambda t: (t["x_pv"] - c.x) ** 2 + (t["y_pv"] - c.y) ** 2)
-        srs = [(by_tag_w if i in adopt else by_tag).get(t["t_index"]) for t in reg.tags]
+        bmap = by_tag_d if src == "d" else (by_tag_w if i in adopt else by_tag)
+        srs = [bmap.get(t["t_index"]) for t in reg.tags]
         b_face = b_cl = None
         b_area = None
         if all(s is not None and s.polygon is not None for s in srs) and srs:
@@ -450,8 +575,8 @@ def assemble_rooms(ctx: dict) -> List[dict]:
         rooms.append({"room_id": "%s-R%03d" % (key, n), "tag": tg[0]["text"], "name": tg[0]["name"], "mode": tg[0]["mode"], "number": tg[0].get("number", ""),
                       "tag_row": tg[0], "tags_inside": [t["text"] for t in tg], "modes_inside": [t["mode"] for t in tg], "tag_rows": tg,
                       "a_face": face, "a_cl": a_cl, "b_face": b_face, "b_cl": b_cl, "a_first": first, "boundary_basis": basis, "boundary_check": check,
-                      "w_only_area_m2": w_area, "leaked": leaked,
-                      "b_face_area_m2": b_area, "flags": "; ".join(flags), "vec_index": i, "gap_pt": float(gaps[i])})
+                      "w_only_area_m2": w_area, "leaked": leaked, "pass": src,
+                      "b_face_area_m2": b_area, "flags": "; ".join(flags), "vec_index": i, "gap_pt": float(v.wall_gaps_pt[i])})
     return rooms
 
 
@@ -598,7 +723,7 @@ def stage_compare(ctx: dict) -> dict:
         rev(room["room_id"], room["tag"], "leaked region", "%d tags in %.0f m2 at page-view box %s; not measured; tags: %s" % (
             len(room["tag_rows"]), room["a_face"].area * k2, ",".join("%.0f" % v for v in room["a_face"].bounds),
             " | ".join(t["text"] for t in room["tag_rows"][:10]) + (" ..." if len(room["tag_rows"]) > 10 else "")))
-    covered = {t["t_index"] for r in ctx["vector"]["vec"].regions for t in r.tags}
+    covered = {t["t_index"] for r in all_rooms for t in r["tag_rows"]}
     missing = [t for t in ctx["tags"] if t["t_index"] not in covered]
     for k, t in enumerate(missing, start=1):
         rid = "%s-U%03d" % (key, k)

@@ -109,8 +109,8 @@ def test_dimension_strings_are_not_walls():
 
 
 def test_leaked_region_rule():
-    assert st.is_leaked(96, 2571.0) and st.is_leaked(4, 150.0) and st.is_leaked(2, 1100.0)
-    assert not st.is_leaked(1, 3000.0) and not st.is_leaked(3, 200.0) and not st.is_leaked(10, 126.0)
+    assert st.is_leaked(96, 2571.0) and st.is_leaked(4, 600.0) and st.is_leaked(2, 1100.0)
+    assert not st.is_leaked(1, 3000.0) and not st.is_leaked(3, 200.0) and not st.is_leaked(30, 357.0) and not st.is_leaked(10, 126.0)
 
 
 def test_na_mode_label_recovered_from_text_layer():
@@ -137,3 +137,13 @@ def test_zone_areas_are_m2(tmp_path):
     assert stats["MV"]["poly_m2"] == pytest.approx(50.0) and stats["MV"]["area_m2"] == pytest.approx(50.0)
     assert summ["rooms_no_polygon"] == 0
 
+
+
+def test_dash_bridges_close_dashed_lines_only():
+    dashes = [(x, 10.0, x + 7.0, 10.0) for x in (0.0, 11.0, 22.0, 33.0)]      # four dashes, gaps of 4 pt
+    br = st.dash_bridge_segments(np.asarray(dashes, float))
+    assert len(br) == 3 and np.allclose(br[:, 1], 10.0) and np.allclose(br[0], (7.0, 10.0, 11.0, 10.0))
+    two = st.dash_bridge_segments(np.asarray(dashes[:2], float))              # two dashes are no pattern
+    assert len(two) == 0
+    wide = st.dash_bridge_segments(np.asarray([(x, 10.0, x + 7.0, 10.0) for x in (0.0, 20.0, 40.0)], float))   # 13 pt gaps: an opening, not a dash gap
+    assert len(wide) == 0
