@@ -248,6 +248,24 @@
       "dept_no": "34",
       "dept_title": "34 - MRO",
       "department_label": "MRO"
+    },
+    "IGH_DD Booklet_TRED_Learning Centre.pdf": {
+      "booklet": true,
+      "dept_no": "50",
+      "dept_title": "50 - TRED - Learning Centre",
+      "department_label": "TRED Learning Centre"
+    },
+    "IGH_DD Booklet_AN-IP_AH_Part 2.pdf": {
+      "booklet": true,
+      "dept_no": "31",
+      "dept_title": "31 - AN IP & Caregiver Lounge",
+      "department_label": "AN IP and Caregiver Lounge"
+    },
+    "20250730_IGH_DD Booklet_HOSPITALITY_R2 5.pdf": {
+      "booklet": true,
+      "dept_no": "36",
+      "dept_title": "36 - Hospitality",
+      "department_label": "Hospitality"
     }
   }
 }

@@ -1508,9 +1508,9 @@ def test_department_mapping_covers_the_booklet_folder_and_skips_non_booklets() -
     if folder.is_dir():
         assert {p.name for p in folder.iterdir() if p.is_file()} == set(mapping)        # every file of the folder has an entry
     booklets = {n: e for n, e in mapping.items() if e["booklet"]}
-    assert len(booklets) == 38
+    assert len(booklets) == 41
     assert sorted(e["dept_no"] for e in booklets.values()) == sorted(
-        "01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 22 22 23 24 26 28 29 30 34 35 37 39 40 41 42 45 47".split())  # 22 has three booklets (MSOT, DSOT, AMSC)
+        "01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 22 22 23 24 26 28 29 30 31 34 35 36 37 39 40 41 42 45 47 50".split())  # 22 has three booklets (MSOT, DSOT, AMSC)
     assert all(e["dept_title"].startswith(e["dept_no"] + " - ") and e["department_label"] for e in booklets.values())
     assert b.department_info(Path("IGH_DD Booklet_MDU_OCP.pdf")) == ("12", "Medical Day Unit")
     assert b.department_info(Path("20250804_IGH_DD Booklet_Data Centre R2_Markup.pdf")) == ("42", "Data Centre")
