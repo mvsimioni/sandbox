@@ -96,9 +96,6 @@ def write_pressure(ctx: Ctx) -> None:
                 put(ws, g("set"), expand(ctx, "={CR.pa}", PS, q, {"CR": gi}), "Link", "d1")
                 put(ws, g("set_c"), "L", "Code")
                 ctx.coded.append(dict(sheet=ws.title, cell=g("set"), code_cell=g("set_c"), src_cell=None, code="L"))
-            if ctx.room_ai.get(gi) is not None:
-                pass
-            ai = ctx.rooms[gi]["number"]
             put(ws, g("supply"), f"={ctx.lay['AF'].addr('supply', gi)}*ConvM3hPerLps", "Link", "d1")
             put(ws, g("exhaust"), f"={ctx.lay['AF'].addr('extract', gi)}*ConvM3hPerLps", "Link", "d1")
         else:

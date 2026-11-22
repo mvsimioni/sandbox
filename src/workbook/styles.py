@@ -81,6 +81,7 @@ def install_styles(wb) -> None:
     defs = [
         _ns("Title", _font(bold=True, size=18), align=left),
         _ns("Section", _font(bold=True, size=12), align=left),
+        _ns("Subhead", _font(bold=True), align=left),
         _ns("Header", _font(bold=True), fill=FILL_HEAD, border=Border(bottom=HAIR),
             align=Alignment(horizontal="center", vertical="center", wrap_text=True)),
         _ns("HeaderLeft", _font(bold=True), fill=FILL_HEAD, border=Border(bottom=HAIR),
