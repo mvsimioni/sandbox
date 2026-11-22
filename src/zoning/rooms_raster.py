@@ -83,6 +83,32 @@ def render_tiles(segs: np.ndarray, roi: Tuple[float, float, float, float], S: fl
     return out
 
 
+def render_fills(polys: Sequence[Polygon], roi: Tuple[float, float, float, float], S: float, out: np.ndarray, tile_px: int = TILE_PX) -> np.ndarray:
+    """Fill polygons (page-view pt, shell only) into ``out`` (uint8, 255), one tile at a time: the black wall bands."""
+    x0, y0, _, _ = roi
+    H, W = out.shape
+    SH = 4
+    for ty in range(0, H, tile_px):
+        for tx in range(0, W, tile_px):
+            tw, th = min(tile_px, W - tx), min(tile_px, H - ty)
+            bx0, by0 = x0 + (tx - 1) / S, y0 + (ty - 1) / S
+            bx1, by1 = x0 + (tx + tw + 1) / S, y0 + (ty + th + 1) / S
+            tile = None
+            for g in polys:
+                gx0, gy0, gx1, gy1 = g.bounds
+                if gx1 < bx0 or gx0 > bx1 or gy1 < by0 or gy0 > by1:
+                    continue
+                if tile is None:
+                    tile = np.zeros((th, tw), np.uint8)
+                pts = np.asarray(g.exterior.coords, float)
+                px = np.round(((pts[:, 0] - x0) * S - tx + 0.5) * (1 << SH)).astype(np.int32)
+                py = np.round(((pts[:, 1] - y0) * S - ty + 0.5) * (1 << SH)).astype(np.int32)
+                cv2.fillPoly(tile, [np.stack([px, py], axis=1)], 255, cv2.LINE_8, SH)
+            if tile is not None:
+                out[ty:ty + th, tx:tx + tw] |= tile
+    return out
+
+
 def _pair_contacts(lab: np.ndarray, wall: np.ndarray, offsets=(2, 3, 4), chunk_rows: int = 1024) -> Dict[Tuple[int, int], List[int]]:
     """Contact counts between components across 1-3 px barriers: ``{(a, b): [thin_count, wall_count]}``.
 
@@ -344,12 +370,19 @@ def roi_from_points(pts: np.ndarray, margin_pt: float = 40.0) -> Tuple[float, fl
 
 
 def measure_rooms(wall_segments: np.ndarray, thin_segments: np.ndarray, tags: Sequence[dict], mm_per_pt: float,
-                  target_mm_per_px: float = 8.0, margin_pt: float = 40.0, blocker_tags: Sequence[dict] = ()) -> Tuple[List[SeedRegion], dict]:
-    """Rasterise in tiles and grow a region from each tag seed; returns regions and diagnostics."""
+                  target_mm_per_px: float = 8.0, margin_pt: float = 40.0, blocker_tags: Sequence[dict] = (),
+                  wall_bands: Sequence[Polygon] = ()) -> Tuple[List[SeedRegion], dict]:
+    """Rasterise in tiles and grow a region from each tag seed; returns regions and diagnostics.
+
+    ``wall_bands`` are the black filled wall bands of the sheet: they are filled into the wall raster, so a band is a wall of its
+    own thickness and the room ends at its inner edge (the same convention as the vector face).
+    """
     seeds = np.array([[t["x_pv"], t["y_pv"]] for t in list(tags) + list(blocker_tags)], float)
     roi = roi_from_points(seeds, margin_pt)
     S = pixels_per_pt(mm_per_pt, target_mm_per_px)
     wall = render_tiles(wall_segments, roi, S)
+    if len(wall_bands):
+        render_fills(wall_bands, roi, S, wall)
     thin = render_tiles(thin_segments, roi, S)
     thin[wall > 0] = 0
     m2_per_px = (mm_per_pt / S / 1000.0) ** 2

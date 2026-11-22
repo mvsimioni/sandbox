@@ -1119,9 +1119,15 @@ def test_the_4_1_8_strip_alone_does_not_select_the_zoned_handler(tmp_path: Path)
     assert b.zoned_caption(b.page_words(doc[0])) is None
 
 
-def test_zone_column_is_blank_for_other_departments_and_signed_pressure_is_kept() -> None:
+def test_zone_column_is_blank_for_other_departments_and_signed_pressure_is_kept(tmp_path: Path) -> None:
     assert b.CRITERIA_FIELDS.index("zone") == b.CRITERIA_FIELDS.index("table_part") + 1
     assert b.CRITERIA_FIELDS.index("pressure_pa_min") == b.CRITERIA_FIELDS.index("pressure_pa") + 1
+    doc = pymupdf.open()
+    build_criteria_page(doc, pa_rows=True)                    # a standard table: the zone is blank and Pa keeps its sign
+    res = _parse(_save(doc, tmp_path), tmp_path)
+    assert res["criteria"] and {r["zone"] for r in res["criteria"]} == {""}
+    assert {r["room_type_as_printed"]: r["pressure_pa"] for r in res["criteria"]}["Isolation Room"] == "-15"
+    assert all(set(r) == set(b.CRITERIA_FIELDS) for r in res["criteria"])
 
 
 def test_comparison_goes_zone_by_zone_with_the_prefix_taken_off(tmp_path: Path) -> None:
@@ -1245,3 +1251,251 @@ def test_a_page_that_prints_no_number_is_a_source_gap_not_a_failure(tmp_path: Pa
 def test_a_page_number_that_is_ink_but_not_text_stays_a_failure(tmp_path: Path) -> None:
     res = _numbered_booklet(tmp_path, ink_on_middle=True)
     assert res["page_gaps"] == [] and [pg for pg, _ in res["page_failures"]] == [2]
+
+
+# --------------------------------------------------------------------------- #
+# Corrections after verification (3): new extracts ICU HDU, I-CARE, MDU OCP, Rehab Med, DI, Ortho, Pharmacy, Data Centre
+# --------------------------------------------------------------------------- #
+STRIP_48 = "4.8 MECHANICAL VENTILATION STRATEGY"
+HEAD_STYLES = {
+    # ICU HDU: every heading wraps mid-word in its cell
+    "split": {"room": ["Room"], "pressure": ["Pressure Re", "gime, Pa"], "oa": ["Min. Outdo", "or ACH"],
+              "total": ["Min. Total", "ACH"], "single": ["Single Pass"], "aclass": ["Air Class"], "filter": ["Filter"],
+              "rh": ["Relative Hu", "midity"], "temp": ["Design Tem", "perature, C"],
+              "after": ["Afterhours", "mode, Y/N"], "setback": ["Setback mo", "de, Y/N"]},
+    # I-CARE, DI, Ortho: 'AREA / ROOM', 'Temperature' with no unit
+    "area": {"room": ["AREA / ROOM"], "pressure": ["Pressure", "Regime Pa"], "oa": ["Min.", "Outdoor", "ACH"],
+             "total": ["Min. Total", "ACH"], "single": ["Single Pass"], "aclass": ["Air Class"], "filter": ["Filter"],
+             "rh": ["Relative", "Humidity"], "temp": ["Temperature"],
+             "after": ["Afterhours", "mode, Y/N"], "setback": ["Setback", "mode, Y/N"]},
+}
+BASE_CELLS = {"filter": "MERV 15", "rh": "Max 60%", "temp": "21-24", "after": "N", "setback": "N", "aclass": "2",
+              "single": "NR", "oa": "2", "total": "6"}
+
+
+def build_variant_criteria_page(doc: "pymupdf.Document", style: str, rows, subtitle: str = "", title: str = "",
+                                note: str = "", dept_column: str = "", booklet_page: str = "139",
+                                footer_stamp_month: str = "MAY", strip: str = STRIP_48) -> None:
+    """A criteria page with no 'Room conditions' caption and no DESIGN CRITERIA strip: a 28 pt title, an optional
+    20 pt subtitle, the header of ``style``, rows of (room, cells) and an optional unnumbered 'Note:' paragraph."""
+    cv = Canvas(doc)
+    cv.text(745, 55, strip, 15)
+    if title:
+        cv.text(60, 40, title, 28)
+    if subtitle:
+        cv.text(60, 80, subtitle, 20)
+    cv.rect(50, 120, 1140, 190, fill=(0.35, 0.6, 0.83))
+    for key, lines in HEAD_STYLES[style].items():
+        top = 155 - 7 * len(lines)
+        for i, line in enumerate(lines):
+            cv.text(CENTRE[key] if key != "room" else 200, top + 14 * i, line, 11, centre=True)
+    if dept_column:
+        cv.text(58, 128, "DEPARTMENT", 11)
+    y = 215.0
+    for room, cells in rows:
+        cv.text(150 if not dept_column else 150, y, room, 11)
+        for key, val in {**BASE_CELLS, **cells}.items():
+            cv.text(CENTRE[key], y, val, 11, centre=True)
+        y += 34.0
+    if dept_column:
+        cv.text(70, 300, dept_column, 22)                        # the merged vertical department cell, left of the rooms
+    if note:
+        cv.text(60, y + 30, note, 14)
+    cv.text(60, 805, "ALEXANDRA HOSPITAL REDEVELOPMENT PROJECT | DETAILED DESIGN BOOKLET | " + footer_stamp_month + " 2025", 11)
+    cv.text(1150, 808, booklet_page, 14)
+
+
+def test_split_header_without_caption_is_read_and_unsigned_pressure_is_reported(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    build_variant_criteria_page(doc, "split", [
+        ("ICU Bedrooms", {"pressure": "Positive", "single": "N/R", "rh": "≤60", "total": "10"}),
+        ("Disposal/Dirty Utility", {"pressure": "-5", "single": "Yes", "total": "20", "aclass": "4"}),
+        ("ICU Bedroom (PP ISO)", {"pressure": "30", "filter": "HEPA", "total": "12", "aclass": "1"}),   # no sign printed
+        ("CT Scan", {"pressure": "+5", "total": "15"})], strip=STRIP_48 + " | DESIGN CRITERIA")
+    res = _parse(_save(doc, tmp_path, "ICU_X_Section_4.8_Mechanical_Ventilation_Strategy.pdf"), tmp_path)
+    rows = res["criteria"]
+    assert res["pages"][0]["class"] == "criteria" and len(rows) == 4 and res["page_failures"] == []
+    assert {r["table_part"] for r in rows} == {b.NO_CAPTION_PART}
+    assert [(r["pressure_pa"], r["pressure_direction"]) for r in rows] == [("", "positive"), ("-5", "negative"), ("", ""), ("5", "positive")]
+    assert [r["single_pass"] for r in rows] == ["NR", "Y", "NR", "NR"] and rows[0]["rh_max_pct"] == "60"
+    assert [f["row"] for f in res["failures"]] == ["ICU Bedroom (PP ISO)"] and res["failures"][0]["cell"] == "30"
+    assert rows[2]["confidence"] == "0.72"                 # the unsigned figure is not given a sign
+
+
+def test_area_room_header_with_operation_mode_subtitle_is_a_criteria_page(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    build_variant_criteria_page(doc, "area", [
+        ("Clean Utility", {"pressure": "Neutral", "after": "24 hrs AC"}),
+        ("NP Isolation", {"pressure": "-5", "single": "Yes", "total": "12", "aclass": "4"}),
+        ("Toilet", {"pressure": "-VE", "single": "YES", "total": "20", "aclass": "3", "filter": "NR", "rh": "NR", "temp": "NR"})],
+        title="ACMV", subtitle="• I-Care – Operation Mode", footer_stamp_month="APR")
+    res = _parse(_save(doc, tmp_path, "IGH_DD Booklet_I-CARE_BATCH 1_R.pdf"), tmp_path)
+    rows = res["criteria"]
+    assert res["department"] == "IGH I-CARE BATCH 1" and res["pages"][0]["class"] == "criteria"
+    assert len(rows) == 3 and res["failures"] == [] and res["page_failures"] == []
+    assert {r["table_part"] for r in rows} == {"I-Care – Operation Mode"}
+    assert [r["afterhours"] for r in rows] == ["24 hrs AC", "N", "N"] and json_raw(rows[0])["afterhours"] == "24 hrs AC"
+    assert [(r["pressure_pa"], r["pressure_direction"]) for r in rows] == [("", "neutral"), ("-5", "negative"), ("", "negative")]
+    assert rows[2]["rh_max_pct"] == "" and rows[2]["temp_min_c"] == ""
+    assert b.footer_furniture(b.page_words(doc[0]), H, W)          # 'APR 2025' is recognised as the date stamp
+
+
+def test_cell_words_of_the_newer_extracts() -> None:
+    assert b.parse_single_pass("N/R") == ("NR", True) and b.parse_single_pass("No (c/w Air Purging)") == ("N", True)
+    assert b.parse_single_pass("Non-Recirculating") == ("Y", True)
+    assert b.parse_yn("NA") == ("NA", True) and b.parse_yn("24 hrs AC") == ("24 hrs AC", True) and b.parse_yn("maybe")[1] is False
+    assert b.parse_count("SS 553") == ("", True) and b.parse_count("ss553") == ("", True) and b.parse_count("x")[1] is False
+    assert b.parse_rh("N/R") == ("", "", True) and b.parse_temp("N/R") == ("", "", True)
+    for cell, direction in (("SLIGHT +VE", "positive"), ("SLIGHTLY +VE", "positive"), ("SLIGHTLY -VE", "negative"),
+                            ("-VE", "negative"), ("NEUTRAL", "neutral")):
+        r = b.parse_pressure_full(cell)
+        assert (r["pa"], r["direction"], r["ok"]) == ("", direction, True)
+
+
+def test_note_paragraph_and_department_column_are_not_rows(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    build_variant_criteria_page(doc, "area", [("Anteroom, PP", {"pressure": "+30", "total": "15"}),
+                                              ("Gown-Up", {"pressure": "+15", "total": "15"})],
+                                subtitle="Basement 2 Pharmacy – Compounding Lab – Setback Mode 2", dept_column="PHARM",
+                                note="Note: Reducing of ACH required adjustment on venturi valve")
+    res = _parse(_save(doc, tmp_path, "IGH_DD Booklet_Pharmacy_X.pdf"), tmp_path)
+    assert [r["room_type_as_printed"] for r in res["criteria"]] == ["Anteroom, PP", "Gown-Up"]   # no 'PHARM', no note row
+    assert any(n["text"].startswith("Note: Reducing of ACH") for n in res["notes"])
+    assert res["criteria"][0]["table_part"].endswith("Setback Mode 2")
+
+
+def _image_page(doc: "pymupdf.Document", strip: str = STRIP_48) -> None:
+    cv = Canvas(doc)
+    cv.text(745, 55, strip, 15)
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 200, 120))
+    pix.clear_with(225)
+    cv.page.insert_image(pymupdf.Rect(60, 100, 1130, 700), pixmap=pix)
+    _footer(cv, "71")
+
+
+def test_criteria_table_that_is_an_image_reads_the_keyed_in_rows_at_lower_confidence(tmp_path: Path, monkeypatch) -> None:
+    import json
+    sidecar = tmp_path / "vision.json"
+    cols = ["room", "pressure", "min_oa", "min_total", "single_pass", "air_class", "filter", "rh", "temp", "afterhours", "setback"]
+    sidecar.write_text(json.dumps({"IGH_DD Booklet_IMG.pdf": {"1": {"table_part": "Medical Day Unit – Operation Mode", "cols": cols, "rows": [
+        ["Clean Utility", "+VE", "2", "6", "NR", "2", "MERV 15", "Max 60%", "21-24", "Y", "N"],
+        ["NP Isolation", "-5", "2", "12", "Yes", "4", "MERV 15", "Max 60%", "21-24", "N", "N"]]}}}), encoding="utf-8")
+    monkeypatch.setattr(b, "VISION_ROWS_PATH", sidecar)
+    doc = pymupdf.open()
+    _image_page(doc)
+    res = _parse(_save(doc, tmp_path, "IGH_DD Booklet_IMG.pdf"), tmp_path)
+    assert res["pages"][0]["class"] == "criteria" and "keyed in by eye" in res["pages"][0]["detail"]
+    rows = res["criteria"]
+    assert [(r["room_type_as_printed"], r["pressure_pa"], r["single_pass"], r["afterhours"]) for r in rows] == \
+        [("Clean Utility", "", "NR", "Y"), ("NP Isolation", "-5", "Y", "N")]
+    assert {r["confidence"] for r in rows} == {"0.80"} and rows[0]["table_part"] == "Medical Day Unit – Operation Mode"
+    assert all("read_by" in json_raw(r) and r["pdf_page"] == 1 and r["source_file"] for r in rows)
+    other = _parse(_save(doc, tmp_path, "IGH_DD Booklet_OTHER.pdf"), tmp_path)       # no entry for this file: nothing is invented
+    assert other["criteria"] == [] and other["pages"][0]["class"] == "other"
+
+
+def build_titled_standby_page(doc: "pymupdf.Document", title: str, tags, note_ref_title_digit: str = "4") -> None:
+    cv = Canvas(doc)
+    cv.text(745, 55, STRIP_48, 15)
+    cv.text(60, 60, title, 20)
+    for x0, x1, lines in ((84.0, 338.0, ["Equipment Tag"]), (338.0, 947.0, ["Area Served"]),
+                          (947.0, 1125.0, ["Equipment Standby", "Configuration 1,2"])):
+        cv.rect(x0, 105, x1, 182, fill=(0.35, 0.6, 0.83))
+        for i, line in enumerate(lines):
+            cv.text((x0 + x1) / 2.0, 135 + 18 * i - 9 * (len(lines) - 1), line, 14, centre=True)
+    y = 182.0
+    for tag, area, cfg in tags:
+        for x0, x1 in ((84.0, 338.0), (338.0, 947.0), (947.0, 1125.0)):
+            cv.rect(x0, y, x1, y + 40, fill=(0.82, 0.87, 0.94))
+        cv.text((84 + 338) / 2.0, y + 12, tag, 14, centre=True)
+        cv.text(345, y + 12, area, 14)              # left-aligned: it starts left of the midpoint between the headings
+        cv.text(1036, y + 12, cfg, 14, centre=True)
+        y += 40
+    cv.text(85, 740, "NOTE:-", 14)
+    cv.text(85, 757, "1 – REFER TO APPENDIX 7 FOR EQUIPMENT STANDBY CONFIGURATION TYPES", 14)
+    _footer(cv, "140")
+
+
+def test_titled_standby_table_with_two_unit_tags_and_a_level_in_the_title(tmp_path: Path) -> None:
+    rows = [("AHU-B-07-04ICU-01", "POD B - ICU Bedrooms/Clean Utility", "AHU CONFIG-C"),
+            ("AHU-B-07-04ICU-01/02C", "POD B - ICU Bedrooms/Clean Utility", "AHU CONFIG-C"),
+            ("FCU-A-7-03/20", "OP ICARE Treatment Room Large", "CONFIG-F")]
+    doc = pymupdf.open()
+    build_titled_standby_page(doc, "Equipment Configuration Summary Level 4 (Part 1)", rows)
+    res = _parse(_save(doc, tmp_path, "ICU_X_Section_4.8_Mechanical_Ventilation_Strategy.pdf"), tmp_path)
+    assert res["pages"][0]["class"] == "standby summary" and res["page_failures"] == [] and res["failures"] == []
+    assert [(r["tag_as_written"], r["area"], r["configuration"]) for r in res["standby"]] == [
+        (t, a, c) for t, a, c in rows]
+    assert {r["note_refs"] for r in res["standby"]} == {"1,2"}        # not the '4' of 'Level 4' in the page title
+    assert [n["note_number"] for n in res["standby_notes"]] == ["1"]
+
+
+def test_untitled_standby_table_and_the_frozen_file(tmp_path: Path) -> None:
+    rows = [("AHU-A-10-03/04", "MDU Clinical Rooms", "CONFIG-D")]
+    doc = pymupdf.open()
+    build_titled_standby_page(doc, "", rows)
+    fresh = _parse(_save(doc, tmp_path, "IGH_DD Booklet_MDU_OCP.pdf"), tmp_path)
+    assert fresh["pages"][0]["class"] == "standby summary" and fresh["standby"][0]["tag_as_written"] == "AHU-A-10-03/04"
+    frozen = _parse(_save(doc, tmp_path, b.FROZEN_LAYOUT_FILES[0]), tmp_path)       # Healthy Aging p23: left as released
+    assert frozen["pages"][0]["class"] == "other" and frozen["standby"] == []
+    doc2 = pymupdf.open()
+    build_titled_standby_page(doc2, "Equipment Configuration Summary", rows)
+    assert _parse(_save(doc2, tmp_path, b.FROZEN_LAYOUT_FILES[0]), tmp_path)["pages"][0]["class"] == "other"
+    assert _parse(_save(doc2, tmp_path, "IGH_DD Booklet_X.pdf"), tmp_path)["pages"][0]["class"] == "standby summary"
+
+
+def test_plan_heading_in_24_pt_and_the_stale_strip(tmp_path: Path) -> None:
+    def plan(doc, heading, strip, size=24):
+        cv = Canvas(doc)
+        cv.text(745, 55, strip, 15)
+        cv.text(60, 60, heading, size)
+        cv.text(900, 150, "IP 4TH STOREY KEYPLAN – PART 1", 12)
+        cv.text(300, 300, "STAFF", 10)
+        cv.text(400, 400, "-5 Pa", 8)
+        _footer(cv, "147")
+    doc = pymupdf.open()
+    plan(doc, "PRESSURE REGIME – BAU (LEVEL 4)", STRIP_48)                                   # 24 pt, not the 28 pt heading
+    plan(doc, "AHU ZONING", "4.1 DEPARTMENT LAYOUT PLAN")                                    # a plan under a stale strip
+    plan(doc, "SOME AV OVERVIEW", "4.1.10 AV STRATEGY")                                      # another section: still 'other'
+    res = _parse(_save(doc, tmp_path), tmp_path)
+    assert [p["class"] for p in res["pages"]] == ["pressure regime", "zoning keyplan", "other"]
+    assert res["pressure"][0]["page_heading"].startswith("PRESSURE REGIME – BAU")
+    assert b.classify_page("x", "", "4.8 MECHANICAL VENTILATION STRATEGY | PRESSURE REGIME") == "pressure regime"   # MDU OCP
+
+
+def test_combined_file_page_map_names_the_section_of_each_page(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    for strip in ("4.1.8 MECHANICAL VENTILATION STRATEGY", "4.2.8 MECHANICAL VENTILATION STRATEGY"):
+        build_standby_page(doc)
+        doc[-1].insert_text((745, 68), strip, fontname="helv", fontsize=15)
+    res = _parse(_save(doc, tmp_path, "Rehab_Med_Combined_Mechanical_Ventilation_Strategy.pdf"), tmp_path)
+    assert res["department"] == "Rehab Med Combined"
+    assert [p["section"] for p in res["pages"]] == ["4.1.8", "4.2.8"]
+    assert [p["detail"].endswith("section %s" % s) for p, s in zip(res["pages"], ("4.1.8", "4.2.8"))] == [True, True]
+    single = pymupdf.open()
+    build_standby_page(single)
+    single[-1].insert_text((745, 68), STRIP_48, fontname="helv", fontsize=15)
+    assert "section" not in _parse(_save(single, tmp_path), tmp_path)["pages"][0]["detail"]     # one section: page map unchanged
+
+
+def test_department_names_and_the_files_a_default_run_reads() -> None:
+    for name, dept in (("ICU_HDU_Section_4.8_Mechanical_Ventilation_Strategy.pdf", "ICU HDU"),
+                       ("IGH_DD Booklet_I-CARE_BATCH 1_R.pdf", "IGH I-CARE BATCH 1"),
+                       ("IGH_DD Booklet_MDU_OCP.pdf", "IGH MDU OCP"),
+                       ("20250819_IGH_DD Booklet_DI_Signed_All_AH.pdf", "IGH DI Signed All AH"),
+                       ("Rehab_Med_Combined_Mechanical_Ventilation_Strategy.pdf", "Rehab Med Combined"),
+                       ("IP_FAST_Section_4.8_Mechanical_Ventilation_Strategy.pdf", "IP FAST")):
+        assert b.department_from_name(Path(name)) == dept
+    assert all(b.is_booklet_name(Path(n)) for n in ("IGH_DD Booklet_MDU_OCP.pdf", "Rehab_Med_Combined_Mechanical_Ventilation_Strategy.pdf",
+                                                    "Paeds_Section_4.8_Mechanical_Ventilation_Strategy.pdf"))
+    assert not b.is_booklet_name(Path("5. Equipment Schedules (Corr 5).pdf"))
+
+
+def test_zone_is_blank_and_pa_is_signed_on_a_standard_table(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    build_criteria_page(doc, pa_rows=True)
+    res = _parse(_save(doc, tmp_path), tmp_path)
+    assert {r["zone"] for r in res["criteria"]} == {""}                       # blank for every department but Emergency
+    by = {r["room_type_as_printed"]: r for r in res["criteria"]}
+    assert by["Isolation Room"]["pressure_pa"] == "-15" and by["Plant Room"]["pressure_pa"] == "10"
+    assert by["Iso Anteroom"]["pressure_pa"] == "-15"                         # a split sign is still negative

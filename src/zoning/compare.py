@@ -140,7 +140,10 @@ def build_room_rows(rooms: Sequence[dict], appd: Sequence[AppdPolygon], calib_bg
         convention = max(CONVENTIONS, key=lambda c: (pooled[c].get("share_within_2pct", 0.0), -pooled[c].get("median_abs_error_pct", 1e9)))
     stats["adopted_convention"] = convention
     stats["n_matched_A"] = len(matches_a)
-    stats["n_matched_B"] = len(matches_b)
+    # B is compared on the rooms that method A matched and that have a B region (the rows that carry error_b_vs_caption_pct);
+    # n_matched_B_own is how many B polygons match an App D polygon on their own overlap test (a different, independent count)
+    stats["n_matched_B"] = stats["B/wall_face"].get("n", 0)
+    stats["n_matched_B_own"] = len(matches_b)
     rows: List[dict] = []
     for i, r in enumerate(rooms):
         face = r["a_face"]
@@ -155,8 +158,12 @@ def build_room_rows(rooms: Sequence[dict], appd: Sequence[AppdPolygon], calib_bg
             agree = "no B region"
         else:
             agree = "agree" if within(face_area, b_face_area, AB_PCT, AB_M2) else "differ"
-        c = a_poly.centroid if a_poly.contains(a_poly.centroid) else a_poly.representative_point()
+        # the centroid columns hold the true centroid of the adopted polygon, even when it lies outside the polygon (a C or L shaped room);
+        # the label point (inside the polygon) and its grid location are separate columns
+        c = a_poly.centroid
+        lp = a_poly.representative_point()
         X, Y = calib_bg.to_building(c.x, c.y)
+        LX, LY = calib_bg.to_building(lp.x, lp.y)
         row = {
             "room_id": r["room_id"], "room_tag": r["tag"], "room_name": r["name"], "mode": r["mode"],
             "n_tags_in_region": len(r["tags_inside"]), "other_tags": " | ".join(r["tags_inside"][1:]),
@@ -166,6 +173,9 @@ def build_room_rows(rooms: Sequence[dict], appd: Sequence[AppdPolygon], calib_bg
             "boundary_convention": convention,
             "centroid_x_mm": round(float(X), 0), "centroid_y_mm": round(float(Y), 0),
             "grid_location": cal.grid_location(float(X), float(Y), grid),
+            "centroid_inside_polygon": "yes" if a_poly.contains(c) else "no",
+            "label_point_x_mm": round(float(LX), 0), "label_point_y_mm": round(float(LY), 0),
+            "grid_location_label_point": cal.grid_location(float(LX), float(LY), grid),
             "method_agreement": agree,
             "a_minus_b_pct": "" if b_face_area is None else round(100.0 * (face_area - b_face_area) / max(face_area, 1e-9), 2),
             "appd_caption_m2": "", "appd_annotation_index": "", "appd_overlap_room": "", "appd_overlap_polygon": "",

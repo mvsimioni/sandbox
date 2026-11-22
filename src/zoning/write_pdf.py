@@ -57,6 +57,7 @@ def _pdf_date() -> str:
 
 def _style_annot(doc, annot, name: str, subject: str, contents: str, ocg: int, fill_hex: Optional[str], stroke_rgb,
                  opacity: float, fill_opacity: Optional[float]) -> None:
+    # /CA is always written (also 1 for the opaque legend box and text) so that no annotation relies on a default opacity
     """Set colours, opacity, /Subj, /Contents, /T, /OC and the Bluebeam /FillOpacity on a new annotation."""
     is_text = annot.type[1] == "FreeText"
     if not is_text:
@@ -68,6 +69,7 @@ def _style_annot(doc, annot, name: str, subject: str, contents: str, ocg: int, f
     annot.update()
     if ocg:
         annot.set_oc(ocg)
+    doc.xref_set_key(annot.xref, "CA", "%.2f" % opacity)
     if fill_opacity is not None:
         doc.xref_set_key(annot.xref, "FillOpacity", "%.2f" % fill_opacity)
     doc.xref_set_key(annot.xref, "NM", "(%s)" % name)
@@ -81,13 +83,14 @@ def zone_contents(z: zn.Zone, area_m2: float, polygon_area_m2: float, n_rooms: i
         "Departments: %s" % z.departments,
         "Storey served: L%s (4th storey IP)" % (z.storey_served or "4"),
         "Plant level: %s" % ("L%s" % z.plant_level if z.plant_level else "not stated in tag"),
-        "Area: %.1f m2 (sum of %d assigned rooms); zone polygon %.1f m2" % (area_m2, n_rooms, polygon_area_m2),
+        "Area: %.1f m2 (sum of %d assigned rooms, covering share at least the configured majority); zone polygon drawn %.1f m2" % (area_m2, n_rooms, polygon_area_m2),
         "Room count: %d" % n_rooms,
         "Transfer to this sheet: grid-calibrated, residual %.1f mm" % z.transfer_residual_mm if z.source.startswith("RFI") else "Geometry: App D polygon transferred through the grid calibration, residual %.1f mm" % z.transfer_residual_mm,
+        ("Not drawn here: %.1f m2 of the App D polygon lie inside RFI-ME-0233 zones (the later document governs)" % (z.overlap_removed_m2) if getattr(z, "overlap_removed_m2", 0.0) > 0 else ""),
         "Tag basis: %s%s" % (z.tag_basis, ("; sample wrote %s" % z.sample_tag) if z.sample_tag and z.sample_tag != z.tag else ""),
         "Sources: %s" % " | ".join(z.refs),
     ]
-    return "\n".join(lines)
+    return "\n".join(l for l in lines if l)
 
 
 def layer_name(z: zn.Zone) -> str:
@@ -141,7 +144,7 @@ def write_zoning_pdf(src_pdf: Path, page_index: int, out_pdf: Path, zones: Seque
     for z in zones:
         st = zone_stats.get(z.key, {"area_m2": 0.0, "poly_m2": 0.0, "n_rooms": 0})
         oc = ocg_for(layer_name(z))
-        for k, poly in enumerate(z.polygons_pv):
+        for k, poly in enumerate(z.drawn()):
             pts = list(poly.exterior.coords)[:-1]
             annot = page.add_polygon_annot(_unrot_pts(pts, page))
             name = "zone-%s-%d" % (z.key, k)
@@ -171,7 +174,7 @@ def write_zoning_pdf(src_pdf: Path, page_index: int, out_pdf: Path, zones: Seque
         st = zone_stats.get(z.key, {"area_m2": 0.0, "n_rooms": 0})
         sw = page.add_polygon_annot(_unrot_pts([(x, y + 2), (x + 30, y + 2), (x + 30, y + row_h - 4), (x, y + row_h - 4)], page))
         _style_annot(doc, sw, "legend-swatch-%d" % i, z.tag, "Legend swatch for %s" % z.tag, legend_oc, z.fill_hex, _darker(z.fill_hex), FILL_OPACITY, FILL_OPACITY)
-        label = "%s | %s | %.0f m2" % (z.tag, z.departments if len(z.departments) < 44 else z.departments[:41] + "...", st["area_m2"])
+        label = "%s | %s | zone %.0f m2, rooms %.0f m2 (%d)" % (z.tag, z.departments if len(z.departments) < 40 else z.departments[:37] + "...", st.get("poly_m2", 0.0), st["area_m2"], st.get("n_rooms", 0))
         ft = page.add_freetext_annot(_unrot_rect((x + 36, y, x + col_w - 6, y + row_h), page), label, fontsize=10.5, fontname="helv",
                                      text_color=(0, 0, 0), rotate=90)
         _style_annot(doc, ft, "legend-text-%d" % i, z.tag, label, legend_oc, None, (0, 0, 0), 1.0, None)
@@ -194,6 +197,7 @@ def write_zoning_pdf(src_pdf: Path, page_index: int, out_pdf: Path, zones: Seque
         a.set_border(width=0.5)
         a.update()
         a.set_oc(rooms_oc)
+        doc.xref_set_key(a.xref, "CA", "1.00")
         doc.xref_set_key(a.xref, "NM", "(%s)" % ("room-" + r["room_id"]))
         manifest["rooms"] += 1
     out_pdf = Path(out_pdf)
@@ -261,16 +265,27 @@ def verify_zoning_pdf(out_pdf: Path, src_pdf: Path, page_index: int, expect_tags
             rooms.append(rec)
         else:
             problems.append("unexpected annotation %s (%s)" % (xref, nm))
+    def num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
     for r in zones:
-        if r["type"] != "Polygon" or not r["subject"] or r["fill"] in ("", "null") or r["ca"] != "0.35" and r["ca"] != ".35" or r["fill_opacity"] not in ("0.35", ".35") or not r["oc"]:
+        if r["type"] != "Polygon" or not r["subject"] or r["fill"] in ("", "null") or num(r["ca"]) != FILL_OPACITY or num(r["fill_opacity"]) != FILL_OPACITY or not r["oc"]:
             problems.append("zone annotation incomplete: %s" % r)
     for r in legends:
         if not r["subject"] or not r["oc"]:
             problems.append("legend annotation incomplete: %s" % r)
-        if r["name"].startswith("legend-swatch") and (r["fill"] in ("", "null") or r["fill_opacity"] not in ("0.35", ".35")):
-            problems.append("legend swatch incomplete: %s" % r)
+        if r["name"].startswith("legend-swatch"):
+            if r["fill"] in ("", "null") or num(r["fill_opacity"]) != FILL_OPACITY or num(r["ca"]) != FILL_OPACITY:
+                problems.append("legend swatch incomplete: %s" % r)
+        elif num(r["ca"]) is None:
+            problems.append("legend object without /CA (opacity must be explicit): %s" % r)
+        elif r["name"] == "legend-back" and num(r["fill_opacity"]) is None:
+            problems.append("legend backing without /FillOpacity: %s" % r)
     for r in rooms:
-        if not r["subject"] or not r["oc"]:
+        if not r["subject"] or not r["oc"] or num(r["ca"]) is None:
             problems.append("room annotation incomplete: %s" % r)
     zone_tags = {r["subject"] for r in zones}
     legend_tags = {r["subject"] for r in legends if r["name"].startswith("legend-text")}

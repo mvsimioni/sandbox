@@ -109,7 +109,7 @@ ZONED_HEADER_VOCAB = HEADER_VOCAB | {"rooms", "temperatur", "e,"}
 SPLIT_HEADER_VOCAB = HEADER_VOCAB | {"re", "gime,", "outdo", "or", "hu", "midity", "tem", "perature,", "mo", "de,"}
 # I-CARE (4.8): the first heading is 'AREA / ROOM' and the table sits under a 28 pt 'ACMV' heading with the operating mode
 # ('I-Care - Operation Mode') as its subtitle; used only when neither earlier header is found
-AREA_HEADER_VOCAB = HEADER_VOCAB | {"area", "/"}
+AREA_HEADER_VOCAB = HEADER_VOCAB | {"area", "/", "area/room", "department", "temperatur", "e"}
 NO_CAPTION_PART = "(no caption printed)"
 ZONED_CAPTION_RE = re.compile(r"^Rooms?\s+Part\s*(\d+)(?:\s*[–—\-]\s*(.+))?$", re.I)
 # Zones of the Emergency criteria table.  The table prints no zone column: the zone is the leading words of the room
@@ -259,7 +259,8 @@ def is_gutter(word: Word) -> bool:
 
 
 MONTHS = ("JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE", "JULY", "AUGUST", "SEPTEMBER", "OCTOBER",
-          "NOVEMBER", "DECEMBER")
+          "NOVEMBER", "DECEMBER",
+          "JAN", "FEB", "MAR", "APR", "JUN", "JUL", "AUG", "SEP", "SEPT", "OCT", "NOV", "DEC")   # 'APR 2025', 'JUL 2025', 'AUG 2025' stamps
 
 
 def _follows_month(word: Word, words: Sequence[Word]) -> bool:
@@ -356,13 +357,14 @@ def section_strip(words: Sequence[Word]) -> str:
     return join_words([w for w in words if w.x0 >= 650 and w.y0 < 90 and 14 <= w.size < 26 and not is_gutter(w)])
 
 
-# Files whose standby table prints no title ('Equipment Tag | Area Served | Equipment Standby Configuration' only) and is read as
-# a standby summary.  Healthy Aging p23 prints the same untitled table and stays unparsed, so that department's registers
-# are as released; add its file name here to read it.
-UNTITLED_STANDBY_FILES = ("IGH_DD Booklet_MDU_OCP.pdf",)
+# Files the newer page recognitions do not touch, so that their registers stay as released: the standby table titled
+# 'Equipment Configuration Summary' or untitled, and the criteria table recognised by its header alone (no 'DESIGN
+# CRITERIA' strip or caption).  Healthy Aging p23 (two standby rows) and p25-p26 (an OP operation-mode table in another
+# layout) stay unparsed; remove the file name here to read them.
+FROZEN_LAYOUT_FILES = ("Healthy_Aging_Geriatrics_Section_4.8_Mechanical_Ventilation_Strategy.pdf",)
 
 
-def classify_page(text: str, heading: str = "", section: str = "", untitled_standby: bool = False) -> str:
+def classify_page(text: str, heading: str = "", section: str = "", extended: bool = True) -> str:
     """Class a page from its heading text (whitespace-collapsed).
 
     ``heading`` is the big-type heading (see ``large_heading``).  A page whose heading reads
@@ -383,11 +385,12 @@ def classify_page(text: str, heading: str = "", section: str = "", untitled_stan
         return "pressure regime"            # the title is part of the section strip (MDU OCP: '... STRATEGY | PRESSURE REGIME')
     if re.search(r"DESIGN CRITERIA", flat) or re.search(r"Room conditions\s*[–\-]\s*Part", flat, re.I):
         return "criteria"
-    if re.search(r"AREA\s*/\s*ROOM", flat) and re.search(r"Pressure\s*Regime", flat) \
-            and re.search(r"Afterhours", flat, re.I):        # I-CARE: the table has no 'DESIGN CRITERIA' strip or caption
-        return "criteria"
-    if re.search(r"EQUIPMENT STANDBY CONFIGURATION SUMMARY|EQUIPMENT CONFIGURATION SUMMARY", flat, re.I) \
-            or (untitled_standby and re.search(r"Equipment Tag\s+Area Served\s+Equipment Standby\s+Configuration", flat)):
+    if extended and re.search(r"Pressure\s*Regime", flat) and re.search(r"Single\s*Pass", flat) \
+            and re.search(r"Min\.?\s*Total", flat) and (re.search(r"AREA\s*/\s*ROOM", flat, re.I) or re.search(r"Afterhours", flat, re.I)):
+        return "criteria"       # I-CARE, Pharmacy: the table has no 'DESIGN CRITERIA' strip or 'Room conditions' caption
+    if re.search(r"EQUIPMENT STANDBY CONFIGURATION SUMMARY", flat, re.I) \
+            or (extended and (re.search(r"EQUIPMENT CONFIGURATION SUMMARY", flat, re.I)
+                              or re.search(r"Equipment Tag\s+Area Served\s+Equipment Standby\s+Configuration", flat))):
         return "standby summary"
     if re.search(r"KEYPLAN", flat) or re.search(r"AHU ZONING", flat):
         return "zoning keyplan"
@@ -425,7 +428,7 @@ def parse_pressure(cell: str) -> Tuple[str, str, bool]:
     if t in ("", "-", "NR", "nr", "N/A"):
         return "", "", True
     direction = ""
-    sign_only = re.fullmatch(r"([+\-−–])\s*ve", low)       # '-ve' / '+ve': a direction with no figure (Emergency 4.1.8)
+    sign_only = re.fullmatch(r"(?:slight(?:ly)?\s+)?([+\-−–])\s*ve", low)   # '-ve' / '+ve' / 'SLIGHT +VE': a direction with no figure
     if sign_only:
         return "", ("negative" if sign_only.group(1) != "+" else "positive"), True
     if "neg" in low:
@@ -559,7 +562,7 @@ def parse_yn(cell: str) -> Tuple[str, bool]:
 def parse_rh(cell: str) -> Tuple[str, str, bool]:
     """Return ``(rh_max, rh_min, ok)`` from e.g. 'Max 60%', '40 - 60%', 'NR'."""
     t = clean(cell)
-    if t.upper() in ("", "NR", "-", "N"):       # 'N': no humidity control (Emergency 4.1.8 toilets and dirty utilities)
+    if t.upper() in ("", "NR", "N/R", "-", "N"):       # 'N': no humidity control (Emergency 4.1.8 toilets and dirty utilities)
         return "", "", True
     rng = re.fullmatch(r"(\d+(?:\.\d+)?)\s*%?\s*[–—\-]\s*(\d+(?:\.\d+)?)\s*%?", t)
     if rng:
@@ -578,7 +581,7 @@ def parse_rh(cell: str) -> Tuple[str, str, bool]:
 def parse_temp(cell: str) -> Tuple[str, str, bool]:
     """Return ``(min_c, max_c, ok)`` from '21 - 24', '27', '24+-1', 'NR'."""
     t = clean(cell)
-    if t.upper() in ("", "NR", "-", "N"):       # 'N': no temperature control (Emergency 4.1.8 toilets and dirty utilities)
+    if t.upper() in ("", "NR", "N/R", "-", "N"):       # 'N': no temperature control (Emergency 4.1.8 toilets and dirty utilities)
         return "", "", True
     rng = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(?:°?\s*C)?\s*[–—\-]\s*(\d+(?:\.\d+)?)\s*(?:°?\s*C)?", t)
     if rng:
@@ -684,7 +687,7 @@ def find_header(words: Sequence[Word], vocab: Optional[set] = None) -> Optional[
     ``vocab`` is the set of words a header line may hold (default ``HEADER_VOCAB``; the Emergency 4.1.8 handler
     passes ``ZONED_HEADER_VOCAB``, which also takes the 'Temperatur' / 'e,' wrap of the temperature heading)."""
     vocab = HEADER_VOCAB if vocab is None else vocab
-    room_candidates = [w for w in words if w.text.lower() == "room" and not is_gutter(w)]
+    room_candidates = [w for w in words if w.text.lower() in ("room", "area/room") and not is_gutter(w)]
     all_lines = cluster_lines([w for w in words if not is_gutter(w)])
 
     def is_header_line(line: Sequence[Word]) -> bool:
@@ -800,18 +803,24 @@ def parse_criteria_page(words: List[Word], page_h: float, page_w: float,
     elif not table_part and re.search(r"Room conditions", flat, re.I):
         table_part = "Room conditions (unnumbered)"     # a single table printed without 'Part N' (Dialysis)
     cols = find_header(words, ZONED_HEADER_VOCAB if zoned else None)
+    fallback_header = False
     if cols is None and not zoned:
+        fallback_header = True
         cols = find_header(words, SPLIT_HEADER_VOCAB)       # headings wrapped mid-word (ICU HDU)
         if cols is None:
             cols = find_header(words, AREA_HEADER_VOCAB)    # 'AREA / ROOM' (I-CARE)
-            if cols is not None and not table_part:
-                sub = [ln for ln in cluster_lines([w for w in words if w.y1 <= cols.header_bottom and w.x0 < 735
-                                                   and not is_gutter(w)])
-                       if re.search(r"Operation Mode", join_words(ln), re.I)]
-                if sub:
-                    table_part = clean(re.sub(r"^[•\u2022\s]+", "", join_words(sub[0])))
-        if cols is not None and not table_part:
-            table_part = NO_CAPTION_PART                    # the page prints no 'Room conditions' caption: a source gap
+    if cols is not None and not table_part and not zoned:
+        # no 'Room conditions - Part N' caption: the title above the table names the mode ('I-Care - Operation Mode',
+        # 'Basement 2 Pharmacy - Compounding Lab - Operation Mode', 'OP Level 1 Pharmacy'); none printed: a source gap
+        above = [w for w in words if w.y1 <= cols.header_bottom and w.x0 < 650 and not is_gutter(w)
+                 and w.size >= 18.0 and w.size < 30.0]
+        title_lines = cluster_lines(above)
+        if title_lines:
+            table_part = clean(re.sub(r"^[•\u2022\s]+", "", join_words(title_lines[-1])))
+        if re.fullmatch(r"ACMV", table_part, re.I):
+            table_part = ""
+        if not table_part and fallback_header:
+            table_part = NO_CAPTION_PART             # a layout that prints no caption at all: a source gap, not a failure
     if not table_part:
         failures.append("table caption ('Room conditions') not found")
     if cols is None:
@@ -823,6 +832,13 @@ def parse_criteria_page(words: List[Word], page_h: float, page_w: float,
         if "room" not in cols.clusters or "pressure" not in cols.clusters:
             return [], [], table_part, failures
 
+    room_x0 = cols.clusters.get("room", (0.0, 0.0))[0]
+    dept_hdr = [w for w in words if w.text.upper() == "DEPARTMENT" and w.y1 <= cols.header_bottom + 1.0
+                and w.x0 < 650 and w.cx < room_x0]
+    if dept_hdr:     # a DEPARTMENT column of vertical merged text ('LEVEL B2 - PHARM') left of the room column is not row text
+        edge = (dept_hdr[0].cx + room_x0) / 2.0
+        note_y = find_notes_top(words, cols.header_bottom, page_h)         # the note under the table is not department text
+        words = [w for w in words if not (w.cx < edge and cols.header_bottom - 0.5 <= w.y0 < note_y - 0.5)]
     notes_top = find_notes_top(words, cols.header_bottom, page_h)
     footer_top = page_h       # the footer stamp and page number are already out of ``words`` (see footer_furniture)
     body = [w for w in words if w.y0 >= cols.header_bottom - 0.5 and w.y0 < min(notes_top, footer_top) - 0.5
@@ -973,7 +989,7 @@ def parse_criteria_page(words: List[Word], page_h: float, page_w: float,
             "blank_row": bool(anchor.get("blank_row")),
             "pressure_words": [w for w in anchor["by_col"].get("pressure", [])],
         })
-    notes = foot_notes + parse_notes(words, notes_top, footer_top)
+    notes = foot_notes + (parse_block_note(words, notes_top, footer_top) if notes_top < footer_top else [])
     if zoned is not None:
         zoned["header_text"] = dict(cols.header_text)       # the column headings as printed, for the report
         zoned["header_order"] = list(cols.order)
@@ -1002,7 +1018,7 @@ def find_notes_top(words: Sequence[Word], below_y: float, page_h: float) -> floa
     """Top of the NOTE block: the first line below ``below_y`` that starts with the capitalised
     marker NOTE or NOTE:- (a data cell reading 'note' does not start the block)."""
     for line in cluster_lines([w for w in words if w.y0 > below_y and not is_gutter(w)]):
-        if re.fullmatch(r"NOTES?:?-?", line[0].text) and len(line) <= 2:
+        if (re.fullmatch(r"NOTES?:?-?", line[0].text) and len(line) <= 2) or re.fullmatch(r"Notes?:", line[0].text):
             return min(w.y0 for w in line)
     return page_h
 
@@ -1748,7 +1764,7 @@ def parse_pdf(path: Path, root: Path) -> Dict[str, Any]:
             else:
                 plan_head = []
             strip = section_strip(words)
-            cls = classify_page(page.get_text(), heading_big, strip, path.name in UNTITLED_STANDBY_FILES)
+            cls = classify_page(page.get_text(), heading_big, strip, path.name not in FROZEN_LAYOUT_FILES)
             vision = vision_rows(path.name, pdf_page) if cls == "other" else None
             image_box = None
             if vision:        # a criteria table that is a page-sized image: only the strip is text
@@ -1954,11 +1970,26 @@ def _infer_missing_page_numbers(doc: "pymupdf.Document", result: Dict[str, Any])
                                         if inferred else "; the neighbouring numbers do not fix it")))
 
 
+BOOKLET_NAME_RE = re.compile(r"Booklet|Mechanical[_ ]Ventilation|Section[_ ]\d", re.I)
+
+
+def is_booklet_name(path: Path) -> bool:
+    """The folder also holds other documents ('5. Equipment Schedules (Corr 5).pdf', a register .xlsx); a default run reads
+    only the files named as booklets or as a mechanical ventilation strategy.  A file named with ``--paths`` is always read."""
+    return bool(BOOKLET_NAME_RE.search(path.stem))
+
+
+def skipped_inputs(root: Path) -> List[str]:
+    """Files in the booklet folder that a default run does not read as booklets (name only)."""
+    folder = root / common.load_config().get("paths", {}).get("source", "data/source") / BOOKLET_DIR_NAME
+    return sorted(p.name for p in folder.iterdir() if p.is_file() and not (p.suffix.lower() == ".pdf" and is_booklet_name(p)))
+
+
 def collect_inputs(paths: Optional[Sequence[str]], root: Path) -> List[Path]:
     """Files named by ``--paths`` (directories are searched for PDFs); default: the booklet folder."""
     if not paths:
         folder = root / common.load_config().get("paths", {}).get("source", "data/source") / BOOKLET_DIR_NAME
-        return sorted(folder.glob("*.pdf"))
+        return [p for p in sorted(folder.glob("*.pdf")) if is_booklet_name(p)]
     found: List[Path] = []
     for item in paths:
         p = Path(item)
@@ -2352,6 +2383,176 @@ def _corrections_section_2(results: List[Dict[str, Any]]) -> List[str]:
     return L
 
 
+RELEASED_DEPARTMENTS = ("Dialysis", "Emergency", "Healthy Aging Geriatrics", "IP FAST", "IP SURGICAL", "ISO AH", "Paeds",
+                        "Palliative", "Psych Med")
+
+
+def _folder_update_section(results: List[Dict[str, Any]]) -> List[str]:
+    """The extracts added to the folder after the first nine: what each holds, what is read and what is not.  Counts are
+    taken from this run; the descriptions of the layouts were read from the words and confirmed on the rendered pages."""
+    new = [r for r in results if r["department"] not in RELEASED_DEPARTMENTS]
+    if not new:
+        return []
+    by = {r["source_file"].rsplit("/", 1)[-1]: r for r in new}
+    L: List[str] = ["## Folder update: extracts added after the first nine", ""]
+    try:
+        skipped = skipped_inputs(common.project_root())
+    except Exception:  # noqa: BLE001 - the report must not fail on a folder listing
+        skipped = []
+    L += ["A plain `python3 -m src.booklet48_parser run` reads every PDF in the booklet folder whose name marks it as a booklet "
+          "(`is_booklet_name`: `Booklet`, `Mechanical Ventilation` or `Section N`); this report and the registers come from such a "
+          "run over %d files (nine released extracts and %d added)." % (len(results), len(new)), ""]
+    if skipped:
+        L += ["Files in the folder that a default run does not read as booklets: %s. The first is an equipment schedule (read by "
+              "the equipment schedule parsers, not here) and the second is a spreadsheet; neither is a section 4.8 booklet." % (
+                  "; ".join("`%s`" % n for n in skipped)), ""]
+    L += ["| Department | Pages | Criteria rows | Failed fields | Standby rows | Zoning labels | Pressure labels | Room data rows | Reviewer notes |",
+          "|---|---|---|---|---|---|---|---|---|"]
+    for r in new:
+        L.append("| %s | %d | %d | %d | %d | %d | %d | %d | %d |" % (
+            r["department"], len(r["pages"]), len(r["criteria"]), len(r["failures"]) + len(r["page_failures"]),
+            len(r["standby"]), len(r["zoning"]), len(r["pressure"]), len(r["room_data"]), len(r["notes"])))
+    L.append("")
+    L += ["The nine released extracts are unchanged: every register row of each of them is identical to the previous run "
+          "(compared field by field, all seven registers).", ""]
+
+    def part(name: str):
+        return by.get(name)
+
+    icu = part("ICU_HDU_Section_4.8_Mechanical_Ventilation_Strategy.pdf")
+    if icu:
+        L += ["### ICU HDU", "",
+              "- Criteria (PDF p6, booklet p. 139): the table prints **no caption** and every heading wraps mid-word in its cell (`Pressure Re` / "
+              "`gime, Pa`, `Min. Outdo` / `or ACH`, `Relative Hu` / `midity`, `Design Tem` / `perature, C`, `Setback mo` / `de, Y/N`). "
+              "The header is found by a second vocabulary (`SPLIT_HEADER_VOCAB`) used only when the usual one fails, so no other file "
+              "reads differently; `table_part` is `%s` (a source gap, not a failure). %d rows, as on the render. Single Pass `N/R` is stored as `NR`; "
+              "`≤60` and `≤65` give the maximum." % (NO_CAPTION_PART, len(icu["criteria"])),
+              "- Two rows print an **unsigned** pressure: `ICU Bedroom (PP ISO)` `30` and the second `Anteroom (NEP ISO)` `15` (the room name is "
+              "printed `NEP ISO` twice, as in the source). The cell carries no sign and the parser does not take one from the room name, so the "
+              "figure is a failed field (`pressure_pa` blank, confidence 0.72). The names suggest positive-pressure isolation, the rows above "
+              "print -30 and -15 for `NEP ISO`; the owner should confirm +30 and +15.",
+              "- Standby (p7 to p9): the pages are titled `Equipment Configuration Summary Level N (Part K)`, which the standby class did not know, "
+              "and two tags are printed with a `/` suffix (`AHU-B-07-04ICU-01/02C`), which the tag pattern did not accept, so the reader "
+              "fell back to a column split that put the first words of the Area cell into the tag. `STANDBY_TAG_RE` takes the suffix. %d rows, "
+              "every tag whole. The level is in the page title, not in a column, so `level_wing_heading` is blank (as for Emergency)."
+              % len(icu["standby"]),
+              "- Plans: p10 to p13 AHU zoning keyplans, p14 to p19 pressure regime plans (BAU level 4, HOT level 4, BAU/HOT level 5; the heading is "
+              "24 pt at the top left, not the 28 pt of the other booklets, so these six pages were read as zoning keyplans until `plan_heading_words` "
+              "was added), p20 to p23 MODE OF VENTILATION keyplans. The keyplan labels `AHU-B-07-05ICUISO-02A/B`, `-03A/B` and `AHU-B-07-04ICUISO-01 A/B` "
+              "are recorded as room labels, like the ISO AH pair labels.", ""]
+    ic = part("IGH_DD Booklet_I-CARE_BATCH 1_R.pdf")
+    if ic:
+        L += ["### IGH I-CARE BATCH 1", "",
+              "- Criteria (p5, p6): the first heading is `AREA / ROOM`, the temperature heading has no unit, and the table sits under a 28 pt `ACMV` "
+              "heading with an orange subtitle `I-Care – Operation Mode`, which is the mode and is carried as `table_part`. There is no `DESIGN CRITERIA` "
+              "strip, so the page is recognised by its header (`AREA / ROOM`, `Pressure Regime`, `Single Pass`, `Min. Total`). %d rows (11 + 11)." % len(ic["criteria"]),
+              "- Afterhours reads `24 hrs AC` on four rows (Clean Utility, Med Room, Procedure Room, Treatment Room - Large). It is not a Y/N flag; the "
+              "words are kept as printed in `afterhours` (and in `raw_cells`). A decision for the owner (below).",
+              "- Standby (p7): %d rows. Eight `FCU-A-7-NN/20` tags are stacked in one cell over one Area and one configuration, so each tag is a row with "
+              "the same area, as for the duty and standby pairs of Emergency. Plans: OP 5th storey keyplans p8 to p11 and p14 to p15, pressure regime p12 and p13." % len(ic["standby"]), ""]
+    md_ = part("IGH_DD Booklet_MDU_OCP.pdf")
+    if md_:
+        L += ["### IGH MDU OCP", "",
+              "- Most pages of this file are **images**: p3 and p4 (the criteria, `Medical Day Unit – Operation Mode`, with a merged vertical `MDU` "
+              "department cell) have only the section strip and the footer as text, so the text layer holds no table. There is no OCR in the project, "
+              "so the 17 rows (11 on p3, 6 on p4) were **keyed in by eye** from the page render at 1568 px and checked against a zoomed crop of the lower half "
+              "of p3; they sit in `src/booklet48_vision_rows.json`, are read only for a page with no text-layer table, go through the same "
+              "normalisers as every other cell, and carry confidence 0.80 and `read_by` in `raw_cells`. The page map says `image page, cells keyed in by eye`.",
+              "- p1 is a reference page (MOH guide table and GreenGov.Sg text, image); p5 to p7 are the standby configuration types A to I (diagrams); "
+              "p9 and p10 are AHU zoning plans that are images, so `keyplan title not found` is reported with the reason (no room or tag labels can be read; the "
+              "render of p9 shows tag `AHU-A-10-03/04` and the title `OP 8TH STOREY - KEYPLAN`, which are not in the registers). p8 is the standby table "
+              "with no title (%d rows: `AHU-A-10-03/04` twice, CONFIG-D and CONFIG-F). "
+              "p11 is a pressure regime plan whose title is in the section strip (`... | PRESSURE REGIME`); p15 a room data table (%d row)." % (
+                  len(md_["standby"]), len(md_["room_data"])), ""]
+    rm = part("Rehab_Med_Combined_Mechanical_Ventilation_Strategy.pdf")
+    if rm:
+        secs = sorted({p["section"] for p in rm["pages"] if p.get("section")})
+        L += ["### Rehab Med Combined", "",
+              "- One file holds **two sections** (strip `%s`: PDF p1 to p26 and p27 to p43, booklet p. 115 to 140 and 205 to 221), each with the same Part 1 and Part 2 "
+              "criteria tables (14 + 6 rows), standby, pressure regime and keyplan pages; the reviewer comments differ between the two. The rows of both parts are in "
+              "`criteria.csv` (%d rows); `pdf_page` and the page map (`section 4.1.8` / `section 4.2.8`) tell them apart. The standard handlers read these pages; the only addition is the section in the page map." % (
+                  "`, `".join(secs), len(rm["criteria"])),
+              "- p11 to p13 and p38 to p40 (`EQUIPMENT STANDBY CONFIGURATION PART 1 to 3`) are diagrams of the configuration types, not a table (class `other`). "
+              "Standby rows (p14, p41): %d, with no tag column and a `Level N wing` heading." % len(rm["standby"]), ""]
+    di = part("20250819_IGH_DD Booklet_DI_Signed_All_AH.pdf")
+    if di:
+        L += ["### IGH DI Signed All AH (diagnostic imaging)", "",
+              "- %d criteria rows: IP DI p2 to p4 (63) and OP DI p11 to p13 (30). The IP table prints `NA` under Afterhours and Setback (`NA` is accepted), `SS 553` under Min. "
+              "Outdoor ACH (the figure is by reference to the Singapore Standard; `min_oa_ach` is blank and the words stay in `raw_cells`) and `No (c/w Air Purging)` under "
+              "Single Pass (stored as `N`, words kept). `Non-Recirculating` is stored as `Y`, as for Emergency. The pages are laid out with the section strip about 40 pt further "
+              "left than in the other booklets; the strip is now read from x = 650 pt instead of 735 pt." % len(di["criteria"]),
+              "- **Left as a failed field**: OP DI p13 `Toilet` prints `20` under Single Pass, `NR` under Air Class and `3` under Filter (the values of the cells to the right appear "
+              "shifted by one column in the source; Min. Total ACH is `20`). It is read as printed and Single Pass `20` is the one failed field of the file.",
+              "- Three OP DI rows are struck through by a reviewer and keep their values at confidence 0.50: p12 `Treatment Room`, p12 `Nurse Assessment` (comment: `Not DI but Breast Clinic`) and "
+              "p13 `Patient Education`. Reviewer comments are linked to the row where their arrow ends: the p2 comment `Why is Ultrasound and U/S Procedure +ve?` therefore sits on `Toilet` (the arrow "
+              "ends on that row) although it refers to the circled `+ve` cells of `Ultrasound` and `Ultrasound Procedure`.",
+              "- p5 to p8 carry the headings `AHU ZONING IP DIAGNOSTIC IMAGING` and `PRESSURE REGIME` under a stale strip (`4.1 DEPARTMENT LAYOUT PLAN`); a plan headed so is now read as such "
+              "(`classify_page`), while a page of another section without such a heading stays `other`.", ""]
+    ot = part("IGH_DD Booklet_ORTHO_BATCH 1.pdf")
+    if ot:
+        L += ["### IGH ORTHO BATCH 1", "",
+              "- Same layout as I-CARE (`Ortho – Operation Mode`): %d rows (10 + 9), %d standby rows, keyplans p4 and p5, pressure regime p6. No failed field." % (
+                  len(ot["criteria"]), len(ot["standby"])), ""]
+    ph = part("IGH_DD Booklet_Pharmacy_BATCH 2_New signed.pdf")
+    if ph:
+        L += ["### IGH Pharmacy BATCH 2 (New signed)", "",
+              "- %d criteria rows: p4 (Basement 2 Pharmacy, 10), p7 to p10 (Compounding Lab: operation mode and setback modes 1 to 3, 9 rows each; the table has "
+              "**no Afterhours and no Setback columns**, which is reported per page as `header columns not found: afterhours, setback` and is not a missing value), p16 (OP Level 1, 10) and p17 (1). "
+              "Pressure is printed `SLIGHT +VE`, `SLIGHTLY +VE`, `SLIGHTLY -VE` and `NEUTRAL` (a direction, no figure) and Single Pass, Relative Humidity and Temperature `N/R` (all accepted as not required). "
+              "p4 has a `DEPARTMENT` column of vertical merged text (`LEVEL B2 – PHARM`, `B 1`) that is not read as row text and is not carried (no column for it); "
+              "p9 and p10 end with an unnumbered paragraph that starts `Note:`, recorded as a note, not as a row." % len(ph["criteria"]),
+              "- **Not read as tables** (class `other`): p1 and p2 (`Overall AHU Zoning & Redundancy`), p3 and p6 (`Pressure Regime Overview`), p5 (`Compounding Lab – Design Parameter`: grade C and D text and a "
+              "`Ramp-Down Strategies` table of modes) and p11 (`Cleanroom Data`). They hold plans, text and tables of another kind. Their reviewer comments are in `criteria_notes.csv`.", ""]
+    dc = part("20250804_IGH_DD Booklet_Data Centre R2_Markup.pdf")
+    if dc:
+        L += ["### IGH Data Centre R2 Markup", "",
+              "- **Nothing is read from the text layer**: all %d pages are images with no text (the section strip, the footer and the page number are in the picture), so the page numbers "
+              "are not available either and each page is listed as `the page has no text layer`. Two pages were viewed on the render: PDF p1 (booklet p. 85, `MODE OF VENTILATION`, "
+              "Primary and Secondary Server Room, colour legend AC / AC (24HR) / HC / MV / N.A / NV) and PDF p6 (booklet p. 90, `IP BASEMENT 2 - KEYPLAN`, tags `FCU-B-B2-PSR-01A/B` to `-04A/B` and "
+              "`CRAC-B-B2-01A/B`). The %d reviewer annotations are recorded in `criteria_notes.csv`." % (
+                  len(dc["pages"]), len(dc["notes"])), ""]
+    return L
+
+
+def _corrections_section_3(results: List[Dict[str, Any]]) -> List[str]:
+    """Corrections made after the third independent verification (figures are taken from this run)."""
+    by = {r["department"]: r for r in results}
+    if "Emergency" not in by:
+        return []
+    ssc = [(r["pdf_page"], r["booklet_page"]) for r in by["Emergency"]["criteria"] if r["room_type_as_printed"] == "Staff Support Corridor"]
+    iso = [z["text"] for z in by.get("ISO AH", {}).get("zoning", []) if z["label_kind"] == "room_label" and z["text"].endswith("-1A/B")]
+    ha = [z["text"] for z in by.get("Healthy Aging Geriatrics", {}).get("zoning", []) if z["label_kind"] == "room_label"
+          and re.match(r"^AHU-A-10-01/04$", z["text"])]
+    L: List[str] = ["", "## Corrections after verification (3)", "",
+                    "The third independent verification (`out/qa/verify/booklet48_parser_verify_3.md`) checked 24 claims about the Emergency 4.1.8 handler, the `zone` column and "
+                    "the Paeds fixes: all 24 confirmed in substance, with one wording refuted. The values were right. What changed:", "",
+                    "| Finding | Change | Result in this run |", "|---|---|---|",
+                    "| The ISO AH and Healthy Aging keyplan pair labels were described as `...-01A/B` | Wording corrected in the Emergency section above: the ISO AH labels read `-1A/B` and the Healthy Aging label is a range. "
+                    "Behaviour is unchanged (they stay room labels). | ISO AH: %d label rows (%s); Healthy Aging: %d label row (`AHU-A-10-01/04`). |" % (
+                        len(iso), ", ".join(sorted(set("`%s`" % t for t in iso))), len(ha)),
+                    "| The four new PDFs (ICU_HDU, IGH I-CARE BATCH 1, IGH MDU_OCP, Rehab_Med_Combined) were not parsed, and the header named a plain `run` that would now take more files | They are parsed with the existing handlers plus the layout "
+                    "additions listed in the folder update above; four more extracts arrived while this was being done (DI Signed All AH, Ortho, Pharmacy, Data Centre) and are in the same run. "
+                    "`python3 -m src.booklet48_parser run` is the command that produced this report; it now skips files that are not booklets. | %d files, %d departments; see the folder update. |" % (
+                        len(results), len(results)),
+                    "| `Staff Support Corridor` is printed on both p4 and p5 with the same values and appears twice in `criteria.csv` | Noted; it is kept twice because it is printed twice. | PDF pages %s: both `Neutral`, 6 ACH, single pass `N`, MERV 15. |" % (
+                        " and ".join("%s (booklet p. %s)" % t for t in ssc) or "n/a"),
+                    "| `test_zone_column_is_blank_for_other_departments_and_signed_pressure_is_kept` checked only the column order | The test now also parses a standard table and checks that every zone is blank and that `-15 Pa` keeps its sign; "
+                    "a second test (`test_zone_is_blank_and_pa_is_signed_on_a_standard_table`) covers a split sign. No assertion was removed. | 2 tests. |",
+                    "| Paeds cross-check: a reader of the cell rectangles matched 240 of 242 cells | The two other cells are not parser errors: the text-layer word `Neutral` on the `Interview Room` row spans x 161 to 318, so its centre falls in the Room column for a reader "
+                    "that assigns words by centre; the parser reads it by the value line and the render shows `Neutral` under Pressure, as `criteria.csv` has it. | No change. |", ""]
+    L += ["### Owner decisions still open", "",
+          "These are interpretations the booklets do not settle; each is implemented as stated and each keeps the printed text beside the normalised value.", "",
+          "- Emergency: `Non-Recirculating` is stored as single pass `Y`; `FEVER / RESUS NP` is read as zone `FEVER`; P2 rooms with no sub-zone are read as zone `P2`; the green cells on part 6 are not interpreted. "
+          "The same `Non-Recirculating` reading is used for the DI extract.",
+          "- I-CARE, Ortho, Pharmacy: Afterhours `24 hrs AC` is kept as printed in the Afterhours field (it is neither Y nor N).",
+          "- DI: Min. Outdoor ACH `SS 553` is stored as blank with the words in `raw_cells`; Single Pass `No (c/w Air Purging)` is stored as `N`; Afterhours and Setback `NA` are stored as `NA`.",
+          "- ICU HDU: the unsigned `30` and `15` on the PP ISO rows are left as failed fields (the sign is not printed).",
+          "- MDU OCP p3 and p4: 17 rows keyed in by eye from images (confidence 0.80); they should be checked against the source before use.",
+          "- Healthy Aging p23 (two standby rows) and p25 to p26 (an OP operation-mode table) stay unparsed so that the department's registers are unchanged; `FROZEN_LAYOUT_FILES` names the file, "
+          "and removing it from that list reads them.", ""]
+    return L
+
+
 def n_is_table_note1(n: Dict[str, Any]) -> bool:
     return n["note_kind"] == "table note" and n["note_number"] == "1"
 
@@ -2500,9 +2701,10 @@ def _emergency_section(results: List[Dict[str, Any]]) -> List[str]:
               sum(len(r["standby"]) for r in emer), sum(len(r["pressure"]) for r in emer)), "",
           "Three parsers are shared by all files and changed: `-ve` / `+ve` give a direction, a relative humidity or temperature of `N` "
           "gives blank values, and `≤65` gives a maximum; no cell of another file reads differently (the comparison above found no change). Pages of other files whose page number is "
-          "genuinely absent are source gaps (above). The `ISO AH` and `Healthy Aging` keyplans also carry labels of the form "
-          "`...-01A/B` that are recorded as room labels, not tags, because the pair pattern is limited to the Emergency file; that "
-          "is left unchanged here and is worth a decision.", ""]
+          "genuinely absent are source gaps (above). The `ISO AH` and `Healthy Aging` keyplans also carry pair labels that are "
+          "recorded as room labels, not tags, because the pair pattern is limited to the Emergency file: the ISO AH labels read "
+          "`AHU-B-18-19ISOLNWWG-1A/B` and `AHU-B-18-19ISOLSWWG-1A/B` (`-1A/B`, 4 label rows over four pages), and the Healthy Aging "
+          "label is `AHU-A-10-01/04` (a range, not an A/B pair; 1 label row). That is left unchanged here and is worth a decision.", ""]
     L += ["### Parsing decisions to confirm (Emergency)", "",
           "- `Non-Recirculating` is stored as single pass `Y`. The same page prints `Y` for P2 North patient bays in pandemic mode and "
           "`Non-Recirculating` for P2 South NP and CAC rows, which suggests the same meaning, but the booklet does not say so.",
@@ -2668,6 +2870,8 @@ def build_report(results: List[Dict[str, Any]], notes_all: List[Dict[str, Any]])
     L += compare_departments(results)
     L += _corrections_section(results)
     L += _corrections_section_2(results)
+    L += _folder_update_section(results)
+    L += _corrections_section_3(results)
     return "\n".join(L).rstrip() + "\n"
 
 

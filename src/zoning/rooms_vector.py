@@ -82,32 +82,81 @@ def snap_dangling(seg: np.ndarray, tol: float = SNAP_TOL_PT) -> np.ndarray:
     return np.asarray(out, float).reshape(-1, 4)
 
 
-def door_closers(arcs: Sequence[lw.Arc], wall_lines: np.ndarray) -> Tuple[np.ndarray, List[dict]]:
+DOUBLE_DOOR_TIP_PT = 1.5     # the two leaves of a double door close on one point: arc ends this close are one closed position
+LEAF_LATERAL_PT = 0.7        # a fine-pen line within this distance of the hinge-to-arc-end line, along it, is the drawn open leaf
+LEAF_COVER_MIN = 0.7
+LEAF_MIN_LEN_PT = 3.0
+
+
+def door_closers(arcs: Sequence[lw.Arc], wall_lines: np.ndarray, leaf_lines: Optional[np.ndarray] = None) -> Tuple[np.ndarray, List[dict]]:
     """Closing segments for door openings, one per door-swing arc.
 
-    The hinge is the arc centre; the closed-leaf position is the arc end that lies on the wall line.  Both radii
-    (hinge to either arc end) are candidates; the one whose two ends are nearer to wall strokes is the opening.
-    Returns the segments and a diagnostic row per arc.
+    The hinge is the arc centre and the closed-leaf position is one of the two arc ends.  Which one:
+
+    1. *Double door*: when the arc end of one arc coincides (``DOUBLE_DOOR_TIP_PT``) with an end of another arc of similar radius whose hinge is
+       elsewhere, the two leaves close on that point (the middle of the opening): each closer runs from its hinge to it.
+    2. *Drawn open leaf*: the open leaf is drawn as a fine-pen line (often a thin rectangle) from the hinge to the open end of the arc.  When
+       exactly one end carries such a line (``leaf_lines``), the other end is the closed position.  Without this a leaf lying along a partition
+       is taken for the closed position and the opening stays open.
+    3. Otherwise the end that, with the hinge, is nearer to wall strokes.
+
+    The door is *closed* (a closer is returned) when the hinge, and for single doors the closed end, lie within ``DOOR_SNAP_TOL_PT`` of a wall
+    stroke.  Returns the segments and a diagnostic row per arc.
     """
     tree = STRtree(wall_lines)
+    leaf_tree = STRtree(leaf_lines) if leaf_lines is not None and len(leaf_lines) else None
+    n = len(arcs)
+    dh = [_nearest_dist(tree, wall_lines, shapely.points(a.cx, a.cy)) for a in arcs]
+    ends = [(a.p0, a.p1) for a in arcs]
+    dp = [[_nearest_dist(tree, wall_lines, shapely.points(p[0], p[1])) for p in e] for e in ends]
+    tip: List[Optional[Tuple[float, float]]] = [None] * n
+    how = [""] * n
+    # 1. double doors: coincident arc ends
+    for i, a in enumerate(arcs):
+        if dh[i] > DOOR_SNAP_TOL_PT:
+            continue
+        for k, b in enumerate(arcs):
+            if k == i or dh[k] > DOOR_SNAP_TOL_PT or abs(a.r - b.r) > 0.25 * max(a.r, b.r):
+                continue
+            if math.hypot(a.cx - b.cx, a.cy - b.cy) <= 2.0 * DOUBLE_DOOR_TIP_PT:
+                continue
+            for pa in ends[i]:
+                for pb in ends[k]:
+                    if math.hypot(pa[0] - pb[0], pa[1] - pb[1]) <= DOUBLE_DOOR_TIP_PT:
+                        # both leaves close on the mean of the two fitted ends, so the two closers meet at exactly one point
+                        # (a gap of 0.02 pt between them would leave the opening unsealed in the polygonisation)
+                        tip[i], how[i] = ((pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0), "double door"
+    # 2. drawn open leaf, 3. nearer to walls
+    for i, a in enumerate(arcs):
+        if tip[i] is not None:
+            continue
+        leaf = [False, False]
+        if leaf_tree is not None:
+            for e, pe in enumerate(ends[i]):
+                ln_ = math.hypot(pe[0] - a.cx, pe[1] - a.cy)
+                if ln_ < 1e-6:
+                    continue
+                ux, uy = (pe[0] - a.cx) / ln_, (pe[1] - a.cy) / ln_
+                ext = 0.4        # the drawn leaf may start or stop a few tenths of a point short of or beyond the circle fit
+                axis = shapely.linestrings([[a.cx - ext * ux, a.cy - ext * uy], [pe[0] + ext * ux, pe[1] + ext * uy]])
+                hit = leaf_tree.query(shapely.buffer(axis, LEAF_LATERAL_PT, cap_style="flat"), predicate="contains")
+                covered = float(sum(shapely.length(leaf_lines[h]) for h in hit))
+                leaf[e] = covered >= LEAF_COVER_MIN * ln_
+        if leaf[0] != leaf[1]:
+            tip[i], how[i] = (ends[i][1], "open leaf drawn") if leaf[0] else (ends[i][0], "open leaf drawn")
+        else:
+            e = 0 if dp[i][0] <= dp[i][1] else 1
+            tip[i], how[i] = ends[i][e], "nearer to walls"
     closers: List[Tuple[float, float, float, float]] = []
     diag: List[dict] = []
-    for a in arcs:
-        hinge = shapely.points(a.cx, a.cy)
-        best = None
-        for p in (a.p0, a.p1):
-            pp = shapely.points(p[0], p[1])
-            dh = _nearest_dist(tree, wall_lines, hinge)
-            dp = _nearest_dist(tree, wall_lines, pp)
-            score = dh + dp
-            if best is None or score < best[0]:
-                best = (score, p, dh, dp)
-        score, p, dh, dp = best
-        ok = dh <= DOOR_SNAP_TOL_PT and dp <= DOOR_SNAP_TOL_PT
-        diag.append({"cx": a.cx, "cy": a.cy, "r_pt": a.r, "span_deg": a.span_deg, "closed": bool(ok),
-                     "hinge_to_wall_pt": dh, "tip_to_wall_pt": dp})
-        if ok:
-            closers.append((a.cx, a.cy, p[0], p[1]))
+    for i, a in enumerate(arcs):
+        e = 0 if math.hypot(tip[i][0] - ends[i][0][0], tip[i][1] - ends[i][0][1]) <= math.hypot(tip[i][0] - ends[i][1][0], tip[i][1] - ends[i][1][1]) else 1
+        d_tip = dp[i][e]
+        closed = bool(dh[i] <= DOOR_SNAP_TOL_PT and (d_tip <= DOOR_SNAP_TOL_PT or how[i] == "double door"))
+        diag.append({"cx": a.cx, "cy": a.cy, "r_pt": a.r, "span_deg": a.span_deg, "closed": closed,
+                     "hinge_to_wall_pt": dh[i], "tip_to_wall_pt": d_tip, "double_door": how[i] == "double door", "tip_rule": how[i]})
+        if closed:
+            closers.append((a.cx, a.cy, tip[i][0], tip[i][1]))
     return np.asarray(closers, float).reshape(-1, 4), diag
 
 
@@ -117,7 +166,7 @@ def _nearest_dist(tree: STRtree, lines: np.ndarray, pt) -> float:
 
 
 def build_wall_segments(ss: lw.StrokeSet, widths: Sequence[float], include_arcs: bool = True,
-                        arcs: Optional[Sequence[lw.Arc]] = None) -> Tuple[np.ndarray, dict]:
+                        arcs: Optional[Sequence[lw.Arc]] = None, leaf_widths: Sequence[float] = (0.24, 0.36, 0.48)) -> Tuple[np.ndarray, dict]:
     """Wall segments for the chosen widths plus door closers and snap connectors; returns (segments, diagnostics)."""
     mask = ss.select(widths)
     base = ss.seg[mask]
@@ -127,7 +176,9 @@ def build_wall_segments(ss: lw.StrokeSet, widths: Sequence[float], include_arcs:
     parts = [base]
     if include_arcs:
         arcs = arcs if arcs is not None else lw.detect_door_arcs(ss)
-        cl, door_diag = door_closers(arcs, lines)
+        fine = ss.seg[ss.select(leaf_widths)]
+        fine = fine[np.hypot(fine[:, 2] - fine[:, 0], fine[:, 3] - fine[:, 1]) >= LEAF_MIN_LEN_PT]
+        cl, door_diag = door_closers(arcs, lines, segments_to_lines(fine) if len(fine) else None)
         # join each closer end to the wall when it does not touch it
         diag["n_arcs"] = len(arcs)
         diag["n_doors_closed"] = int(len(cl))
@@ -302,8 +353,31 @@ def _boundary_samples(face: Polygon) -> np.ndarray:
 BLOB_MAX_M2 = 150.0
 
 
+WALL_FILL_MAX_LUMINANCE = 0.2   # filled shapes at most this bright (black, near black) are wall bands, not furniture or hatch
+BAND_COVER_MIN = 0.5            # a face at least this covered by wall-band fill is wall, never room
+WALL_FILL_MIN_PT2 = 4.0
+
+
+def wall_fill_polygons(fills: Sequence[dict]) -> List[Polygon]:
+    """Filled shapes of the page that are drawn as wall bands: black or near-black fills (the partition walls drawn as a
+    dark band between two outline strokes).  Grey fills (columns, shafts) and light fills (hatches) are not wall bands."""
+    out: List[Polygon] = []
+    for f in fills:
+        rgb = f["rgb"]
+        if 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2] > WALL_FILL_MAX_LUMINANCE:
+            continue
+        pts = f["pts"]
+        if len(pts) < 3:
+            continue
+        g = Polygon(pts).buffer(0)
+        if g.is_empty or g.area < WALL_FILL_MIN_PT2:
+            continue
+        out.extend(list(g.geoms) if g.geom_type == "MultiPolygon" else [g])
+    return out
+
+
 def merge_small_faces(polys: Sequence[Polygon], tags: Sequence[dict], wall_lines: np.ndarray,
-                      area_scale_m2_per_pt2: float) -> Tuple[List[Polygon], dict]:
+                      area_scale_m2_per_pt2: float, wall_bands: Optional[Sequence[Polygon]] = None) -> Tuple[List[Polygon], dict]:
     """Merge furniture, door-swing, finish and stair-tread faces back into the room they sit in.
 
     The faces come from noding every black line (heavy wall strokes and the fine-pen furniture, door leaves and
@@ -312,7 +386,8 @@ def merge_small_faces(polys: Sequence[Polygon], tags: Sequence[dict], wall_lines
     heavy-wall line (``wall_lines``, an array of shapely lines) is within 0.45 pt, so wall-thickness faces (bounded by heavy
     strokes) are never candidates.  Candidates that touch each other through fine-pen boundary form blobs (a row of
     treads); a blob of at most 150 m2 is merged into the non-candidate face (a tagged room, a bigger space) with which it
-    shares the most fine-pen boundary.  A heavy wall is never dissolved.
+    shares the most fine-pen boundary.  A heavy wall is never dissolved, and neither is a wall band: a small tagless face that is
+    at least half covered by black wall-band fill (``wall_bands``) is wall, so the room boundary is the band's inner edge.
     """
     faces = list(polys)
     wall_tree = STRtree(wall_lines)
@@ -324,8 +399,17 @@ def merge_small_faces(polys: Sequence[Polygon], tags: Sequence[dict], wall_lines
         has_tag[np.unique(li)] = True
     area = shapely.area(faces) * area_scale_m2_per_pt2
     is_cand = np.zeros(len(faces), bool)
+    is_band = np.zeros(len(faces), bool)
+    band_tree = STRtree(list(wall_bands)) if wall_bands else None
     thin_pts: Dict[int, np.ndarray] = {}
     for i in np.where((~has_tag) & (area < FLIGHT_MAX_M2))[0]:
+        if band_tree is not None:
+            hit = band_tree.query(faces[i], predicate="intersects")
+            if len(hit):
+                cover = sum(faces[i].intersection(wall_bands[h]).area for h in hit)
+                if cover >= BAND_COVER_MIN * faces[i].area:
+                    is_band[i] = True
+                    continue
         sp = shapely.points(_boundary_samples(faces[i]))
         near_wall = np.zeros(len(sp), bool)
         qi, _ = wall_tree.query(sp, predicate="dwithin", distance=WALL_NEAR_PT)
@@ -371,7 +455,7 @@ def merge_small_faces(polys: Sequence[Polygon], tags: Sequence[dict], wall_lines
         score: Dict[int, int] = defaultdict(int)
         for m in members:
             for j, c in adj.get(m, {}).items():
-                if not is_cand[j]:
+                if not is_cand[j] and not is_band[j]:
                     score[j] += c
         if not score:
             n_blobs_unplaced += 1
@@ -390,7 +474,7 @@ def merge_small_faces(polys: Sequence[Polygon], tags: Sequence[dict], wall_lines
             u = shapely.union_all([faces[m] for m in members])
             new_faces.extend(list(u.geoms) if u.geom_type == "MultiPolygon" else [u])
     return new_faces, {"merged_faces": int(len(target_of)), "faces_after": len(new_faces), "n_candidate_faces": int(is_cand.sum()),
-                       "n_blobs": len(blobs), "n_blobs_unplaced": n_blobs_unplaced}
+                       "n_blobs": len(blobs), "n_blobs_unplaced": n_blobs_unplaced, "n_wall_band_faces": int(is_band.sum())}
 
 
 # --------------------------------------------------------------------------- #
@@ -481,8 +565,9 @@ class VectorResult:
     faces: List[Polygon]
     wall_gaps_pt: np.ndarray
     wall_segments: np.ndarray       # heavy strokes + door closers + bridges + snaps (the "W" set)
-    thin_segments: np.ndarray
+    thin_segments: np.ndarray       # fine pens without the swing arcs of the closed doors
     diagnostics: dict
+    wall_bands: List[Polygon] = field(default_factory=list)   # black filled wall bands (page-view pt)
 
 
 def measure_rooms(ss: lw.StrokeSet, tags: Sequence[dict], area_scale_m2_per_pt2: float,
@@ -504,12 +589,21 @@ def measure_rooms(ss: lw.StrokeSet, tags: Sequence[dict], area_scale_m2_per_pt2:
     sn = snap_dangling(wseg, SNAP_TOL_PT)
     diag["n_bridge_snap_connectors"] = int(len(sn))
     wseg = np.concatenate([wseg, sn])
-    thin = ss.seg[ss.select(thin_widths)]
+    thin_mask = ss.select(thin_widths)
+    # the swing arcs of the doors that were closed are not room boundaries: the swing sector belongs to the room it opens into
+    closed_arcs = [a for a, dd in zip(arcs, wdiag.get("door_diag", [])) if dd["closed"]]
+    arc_idx = np.asarray([i for a in closed_arcs for i in a.seg_idx], dtype=np.int64)
+    if len(arc_idx):
+        thin_mask[arc_idx] = False
+    diag["n_arc_segments_removed"] = int(len(arc_idx))
+    thin = ss.seg[thin_mask]
     allseg = np.concatenate([wseg, thin])
     polys = polygonise(allseg)
     diag["n_faces_raw"] = len(polys)
     wlines = segments_to_lines(wseg)
-    faces, md = merge_small_faces(polys, list(tags) + list(blocker_tags), wlines, area_scale_m2_per_pt2)
+    bands = wall_fill_polygons(ss.fills)
+    diag["n_wall_band_polygons"] = len(bands)
+    faces, md = merge_small_faces(polys, list(tags) + list(blocker_tags), wlines, area_scale_m2_per_pt2, wall_bands=bands)
     md["n_blocker_tags"] = len(blocker_tags)
     diag.update(md)
     regions = regions_with_tags(faces, tags, area_scale_m2_per_pt2)
@@ -518,4 +612,4 @@ def measure_rooms(ss: lw.StrokeSet, tags: Sequence[dict], area_scale_m2_per_pt2:
     diag["n_regions"] = len(regions)
     diag["n_regions_multi_tag"] = sum(1 for r in regions if len(r.tags) > 1)
     diag["n_tags_assigned"] = sum(len(r.tags) for r in regions)
-    return VectorResult(regions, faces, gaps, wseg, thin, diag)
+    return VectorResult(regions, faces, gaps, wseg, thin, diag, bands)

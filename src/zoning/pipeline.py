@@ -125,7 +125,7 @@ def stage_raster(ctx: dict) -> dict:
     vec: rv.VectorResult = ctx["vector"]["vec"]
     cb: cal.Calibration = ctx["cal"]["cal_bg"]
     t0 = time.time()
-    res, diag = rr.measure_rooms(vec.wall_segments, vec.thin_segments, ctx["tags"], 0.5 * (cb.scale_x_mm_per_pt + cb.scale_y_mm_per_pt), blocker_tags=ctx["codes"])
+    res, diag = rr.measure_rooms(vec.wall_segments, vec.thin_segments, ctx["tags"], 0.5 * (cb.scale_x_mm_per_pt + cb.scale_y_mm_per_pt), blocker_tags=ctx["codes"], wall_bands=vec.wall_bands)
     diag["seconds"] = round(time.time() - t0, 1)
     return {"regions": res, "diag": diag}
 
@@ -190,6 +190,7 @@ def stage_compare(ctx: dict) -> dict:
         r["source"] = "method A: %s; method B: raster %s; App D: %s p5" % (BG_PDF, "seeded region growing", APPD_PDF)
     fields = ["room_id", "storey", "room_tag", "room_name", "mode", "n_tags_in_region", "other_tags", "a_area_m2", "a_perimeter_m", "b_area_m2",
               "wall_face_area_m2", "centreline_area_m2", "boundary_convention", "centroid_x_mm", "centroid_y_mm", "grid_location",
+              "centroid_inside_polygon", "label_point_x_mm", "label_point_y_mm", "grid_location_label_point",
               "method_agreement", "a_minus_b_pct", "appd_caption_m2", "appd_annotation_index", "appd_overlap_room", "appd_overlap_polygon",
               "error_vs_caption_pct", "error_b_vs_caption_pct", "flags", "source"]
     common.write_csv_dicts(P["reg"] / "room_polygons_L04.csv", rows, fields)
@@ -230,6 +231,8 @@ def stage_zones(ctx: dict) -> dict:
         z.transfer_residual_mm = C["transfer_residual_appd_mm"]["max"]
     zones = sample_zones + appd_zones
     k2 = C["cal_bg"].area_scale_mm2_per_pt2() / 1e6
+    removed = zn.clip_to_precedence(zones, k2)
+    majority, conf_min = zn.configured_thresholds()
     rooms = ctx["compare"]["rooms"]
     rows = ctx["compare"]["rows"]
     conv = ctx["compare"]["stats"]["adopted_convention"]
@@ -237,16 +240,25 @@ def stage_zones(ctx: dict) -> dict:
     for r, row in zip(rooms, rows):
         poly = r["a_face"] if conv == "wall_face" else r["a_cl"]
         zrooms.append({"room_id": r["room_id"], "polygon": poly, "area_m2": poly.area * k2, "tag": r["tag"], "name": r["name"]})
-    assigned = zn.assign_rooms(zrooms, zones)
+    assigned = zn.assign_rooms(zrooms, zones, majority=majority)
     stats: Dict[str, dict] = {}
     for z in zones:
-        stats[z.key] = {"area_m2": 0.0, "poly_m2": sum(p.area for p in z.polygons_pv) * k2, "n_rooms": 0}
+        stats[z.key] = {"area_m2": 0.0, "poly_m2": sum(p.area for p in z.drawn()) * k2, "full_poly_m2": sum(p.area for p in z.polygons_pv) * k2, "n_rooms": 0}
     for a in assigned:
         if a["zone_key"]:
-            s = stats[a["zone_key"]]
-            s["area_m2"] += a["area_m2"] * 1.0
-            s["n_rooms"] += 1
-    return {"zones": zones, "assigned": assigned, "zone_stats": stats, "appd_classes": classes, "tag_map": tag_map, "zrooms": zrooms}
+            s_ = stats[a["zone_key"]]
+            s_["area_m2"] += a["area_m2"]
+            s_["n_rooms"] += 1
+    # fills that would stack in the drawing (should be none after the precedence clip)
+    drawn = [(z.tag, p) for z in zones for p in z.drawn()]
+    stack_m2 = 0.0
+    tree = STRtree([p for _, p in drawn])
+    for i, (t, p) in enumerate(drawn):
+        for j in tree.query(p, predicate="intersects"):
+            if j > i:
+                stack_m2 += p.intersection(drawn[j][1]).area * k2
+    return {"zones": zones, "assigned": assigned, "zone_stats": stats, "appd_classes": classes, "tag_map": tag_map, "zrooms": zrooms,
+            "thresholds": {"majority_share": majority, "confidence_min": conf_min}, "precedence_removed_m2": removed, "stacked_fill_m2": stack_m2}
 
 
 def stage_pdf(ctx: dict) -> dict:
@@ -283,20 +295,30 @@ def stage_report(ctx: dict) -> dict:
 def write_schedule(ctx: dict) -> None:
     P = ctx["P"]
     Z = ctx["zones"]
+    conf_min = Z["thresholds"]["confidence_min"]
     rows = []
     zmap = {z.key: z for z in Z["zones"]}
-    rm = {r["room_id"]: r for r in ctx["compare"]["rooms"]}
     for a in Z["assigned"]:
         z = zmap.get(a["zone_key"])
-        src = ""
         if z:
-            src = "; ".join(z.refs[:2]) + "; tag basis: " + z.tag_basis
+            pi = a["zone_part"]
+            if z.members and pi < len(z.members):
+                m = z.members[pi]
+                src = "App D p5 annotation %s (%s); %s; %s" % (m["annotation_index"], m["basis"], z.refs[0].split(" annots ")[0], "out/registers/appd_equipment.csv")
+            else:
+                src = "; ".join(z.refs[:2]) + "; tag basis: " + z.tag_basis
+        elif a["class_label"] == "review: partial cover":
+            src = "no zone covers at least %.0f %% of the room; best candidate %s covers %.0f %%" % (100 * Z["thresholds"]["majority_share"], a["candidate"], 100 * a["candidate_share"])
+        else:
+            src = "no zone polygon covers the majority of the room"
         rows.append({"room": a["room_id"], "room_tag": a["tag"], "ahu_or_class": a["class_label"], "zone_kind": z.kind if z else "",
                      "zone_source": z.source if z else "", "area_m2": round(a["area_m2"], 3), "confidence": round(a["confidence"], 3),
-                     "low_confidence": "yes" if (z and a["confidence"] < zn.CONFIDENCE_MIN) else "",
-                     "other_overlaps": a["overlaps"], "sources": src or "no zone polygon covers the majority of the room"})
+                     "cover_share": round(a["share"], 3), "class_confidence": round(a["class_confidence"], 2) if z else "",
+                     "low_confidence": "yes" if (z and a["confidence"] < conf_min) else "",
+                     "candidate_zone": a["candidate"], "other_overlaps": a["overlaps"], "sources": src})
     common.write_csv_dicts(P["out"].parent.parent / "registers" / "zone_schedule_L04.csv", rows,
-                           ["room", "room_tag", "ahu_or_class", "zone_kind", "zone_source", "area_m2", "confidence", "low_confidence", "other_overlaps", "sources"])
+                           ["room", "room_tag", "ahu_or_class", "zone_kind", "zone_source", "area_m2", "confidence", "cover_share", "class_confidence",
+                            "low_confidence", "candidate_zone", "other_overlaps", "sources"])
 
 
 STAGES = ["calibrate", "vector", "raster", "compare", "zones", "pdf", "report"]

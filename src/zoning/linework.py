@@ -20,6 +20,7 @@ ARC_MIN_SEGS = 4
 ARC_MIN_RADIUS_PT = 5.0       # 0.44 m at 1:250
 ARC_MAX_RADIUS_PT = 30.0      # 2.6 m
 ARC_MAX_RMS_PT = 0.35
+NODE_JOIN_PT = 0.12           # segment ends this close are one node of an arc chain
 ARC_MAX_TURN_DEG = 50.0       # a chain is cut where the path turns by more than this between two consecutive pieces
 ARC_MIN_SPAN_DEG = 35.0
 ARC_MAX_SPAN_DEG = 200.0
@@ -207,9 +208,12 @@ def detect_door_arcs(ss: StrokeSet, widths=(0.24, 0.36), colour=(0.0, 0.0, 0.0))
     ln = np.hypot(seg[:, 2] - seg[:, 0], seg[:, 3] - seg[:, 1])
     idx = np.where(mask & (ln <= ARC_MAX_SEG_PT) & (ln > 0.05))[0]
     node: Dict[Tuple[int, int], List[int]] = defaultdict(list)
+    node_xy: Dict[Tuple[int, int], List[Tuple[float, float]]] = defaultdict(list)
     for i in idx:
         for k in (0, 2):
-            node[(int(round(seg[i, k] / 0.15)), int(round(seg[i, k + 1] / 0.15)))].append(int(i))
+            key = (int(round(seg[i, k] / 0.15)), int(round(seg[i, k + 1] / 0.15)))
+            node[key].append(int(i))
+            node_xy[key].append((float(seg[i, k]), float(seg[i, k + 1])))
     # neighbour-tolerant joining: also look in adjacent cells
     parent = {int(i): int(i) for i in idx}
 
@@ -228,10 +232,15 @@ def detect_door_arcs(ss: StrokeSet, widths=(0.24, 0.36), colour=(0.0, 0.0, 0.0))
 
     for (kx, ky), lst in list(node.items()):
         cand = list(lst)
+        ref = np.mean(np.asarray(node_xy[(kx, ky)]), axis=0)
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 if dx or dy:
-                    cand += node.get((kx + dx, ky + dy), [])
+                    # an end in a neighbouring cell joins only when it is really at this node (grid cells are 0.15 pt: two arcs
+                    # that approach a cusp pass within 0.2 pt of each other without touching)
+                    for i_, (x_, y_) in zip(node.get((kx + dx, ky + dy), []), node_xy.get((kx + dx, ky + dy), [])):
+                        if math.hypot(x_ - ref[0], y_ - ref[1]) <= NODE_JOIN_PT:
+                            cand.append(i_)
         uniq = sorted(set(cand))
         if len(uniq) > 2:  # a branch point is not part of a single arc
             continue
@@ -239,7 +248,7 @@ def detect_door_arcs(ss: StrokeSet, widths=(0.24, 0.36), colour=(0.0, 0.0, 0.0))
             # two arcs that meet at a cusp (a double door: both leaves close on the same point) are two arcs, not one:
             # the path turns back on itself there, a smooth arc turns by a few degrees only
             i, j = uniq
-            nx, ny = kx * 0.15, ky * 0.15
+            nx, ny = float(ref[0]), float(ref[1])
             fi, ni = end_toward(i, nx, ny)
             fj, nj = end_toward(j, nx, ny)
             vi = np.array([ni[0] - fi[0], ni[1] - fi[1]])

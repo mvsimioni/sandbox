@@ -24,8 +24,15 @@ from . import calibrate as cal
 RED = "#FF0000"
 REPLACEMENT_FOR_RED = "#FFC000"     # amber: not used by any other sample zone, distinct from every sample fill
 TAG_RE = re.compile(r"^(AHU|PAHU|FCU|EAF|OAF|TEAF|RAF|SAF)-B-(\d{2})-(\d{2})([A-Z0-9]+)-(\d{2}[AB]?(?:/B)?)$")
-MAJORITY = 0.5
+MAJORITY = 0.5            # default of ``assign_rooms``; the pipeline passes the configured value (``configured_majority``)
 CONFIDENCE_MIN = 0.9
+PARTIAL_MIN = 0.5         # a room covered this much (but less than the configured share) by a zone is listed for review
+
+
+def configured_thresholds() -> Tuple[float, float]:
+    """(majority share, minimum confidence) from ``config/project.yaml`` ``tolerances.zoning_confidence``."""
+    cfg = common.load_config()["tolerances"]["zoning_confidence"]
+    return float(cfg["majority_share"]), float(cfg["min"])
 
 
 @dataclass
@@ -45,7 +52,13 @@ class Zone:
     refs: List[str] = field(default_factory=list)
     transfer_residual_mm: float = 0.0
     mots: bool = False
-    members: List[dict] = field(default_factory=list)
+    members: List[dict] = field(default_factory=list)       # App D: the classification of each polygon, aligned with ``polygons_pv``
+    draw_polygons_pv: List[Polygon] = field(default_factory=list)   # what is drawn: ``polygons_pv`` minus the zones of a later document
+    overlap_removed_pt2: float = 0.0
+    overlap_removed_m2: float = 0.0
+
+    def drawn(self) -> List[Polygon]:
+        return self.draw_polygons_pv if self.draw_polygons_pv else self.polygons_pv
 
 
 def parse_tag_levels(tag: str) -> Tuple[str, str]:
@@ -137,11 +150,15 @@ _INSIDE_RE = re.compile(r"([A-Z0-9/\-]+)\s*\[ann (\d+), ([\d.]+) pt\]")
 
 
 def classify_appd_spaces(appd_polys: Sequence, space_rows: Sequence[dict], equipment_rows: Sequence[dict]) -> List[dict]:
-    """Classify each App D polygon as an AHU, FCU or MV zone from the equipment tags in or beside it.
+    """Classify each App D polygon as an AHU, FCU or MV zone from the equipment tags *in* it.
 
-    The tag nearest the polygon decides (inside = 0 pt); an AHU tag outranks an FCU tag, which outranks fans, on
-    equal distance.  Fans only (EAF, OAF, TEAF) or a mode label ``MV`` with no AHU or FCU give an MV zone.
-    Confidence: 1.0 for a tag inside the polygon, 0.7 for one within 20 pt, 0.5 within 60 pt.
+    A tag belongs to a polygon only when ``appd_equipment.csv`` places it there (``space_relation`` ``inside``, or ``nearest`` with the
+    FreeText box touching the polygon, ``space_box_distance_pt`` 0); a tag that lies outside the polygon, however close, does not
+    classify it.  Without the equipment register the tags of ``appd_spaces.csv`` at 0.0 pt (box touching the polygon) are used.
+    An AHU tag outranks an FCU tag, which outranks fans (EAF, OAF, TEAF).  Fans only give an MV zone.  A polygon with no tag in it
+    whose mode label is ``MV`` is an MV zone without a tag (confidence 0.5); any other polygon without a tag is not classified
+    (``no information``), e.g. an ``AC (24HR)`` space with no equipment tag in it.  Confidence 1.0 for a tag inside the polygon,
+    0.9 for a tag whose box touches it.
     """
     by_idx = {int(r["annotation_index"]): r for r in space_rows}
     eq_by_space: Dict[int, List[dict]] = {}
@@ -151,25 +168,34 @@ def classify_appd_spaces(appd_polys: Sequence, space_rows: Sequence[dict], equip
     rank = {"AHU": 0, "PAHU": 0, "FCU": 1}
     for ap in appd_polys:
         row = by_idx.get(ap.annotation_index)
-        cands = []
-        if row:
+        cands: List[Tuple[float, str]] = []     # (confidence rank: 0 inside, 1 box touches), tag
+        if equipment_rows:
+            for e in eq_by_space.get(ap.annotation_index, []):
+                rel = e.get("space_relation", "")
+                if rel == "inside":
+                    cands.append((0.0, e["tag_normalised"]))
+                elif rel == "nearest" and float(e.get("space_box_distance_pt") or 1e9) == 0.0:
+                    cands.append((1.0, e["tag_normalised"]))
+        elif row:
             for m in _INSIDE_RE.finditer(row.get("equipment_tags_within_60pt", "")):
-                cands.append((float(m.group(3)), m.group(1)))
-        cands.sort(key=lambda c: (c[0], rank.get(c[1].split("-")[0], 2)))
+                if float(m.group(3)) == 0.0:
+                    cands.append((0.0, m.group(1)))
+        cands.sort(key=lambda c: (rank.get(c[1].split("-")[0], 2), c[0], c[1]))
         mode = row.get("mode_label", "") if row else ""
         names = row.get("space_names_text_layer", "") if row else ""
         if cands:
             d, tag = cands[0]
             typ = tag.split("-")[0]
             kind = "AHU" if typ in ("AHU", "PAHU") else "FCU" if typ == "FCU" else "MV"
-            conf = 1.0 if d == 0.0 else 0.7 if d <= 20 else 0.5
-            basis = "%s %s pt" % (tag, "inside" if d == 0.0 else "%.1f" % d)
+            conf = 1.0 if d == 0.0 else 0.9
+            basis = "%s %s the polygon" % (tag, "inside" if d == 0.0 else "touching")
         elif mode == "MV":
-            tag, kind, conf, basis = "", "MV", 0.5, "mode label MV, no equipment tag within 60 pt"
+            tag, kind, conf, basis = "", "MV", 0.5, "mode label MV, no equipment tag inside the polygon"
         else:
-            tag, kind, conf, basis = "", "", 0.0, "no equipment tag within 60 pt"
+            tag, kind, conf, basis = "", "", 0.0, "no equipment tag inside the polygon (mode label %s)" % (mode or "none")
         out.append({"annotation_index": ap.annotation_index, "xref": ap.xref, "tag": tag, "kind": kind, "confidence": conf,
-                    "basis": basis, "mode": mode, "names": names, "caption_m2": ap.caption_m2})
+                    "basis": basis, "mode": mode, "names": names, "caption_m2": ap.caption_m2,
+                    "other_tags_inside": sorted({t for _, t in cands} - {tag})})
     return out
 
 
@@ -192,6 +218,7 @@ def merge_appd_zones(appd_polys: Sequence, classes: Sequence[dict]) -> List[Zone
                        ",".join(str(ap.annotation_index) for ap, _ in items),
                        "out/registers/appd_spaces.csv", "out/registers/appd_equipment.csv"],
                  members=[c for _, c in items])
+        z.tag_basis = "App D equipment tag inside the polygon" if tag != "MV (no tag)" else "App D mode label MV (no equipment tag inside the polygon)"
         zones.append(z)
     return zones
 
@@ -208,44 +235,103 @@ def _palette(n: int) -> List[str]:
     return out
 
 
-def assign_rooms(rooms: Sequence[dict], zones: Sequence[Zone]) -> List[dict]:
+def assign_rooms(rooms: Sequence[dict], zones: Sequence[Zone], majority: float = MAJORITY, partial_min: float = PARTIAL_MIN) -> List[dict]:
     """Assign each room (dict with ``polygon`` in page view and ``area_pt2``) to the zone with the majority of its area.
 
-    RFI sample zones are tried first (they are the later document); only rooms the sample does not cover are classed
-    from App D.  ``share`` is the covering share of the winning zone, ``confidence`` the same value (1.0 = wholly inside).
+    A zone takes a room when one of its polygons covers more than ``majority`` of the room (pipeline: the configured 0.80).
+    RFI sample zones are tried first (they are the later document); only rooms the sample does not cover that far are classed from
+    App D.  ``share`` is the covering share of the winning polygon; ``confidence`` is that share times the confidence of the
+    zone part (App D polygons classified from a mode label only carry 0.5).  A room covered by ``partial_min`` to ``majority`` by
+    a zone is not assigned: its class is ``review: partial cover`` with the candidate zone named; below that, ``no information``.
+    Polygons are those in ``Zone.polygons_pv`` (the full extent; what is drawn may be clipped by a later document).
     """
     ordered = [z for z in zones if z.source.startswith("RFI")] + [z for z in zones if not z.source.startswith("RFI")]
-    geoms: List[Tuple[int, Polygon]] = []
+    geoms: List[Tuple[Tuple[int, int], Polygon]] = []
     for zi, z in enumerate(ordered):
-        for p in z.polygons_pv:
-            geoms.append((zi, p))
+        for pi, p in enumerate(z.polygons_pv):
+            geoms.append(((zi, pi), p))
     tree = STRtree([g for _, g in geoms])
     out = []
     for r in rooms:
         poly: Polygon = r["polygon"]
-        cover: Dict[int, float] = {}
+        cover: Dict[Tuple[int, int], float] = {}
         for gi in tree.query(poly, predicate="intersects"):
-            zi, g = geoms[gi]
-            cover[zi] = cover.get(zi, 0.0) + poly.intersection(g).area
-        rfi = {zi: a for zi, a in cover.items() if ordered[zi].source.startswith("RFI")}
-        other = {zi: a for zi, a in cover.items() if not ordered[zi].source.startswith("RFI")}
+            key, g = geoms[gi]
+            cover[key] = cover.get(key, 0.0) + poly.intersection(g).area
+        # share of the room covered by each zone as a whole (a zone's polygons do not overlap each other)
+        by_zone: Dict[int, float] = {}
+        for (zi, pi), a in cover.items():
+            by_zone[zi] = by_zone.get(zi, 0.0) + a
+        rfi = {zi: a for zi, a in by_zone.items() if ordered[zi].source.startswith("RFI")}
+        other = {zi: a for zi, a in by_zone.items() if not ordered[zi].source.startswith("RFI")}
         pick_from: Dict[int, float] = {}
         for cand in (rfi, other):
-            if cand and max(cand.values()) / poly.area > MAJORITY:
+            if cand and max(cand.values()) / poly.area > majority:
                 pick_from = cand
                 break
         rec = dict(r)
-        if pick_from and max(pick_from.values()) / poly.area > MAJORITY:
+        if pick_from:
             zi = max(pick_from, key=pick_from.get)
             z = ordered[zi]
             share = pick_from[zi] / poly.area
-            rec.update(zone_key=z.key, zone_tag=z.tag, zone_kind=z.kind, zone_source=z.source, share=share, confidence=share,
-                       overlaps=";".join("%s=%.2f" % (ordered[k].tag, v / poly.area) for k, v in sorted(cover.items(), key=lambda kv: -kv[1]) if k != zi),
+            pi = max((k[1] for k in cover if k[0] == zi), key=lambda q: cover[(zi, q)])
+            cc = z.members[pi]["confidence"] if z.members and pi < len(z.members) else 1.0
+            rec.update(zone_key=z.key, zone_tag=z.tag, zone_kind=z.kind, zone_source=z.source, zone_part=pi, share=share,
+                       class_confidence=cc, confidence=share * cc, candidate="", candidate_share=share,
+                       overlaps=";".join("%s=%.2f" % (ordered[k].tag, v / poly.area) for k, v in sorted(by_zone.items(), key=lambda kv: -kv[1]) if k != zi),
                        class_label=z.tag)
         else:
-            best = max(cover.values()) / poly.area if cover else 0.0
-            rec.update(zone_key="", zone_tag="", zone_kind="", zone_source="", share=best, confidence=0.0, overlaps=
-                       ";".join("%s=%.2f" % (ordered[k].tag, v / poly.area) for k, v in sorted(cover.items(), key=lambda kv: -kv[1])),
-                       class_label="no information")
+            best_zi = max(by_zone, key=by_zone.get) if by_zone else None
+            best = by_zone[best_zi] / poly.area if by_zone else 0.0
+            partial = best_zi is not None and best >= partial_min
+            rec.update(zone_key="", zone_tag="", zone_kind="", zone_source="", zone_part=-1, share=best, class_confidence=0.0, confidence=0.0,
+                       candidate=ordered[best_zi].tag if partial else "", candidate_share=best,
+                       overlaps=";".join("%s=%.2f" % (ordered[k].tag, v / poly.area) for k, v in sorted(by_zone.items(), key=lambda kv: -kv[1])),
+                       class_label="review: partial cover" if partial else "no information")
         out.append(rec)
+    return out
+
+
+def clip_to_precedence(zones: Sequence[Zone], k2_m2_per_pt2: float) -> Dict[str, dict]:
+    """Set ``draw_polygons_pv`` so no two fills stack: a zone of an earlier document is drawn whole, a zone of a later-ranked
+    source loses the part another zone already covers.  RFI-ME-0233 sample zones (5 Nov 2026) outrank Appendix D (1 Aug 2025).
+    Returns, per zone key, the area removed (m2).  A polygon is split where clipping leaves a hole (an annotation has one ring)."""
+    rfi = [p for z in zones if z.source.startswith("RFI") for p in z.polygons_pv]
+    cover = shapely.union_all(rfi) if rfi else None
+    removed: Dict[str, dict] = {}
+    for z in zones:
+        if z.source.startswith("RFI") or cover is None:
+            z.draw_polygons_pv = [q for p in z.polygons_pv for q in simple_parts(p)]
+            continue
+        draw: List[Polygon] = []
+        gone = 0.0
+        for p in z.polygons_pv:
+            rest = p.difference(cover)
+            gone += p.area - rest.area
+            geoms = list(rest.geoms) if rest.geom_type in ("MultiPolygon", "GeometryCollection") else [rest]
+            for g in geoms:
+                if g.geom_type == "Polygon" and g.area > 1e-6:
+                    draw.extend(simple_parts(g))
+        z.draw_polygons_pv = draw
+        z.overlap_removed_pt2 = gone
+        z.overlap_removed_m2 = gone * k2_m2_per_pt2
+        removed[z.key] = {"removed_m2": gone * k2_m2_per_pt2}
+    return removed
+
+
+def simple_parts(poly: Polygon) -> List[Polygon]:
+    """Split a polygon with holes into hole-free polygons (cuts along vertical lines through the holes), since a Polygon annotation has one ring."""
+    from shapely.geometry import LineString
+    from shapely.ops import split
+
+    if not poly.interiors:
+        return [poly]
+    h = Polygon(poly.interiors[0])
+    minx, miny, maxx, maxy = poly.bounds
+    x = h.centroid.x
+    pieces = split(poly, LineString([(x, miny - 1.0), (x, maxy + 1.0)]))
+    out: List[Polygon] = []
+    for g in pieces.geoms:
+        if g.geom_type == "Polygon" and g.area > 1e-9:
+            out.extend(simple_parts(g) if g.interiors else [g])
     return out
