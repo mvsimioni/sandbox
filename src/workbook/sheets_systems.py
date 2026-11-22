@@ -10,7 +10,7 @@ from .common import band_rows, cf_formula, cf_text, expand, group_cols, list_val
 from .ctx import Ctx
 from .model import blank
 from .sheets_rooms import _prov_cells, _setup, _val
-from .styles import put
+from .styles import link_to, put
 
 U = "²"
 
@@ -36,6 +36,9 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
         g = lambda k: L.local(k, t)
         if not after:
             put(ws, g("ahu"), a["tag"], "Tag")
+            first_room = next((i for i, r in enumerate(ctx.rooms) if r.get("ahu") == a["tag"]), None)
+            if first_room is not None:
+                link_to(ws[g("ahu")], "Airflow", f"{AF.col('no')}{AF.row(first_room)}")
         else:
             put(ws, g("ahu"), f"={ctx.lay['AH'].local('ahu', t)}", "LinkTag")
         key = g("ahu")
@@ -65,20 +68,18 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
         put(ws, g("relief"), f"={g('sa_room')}-{g('ret')}-{g('exh')}", "Calc", "d1")
         put(ws, g("sens"), f"=SUMIFS({AF.rng('sens')},{crit}{inc})/WperkW", "Calc", "d2")
         put(ws, g("lat"), f"=SUMIFS({AF.rng('lat')},{crit}{inc})/WperkW", "Calc", "d2")
-        put(ws, g("rt"), f"=IF({g('sa_room')}>0,SUMPRODUCT(({AF.rng('ahu')}={key}){mask}*{AF.rng('supply')}*{AF.rng('troom')})/{g('sa_room')},0)",
-            "Calc", "d1")
-        put(ws, g("rh"), f"=IF({g('sa_room')}>0,SUMPRODUCT(({AF.rng('ahu')}={key}){mask}*{AF.rng('supply')}*{AF.rng('hroom')})/{g('sa_room')},0)",
-            "Calc", "d1")
+        ref = f"MATCH({key},{AF.rng('ref1' if after else 'ref0')},0)"
+        put(ws, g("rt"), f'=IF({g("sa_room")}>0,INDEX({AF.rng("troom")},{ref}),0)', "Calc", "d1")
+        put(ws, g("rh"), f'=IF({g("sa_room")}>0,INDEX({AF.rng("hroom")},{ref}),0)', "Calc", "d1")
         for suffix, oa in (("", g("oa_rule")), ("_ms", g("oa_ms"))):
             put(ws, g("oa_sens" + suffix), f"=AirSensibleFactor*{oa}/WperkW*(OutdoorDB-{g('rt')})", "Calc", "d2")
             put(ws, g("oa_lat" + suffix), f"=AirDensity*{oa}/WperkW*(OutdoorH-{g('rh')})-{g('oa_sens' + suffix)}", "Calc", "d2")
             put(ws, g("coil_s" + suffix), f"={g('sens')}+{g('oa_sens' + suffix)}+{g('fan')}", "Calc", "d2")
             put(ws, g("coil_l" + suffix), f"={g('lat')}+{g('oa_lat' + suffix)}", "Calc", "d2")
             put(ws, g("coil" + suffix), f"={g('coil_s' + suffix)}+{g('coil_l' + suffix)}", "Result", "d2")
-            put(ws, g("rtons" + suffix), f"={g('coil' + suffix)}/KwPerRT", "Calc", "d1")
         put(ws, g("fan"), f"={g('sa_ahu')}/WperkW*FanPressure/FanEfficiency/WperkW", "Calc", "d2")
         put(ws, g("wm2"), f"=IF({g('area')}>0,{g('coil')}*WperkW/{g('area')},0)", "Calc", "d1")
-        put(ws, g("req_t"), f"=IF({g('sa_room')}>0,{g('rt')}-{g('sens')}*WperkW/(AirSensibleFactor*{g('sa_room')}),0)", "Calc", "d1")
+        put(ws, g("req_t"), f"=IF({g('sa_room')}>0,SUMPRODUCT(({AF.rng('ahu')}={key}){mask}*{AF.rng('supply')}*{AF.rng('troom')})/{g('sa_room')}-{g('sens')}*WperkW/(AirSensibleFactor*{g('sa_room')}),0)", "Calc", "d1")
         if not after:
             sc, ss = a.get("sched_code", "D"), a.get("sched_source", "")
             has = not blank(a.get("sched_supply_lps")) or not blank(a.get("sched_oa_lps"))
@@ -106,13 +107,13 @@ def write_ahu(ctx: Ctx) -> None:
              H("ev", "Ev = 1 + Xs − Zd", "–", 8), H("vot", "Vot = Vou / Ev", "L/s", 9),
              H("oa_ms", "Outdoor air as the example: max (sum, Vot)", "L/s", 11), H("ret", "Return = supply − outdoor air", "L/s", 10),
              H("exh", "Exhaust", "L/s", 9), H("relief", "Spill or relief", "L/s", 9), H("sens", "Room sensible", "kW", 9),
-             H("lat", "Room latent", "kW", 9), H("rt", "Return temperature", "°C", 8), H("rh", "Return enthalpy", "kJ/kg", 8),
+             H("lat", "Room latent", "kW", 9), H("rt", "Reference room temperature (first room served)", "°C", 10), H("rh", "Reference room enthalpy (first room served)", "kJ/kg", 10),
              H("oa_sens", "Outdoor air sensible", "kW", 9), H("oa_lat", "Outdoor air latent", "kW", 9), H("fan", "Fan heat", "kW", 8),
              H("coil_s", "Coil sensible", "kW", 9), H("coil_l", "Coil latent", "kW", 9), H("coil", "Coil duty (outdoor-air rule)", "kW", 10),
-             H("rtons", "Coil duty", "RT", 8), H("wm2", "Coil duty per area", "W/m" + U, 9),
+             H("wm2", "Coil duty per area", "W/m" + U, 9),
              H("oa_sens_ms", "Outdoor air sensible, example basis", "kW", 10), H("oa_lat_ms", "Outdoor air latent, example basis", "kW", 10),
              H("coil_s_ms", "Coil sensible, example basis", "kW", 10), H("coil_l_ms", "Coil latent, example basis", "kW", 10),
-             H("coil_ms", "Coil duty, example basis", "kW", 10), H("rtons_ms", "Coil duty, example basis", "RT", 8),
+             H("coil_ms", "Coil duty, example basis", "kW", 10),
              H("req_t", "Supply temperature required by the sensible load", "°C", 10), H("sched", "Scheduled supply", "L/s", 9),
              H("sched_oa", "Scheduled outdoor air", "L/s", 9), H("sched_c", "Code", "", 5), H("sched_s", "Source ID", "", 11)]
     bands = {"ahu": "A. AS ZONED: AIRFLOW", "frac": "OUTDOOR AIR", "vou": "MULTIPLE SPACE (example)", "ret": "RETURN, EXHAUST, RELIEF",
@@ -134,7 +135,7 @@ def write_ahu(ctx: Ctx) -> None:
         tr = LL.last + 1
         put(ws, f"A{tr}", "TOTAL", "ResultTag")
         for k in ("n", "area", "vol", "sa_room", "sa_ahu", "oa_sum", "oa_rule", "oa_ms", "ret", "exh", "relief", "sens", "lat",
-                  "oa_sens", "oa_lat", "fan", "coil_s", "coil_l", "coil", "rtons", "coil_ms", "rtons_ms", "coil_s_ms", "coil_l_ms",
+                  "oa_sens", "oa_lat", "fan", "coil_s", "coil_l", "coil", "coil_ms", "coil_s_ms", "coil_l_ms",
                   "oa_sens_ms", "oa_lat_ms"):
             put(ws, f"{LL.col(k)}{tr}", f"=SUM({LL.col(k)}{LL.first}:{LL.col(k)}{LL.last})", "Total",
                 "d0" if k == "n" else ("d1" if k in ("area", "vol", "sa_room", "sa_ahu", "oa_sum", "oa_rule", "oa_ms", "ret", "exh", "relief") else "d2"))
@@ -149,7 +150,7 @@ def write_ahu(ctx: Ctx) -> None:
     band_rows(ws, f"A{L.first}:{L.col('sched_s')}{L.last}")
     band_rows(ws, f"A{L2.first}:{L2.col('sched_s')}{L2.last}")
     group_cols(ws, L, "vou", "vot")
-    group_cols(ws, L, "oa_sens_ms", "rtons_ms")
+    group_cols(ws, L, "oa_sens_ms", "coil_ms")
     _setup(ws, ctx, L, L.idx["sched_s"], ctx.ahu2_total_row, "4:6", f"{L.col('crit')}{L.first}", "FF00B050")
     ws.freeze_panes = f"B{L.first}"
 
@@ -169,7 +170,7 @@ def write_fcu(ctx: Ctx) -> None:
              H("oa_t", "Arrival temperature", "°C", 9), H("oa_h", "Arrival enthalpy", "kJ/kg", 9),
              H("oa_sens", "Outdoor air sensible", "kW", 9), H("oa_lat", "Outdoor air latent", "kW", 9),
              H("coil_s", "Coil sensible", "kW", 9), H("coil_l", "Coil latent", "kW", 9), H("coil", "FCU coil duty", "kW", 10),
-             H("rtons", "FCU coil duty", "RT", 8), H("flag", "Flag", "", 30)]
+             H("flag", "Flag", "", 30)]
     write_headers(ws, L, heads, 4, {"k": "ROOM", "area": "LOAD", "oasrc": "OUTDOOR AIR", "oa_sens": "COIL", "flag": "FLAG"})
     for t in range(ctx.n_fcu_rows):
         g = lambda k: L.local(k, t)
@@ -196,7 +197,6 @@ def write_fcu(ctx: Ctx) -> None:
         put(ws, g("coil_s"), f'=IF({g("no")}="","",{g("sens_kw")}+{g("oa_sens")})', "Calc", "d2")
         put(ws, g("coil_l"), f'=IF({g("no")}="","",{g("lat_kw")}+{g("oa_lat")})', "Calc", "d2")
         put(ws, g("coil"), f'=IF({g("no")}="","",{g("coil_s")}+{g("coil_l")})', "Result", "d2")
-        put(ws, g("rtons"), f'=IF({g("no")}="","",{g("coil")}/KwPerRT)', "Calc", "d1")
         _hl(ws, g("flag"), f'=IF({g("no")}="","",IF({g("oasrc")}="not set","OUTDOOR-AIR SOURCE NOT SET: CHOOSE FROM ZONING",'
                            f'IF(AND({g("oacond")}="TREATED",PAHUOffT=""),"PAHU OFF-COIL CONDITION NOT SET","")))', "Calc", left=True)
     if ctx.n_fcu_rows:
@@ -361,7 +361,7 @@ def write_flow_balance(ctx: Ctx) -> None:
         put(ws, g("net_ach"), f"=IF({g('vol')}>0,ConvM3hPerLps*{g('relief')}/{g('vol')},0)", "Calc", "d2")
         put(ws, g("sum_net"), f"=SUMIFS({L.rng('net')},{L.rng('ahu')},{g('ahu')})", "Calc", "d1")
         put(ws, g("close"), f"=MAX(BalTolLps,BalTolPct*{g('supply')})", "Calc", "d1")
-        put(ws, g("status"), f'=IF(ABS({g("relief")}-{g("oa")}+{g("exhaust")})<={g("close")},"PASS","FAIL")', "Check")
+        put(ws, g("status"), f'=IF(AND(ABS({g("relief")}-{g("oa")}+{g("exhaust")})<={g("close")},{g("ret")}>=0,{g("oa")}<={AH.addr("sa_ahu", t)}+{g("close")}),"PASS","FAIL")', "Check")
     if ctx.ahus:
         cf_text(ws, f"{L2.col('status')}{L2.first}:{L2.col('status')}{L2.last}", f"{L2.col('status')}{L2.first}", "FAIL")
     _setup(ws, ctx, L, L.idx["ach"], L2.last, "4:6", f"{L.col('name')}{L.first}", "FF00B050")

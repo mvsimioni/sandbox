@@ -1,0 +1,97 @@
+"""Pressure tab: known answers in the recalculated workbook and the fixed-step solution against src.pressure."""
+
+from __future__ import annotations
+
+import copy
+from pathlib import Path
+
+import openpyxl
+import pytest
+
+from src import pressure as pm
+from src.workbook import selftest as st
+from src.workbook.build import build_workbook
+from src.workbook.layouts import ps_keys
+from src.workbook.recalc import recalc
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _nodes(rc):
+    wb = openpyxl.load_workbook(rc, data_only=True)
+    ws = wb["Pressure"]
+    keys, _ = ps_keys()
+    out = {}
+    for r in ws.iter_rows(min_row=7, max_row=20, values_only=True):
+        if r[0] and r[1] in ("ROOM", "EXTERNAL"):
+            out[r[0]] = dict(zip(keys, r))
+    return out
+
+
+@pytest.fixture(scope="module")
+def ka(tmp_path_factory):
+    work = tmp_path_factory.mktemp("ka")
+    data = st.ka_input()
+    ctx = build_workbook(data, work / "ka.xlsx")
+    rc = recalc(work / "ka.xlsx", work / "rc")
+    return dict(rc=rc, ctx=ctx, work=work, data=data)
+
+
+def test_known_answer_block_all_pass(ka):
+    cases = st.compare_ka(ka["rc"])
+    assert len(cases) >= 19
+    assert all(c["ok"] for c in cases), [c for c in cases if not c["ok"]]
+
+
+def test_known_answers_through_node_and_path_tables(ka):
+    res = st.compare_ka_tables(ka["rc"])
+    assert all(c["ok"] for c in res), [c for c in res if not c["ok"]]
+
+
+def test_matches_pressure_module_for_every_space(ka):
+    n = _nodes(ka["rc"])
+    suite = pm.Suite("ka", [pm.Space("ANTE", -15, n["ANTE"]["surf"]), pm.Space("ROOM", -30, n["ROOM"]["surf"]), pm.Space("ENSUITE", -31, 37.5)],
+                     [pm.Link("ANTE", "CORRIDOR", gap_area_m2=pm.cm2_to_m2(15)), pm.Link("ANTE", "SHAFT", fixed_flow_m3h=-10.2),
+                      pm.Link("ANTE", "ROOM", gap_area_m2=pm.cm2_to_m2(10)), pm.Link("ROOM", "CORRIDOR", gap_area_m2=pm.cm2_to_m2(20)),
+                      pm.Link("ROOM", "ENSUITE", gap_area_m2=pm.cm2_to_m2(10))], externals={"CORRIDOR": 0, "SHAFT": 0}).solve()
+    for name in ("ANTE", "ROOM", "ENSUITE"):
+        r = suite.space(name)
+        w = n[name]
+        assert w["needed"] == pytest.approx(r.offset_needed, abs=0.05), name
+        assert w["design"] == pytest.approx(r.design_offset, abs=0.05)
+        assert w["env_in"] == pytest.approx(r.envelope_in, abs=0.05)
+        assert w["gap_in"] == pytest.approx(r.gap_in, abs=0.05)
+        assert w["gap_out"] == pytest.approx(r.gap_out, abs=0.05)
+        assert w["kindoff"].lower() == r.offset_kind
+        assert w["ratio_n50"] == pytest.approx(r.ratio_n050, rel=0.02)
+        assert w["ratio_n75"] == pytest.approx(r.ratio_n075, rel=0.02)
+
+
+def test_uncontrolled_pressure_matches_bisection(ka):
+    n = _nodes(ka["rc"])
+    suite = pm.Suite("ka", [pm.Space("ANTE", -15, n["ANTE"]["surf"])],
+                     [pm.Link("ANTE", "CORRIDOR", gap_area_m2=pm.cm2_to_m2(15)), pm.Link("ANTE", "SHAFT", fixed_flow_m3h=-10.2),
+                      pm.Link("ANTE", "ROOM", gap_area_m2=pm.cm2_to_m2(10))], externals={"CORRIDOR": 0, "SHAFT": 0, "ROOM": -30}).solve()
+    assert n["ANTE"]["upa"] == pytest.approx(suite.space("ANTE").uncontrolled_pa, abs=0.05)
+
+
+def test_free_space_newton_matches_exact_solution(tmp_path):
+    data = st.ka_input()
+    free = copy.deepcopy(data["rooms"][2])
+    free.update(number="ENS2", name="Free ensuite", soa_area_m2=4.0)
+    free["criteria"] = dict(free["criteria"], pressure_pa_tender=None, exhaust_specified_lps=10, min_total_ach=None, min_oa_ach=None)
+    free["pressure"] = dict(mode="free", suite="S5", perimeter_m=3.0, prov=["D", "KA-8.3"], surface_override_m2=30.0, surface_prov=["D", "KA-8.3"],
+                            doors=[dict(id="D9", to="ROOM", kind="door louvre (free area)", gap_cm2=200.0, code="D", source="KA-8.3"),
+                                   dict(id="D10", to="CORRIDOR", kind="door", gap_cm2=15.0, code="D", source="KA-8.3")])
+    data["rooms"].append(free)
+    build_workbook(data, tmp_path / "f.xlsx")
+    rc = recalc(tmp_path / "f.xlsx", tmp_path / "rc")
+    n = _nodes(rc)
+    f = n["ENS2"]
+    assert f["status"] == "FREE", f
+    suite = pm.Suite("f", [pm.Space("ROOM", -30, n["ROOM"]["surf"]), pm.Space("ENS2", None, 30.0, exhaust_m3h=f["exhaust"], supply_m3h=f["supply"])],
+                     [pm.Link("ENS2", "ROOM", gap_area_m2=pm.cm2_to_m2(200)), pm.Link("ENS2", "CORRIDOR", gap_area_m2=pm.cm2_to_m2(15))],
+                     externals={"CORRIDOR": 0}).solve_exact()
+    assert f["pfin"] == pytest.approx(suite.pressures["ENS2"], abs=0.05)
+    assert abs(f["resid"]) < 0.5
+    assert st.scan_errors(rc) == []

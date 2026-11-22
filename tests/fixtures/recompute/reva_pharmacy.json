@@ -1,0 +1,367 @@
+{
+ "schema_version": 1,
+ "project": {
+  "name": "Rev A worked example, OP Pharmacy"
+ },
+ "department": {
+  "number": "REVA",
+  "name": "OP Pharmacy"
+ },
+ "constants": {
+  "SupplyTemp": {
+   "label": "",
+   "value": 14,
+   "unit": "degC",
+   "code": "D",
+   "source": "REVA",
+   "remark": ""
+  },
+  "OutdoorDB": {
+   "label": "",
+   "value": 32,
+   "unit": "degC",
+   "code": "D",
+   "source": "REVA",
+   "remark": ""
+  },
+  "OutdoorWB": {
+   "label": "",
+   "value": 26,
+   "unit": "degC",
+   "code": "D",
+   "source": "REVA",
+   "remark": ""
+  },
+  "OutdoorH": {
+   "label": "",
+   "value": 80.3,
+   "unit": "kJ/kg",
+   "code": "D",
+   "source": "REVA",
+   "remark": ""
+  },
+  "FanPressure": {
+   "label": "",
+   "value": 1700,
+   "unit": "Pa",
+   "code": "D",
+   "source": "REVA",
+   "remark": ""
+  },
+  "FanEfficiency": {
+   "label": "",
+   "value": 0.65,
+   "unit": "",
+   "code": "D",
+   "source": "REVA",
+   "remark": ""
+  },
+  "RoofSolarGain": {
+   "label": "",
+   "value": 15,
+   "unit": "W/m2",
+   "code": "D",
+   "source": "REVA",
+   "remark": ""
+  },
+  "OAMethod": {
+   "label": "",
+   "value": "MULTI_SPACE",
+   "unit": "",
+   "code": "D",
+   "source": "REVA",
+   "remark": ""
+  }
+ },
+ "space_types": [
+  {
+   "name": "Waiting (Public)",
+   "room_t_c": 24,
+   "room_h_kjkg": 52.6,
+   "code": "D",
+   "source": "REVA"
+  },
+  {
+   "name": "Pharmacy (OP)",
+   "room_t_c": 24,
+   "room_h_kjkg": 52.6,
+   "code": "D",
+   "source": "REVA"
+  },
+  {
+   "name": "Lockers",
+   "room_t_c": 24,
+   "room_h_kjkg": 55.1,
+   "code": "D",
+   "source": "REVA"
+  },
+  {
+   "name": "Pantry / Bev Bay",
+   "room_t_c": 24,
+   "room_h_kjkg": 55.1,
+   "code": "D",
+   "source": "REVA"
+  },
+  {
+   "name": "Toilet",
+   "room_t_c": 24,
+   "room_h_kjkg": 52.6,
+   "code": "D",
+   "source": "REVA"
+  }
+ ],
+ "activities": [
+  {
+   "name": "Seated",
+   "sensible_w": 70,
+   "latent_w": 45,
+   "code": "D",
+   "source": "REVA"
+  },
+  {
+   "name": "Standing/Walking",
+   "sensible_w": 75,
+   "latent_w": 70,
+   "code": "D",
+   "source": "REVA"
+  }
+ ],
+ "orientations": [
+  {
+   "name": "North",
+   "window_w_m2": 60,
+   "wall_w_m2": 8,
+   "code": "A",
+   "source": "REVA"
+  },
+  {
+   "name": "East",
+   "window_w_m2": 180,
+   "wall_w_m2": 12,
+   "code": "A",
+   "source": "REVA"
+  },
+  {
+   "name": "South",
+   "window_w_m2": 80,
+   "wall_w_m2": 8,
+   "code": "A",
+   "source": "REVA"
+  },
+  {
+   "name": "West",
+   "window_w_m2": 80,
+   "wall_w_m2": 12,
+   "code": "A",
+   "source": "REVA"
+  },
+  {
+   "name": "Internal",
+   "window_w_m2": 0,
+   "wall_w_m2": 0,
+   "code": "A",
+   "source": "REVA"
+  }
+ ],
+ "sources": [
+  {
+   "id": "REVA",
+   "document": "Rev A example AHU Thermal Load Calc",
+   "issue": "Rev A",
+   "page": "",
+   "location": "template_spec.md",
+   "text_as_read": "",
+   "method": "read",
+   "confidence": "high"
+  }
+ ],
+ "rooms": [
+  {
+   "number": "Z1",
+   "name": "WAITING AREA (1)",
+   "storey": "L01",
+   "ahu": "AHU-B-02-01OPPPHARM-01A&B",
+   "zone_tag": "Z1",
+   "system_type": "VAV",
+   "space_type": "Waiting (Public)",
+   "room_condition": "Comfort",
+   "soa_area_m2": 42.0,
+   "ceiling_height_m": 3.0,
+   "criteria": {
+    "min_oa_ach": 2,
+    "min_total_ach": 6,
+    "pressure_regime": "POSITIVE",
+    "source": "REVA",
+    "code": "D"
+   },
+   "envelope": [
+    {
+     "segment": "N",
+     "orientation": "North",
+     "glazing_m2": 18,
+     "wall_m2": 0,
+     "roof_m2": 0,
+     "method": "assumed"
+    },
+    {
+     "segment": "W",
+     "orientation": "West",
+     "glazing_m2": 18,
+     "wall_m2": 0,
+     "roof_m2": 0,
+     "method": "assumed"
+    }
+   ],
+   "occupancy_per_100m2": 30,
+   "iof": 1,
+   "activity": "Seated",
+   "lighting_w_m2": 12,
+   "small_power_w_m2": 10
+  },
+  {
+   "number": "Z2",
+   "name": "OUTPATIENT PHARMACY AUTOMATION",
+   "storey": "L01",
+   "ahu": "AHU-B-02-01OPPPHARM-01A&B",
+   "zone_tag": "Z2",
+   "system_type": "VAV",
+   "space_type": "Pharmacy (OP)",
+   "room_condition": "Comfort",
+   "soa_area_m2": 301.1,
+   "ceiling_height_m": 3.0,
+   "criteria": {
+    "min_oa_ach": 2,
+    "min_total_ach": 6,
+    "pressure_regime": "POSITIVE",
+    "source": "REVA",
+    "code": "D"
+   },
+   "envelope": [
+    {
+     "segment": "N",
+     "orientation": "North",
+     "glazing_m2": 57,
+     "wall_m2": 0,
+     "roof_m2": 0,
+     "method": "assumed"
+    }
+   ],
+   "occupancy_per_100m2": 10,
+   "iof": 1,
+   "activity": "Standing/Walking",
+   "lighting_w_m2": 12,
+   "small_power_w_m2": 15,
+   "equipment_sensible_w": 4500
+  },
+  {
+   "number": "Z3",
+   "name": "LOCKERS",
+   "storey": "L01",
+   "ahu": "AHU-B-02-01OPPPHARM-01A&B",
+   "zone_tag": "Z3",
+   "system_type": "VAV",
+   "space_type": "Lockers",
+   "room_condition": "Comfort",
+   "soa_area_m2": 16.6,
+   "ceiling_height_m": 3.0,
+   "criteria": {
+    "min_oa_ach": 2,
+    "min_total_ach": 6,
+    "pressure_regime": "NEUTRAL",
+    "source": "REVA",
+    "code": "D"
+   },
+   "envelope": [],
+   "occupancy_people": 2,
+   "iof": 0.5,
+   "activity": "Standing/Walking",
+   "lighting_w_m2": 10,
+   "small_power_w_m2": 5
+  },
+  {
+   "number": "Z4",
+   "name": "BEV BAY",
+   "storey": "L01",
+   "ahu": "AHU-B-02-01OPPPHARM-01A&B",
+   "zone_tag": "Z4",
+   "system_type": "VAV",
+   "space_type": "Pantry / Bev Bay",
+   "room_condition": "Comfort",
+   "soa_area_m2": 12.9,
+   "ceiling_height_m": 3.0,
+   "criteria": {
+    "min_oa_ach": 2,
+    "min_total_ach": 6,
+    "pressure_regime": "NEUTRAL",
+    "source": "REVA",
+    "code": "D"
+   },
+   "envelope": [],
+   "occupancy_people": 2,
+   "iof": 0.5,
+   "activity": "Standing/Walking",
+   "lighting_w_m2": 10,
+   "small_power_w_m2": 15,
+   "equipment_sensible_w": 1000,
+   "equipment_latent_w": 200
+  },
+  {
+   "number": "Z5",
+   "name": "WAITING AREA (2)",
+   "storey": "L01",
+   "ahu": "AHU-B-02-01OPPPHARM-01A&B",
+   "zone_tag": "Z5",
+   "system_type": "VAV",
+   "space_type": "Waiting (Public)",
+   "room_condition": "Comfort",
+   "soa_area_m2": 78.9,
+   "ceiling_height_m": 3.0,
+   "criteria": {
+    "min_oa_ach": 2,
+    "min_total_ach": 6,
+    "pressure_regime": "POSITIVE",
+    "source": "REVA",
+    "code": "D"
+   },
+   "envelope": [
+    {
+     "segment": "N",
+     "orientation": "North",
+     "glazing_m2": 27,
+     "wall_m2": 0,
+     "roof_m2": 0,
+     "method": "assumed"
+    }
+   ],
+   "occupancy_per_100m2": 30,
+   "iof": 1,
+   "activity": "Seated",
+   "lighting_w_m2": 12,
+   "small_power_w_m2": 10
+  },
+  {
+   "number": "TEA",
+   "name": "TOILET",
+   "storey": "L01",
+   "ahu": "AHU-B-02-01OPPPHARM-01A&B",
+   "zone_tag": "TEA",
+   "system_type": "Toilet Exhaust",
+   "space_type": "Toilet",
+   "soa_area_m2": 4.3,
+   "ceiling_height_m": 3.0,
+   "criteria": {
+    "exhaust_ach": 20,
+    "exhaust_specified_lps": 80,
+    "source": "REVA",
+    "code": "D"
+   },
+   "envelope": []
+  }
+ ],
+ "ahus": [
+  {
+   "tag": "AHU-B-02-01OPPPHARM-01A&B",
+   "type": "AHU"
+  }
+ ]
+}

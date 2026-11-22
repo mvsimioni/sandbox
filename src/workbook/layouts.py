@@ -156,7 +156,8 @@ def af_spec() -> Spec:
               (f"trg{r}", f"Round {r}: triggers", "0 / 1", 7), (f"sep{r}", f"Round {r}: separate", "0 / 1", 7),
               (f"lst{r}", f"Round {r}: list", "0 / 1", 7)]
     s += [("status", "Outdoor-air rule", "", 16), ("sepf", "Separated", "0 / 1", 8), ("cmark0", "Highest-fraction mark", "", 10),
-          ("cmark1", "Highest-fraction mark after separation", "", 10), ("fcu", "On an FCU", "0 / 1", 7),
+          ("cmark1", "Highest-fraction mark after separation", "", 10),
+          ("ref0", "First supply room of the AHU", "", 10), ("ref1", "First supply room after separation", "", 10), ("fcu", "On an FCU", "0 / 1", 7),
           ("fcurank", "FCU list order", "no.", 7)]
     return s
 
@@ -217,11 +218,11 @@ def build_layouts(ctx: Ctx) -> None:
 
 AHU_KEYS = ["ahu", "type", "n", "area", "vol", "sa_room", "leak", "sa_ahu", "oa_sum", "crit", "frac", "oa_rule",
             "vou", "vps", "xs", "zd", "ev", "vot", "oa_ms", "ret", "exh", "relief",
-            "sens", "lat", "rt", "rh", "oa_sens", "oa_lat", "fan", "coil_s", "coil_l", "coil", "rtons", "wm2",
-            "oa_sens_ms", "oa_lat_ms", "coil_s_ms", "coil_l_ms", "coil_ms", "rtons_ms", "req_t", "sched", "sched_oa",
+            "sens", "lat", "rt", "rh", "oa_sens", "oa_lat", "fan", "coil_s", "coil_l", "coil", "wm2",
+            "oa_sens_ms", "oa_lat_ms", "coil_s_ms", "coil_l_ms", "coil_ms", "req_t", "sched", "sched_oa",
             "sched_c", "sched_s"]
 FCU_KEYS = ["k", "no", "name", "ahu", "why", "area", "sens_kw", "lat_kw", "supply", "oa", "oasrc", "oacond", "oa_t", "oa_h",
-            "oa_sens", "oa_lat", "coil_s", "coil_l", "coil", "rtons", "flag"]
+            "oa_sens", "oa_lat", "coil_s", "coil_l", "coil", "flag"]
 FAN_KEYS = ["tag", "type", "serves", "req", "leak", "drawn", "sched", "margin", "code", "src", "remark", "status"]
 VAV_KEYS = ["tag", "type", "rooms", "n", "max", "min", "turn", "code", "src", "remark"]
 VEN_KEYS = ["tag", "room", "role", "d1", "d2", "off", "design", "tight", "ratio", "status", "code", "src", "remark"]

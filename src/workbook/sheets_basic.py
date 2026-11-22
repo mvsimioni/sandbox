@@ -43,10 +43,10 @@ def _tbl_name(ctx: Ctx, ws, name: str, col: str, r0: int, r1: int) -> None:
 def write_basis(ctx: Ctx) -> None:
     ws = ctx.wb["Basis of Design"]
     d = ctx.data
-    for col, w in zip("ABCDEFGHIJ", (2, 46, 14, 16, 6, 12, 70, 3, 3, 3)):
+    for col, w in zip("ABCDEFGHIJ", (2, 50, 12, 34, 6, 15, 70, 3, 3, 3)):
         ws.column_dimensions[col].width = w
-    put(ws, "B1", f"{ctx.project}: {d['department'].get('number', '')} {d['department'].get('name', '')}", "Title")
-    put(ws, "B2", "Basis of Design: document hierarchy, design conditions, constants, criteria origin, conventions, key flags", "Note")
+    put(ws, "B1", "Basis of Design", "Title")
+    put(ws, "B2", f"{ctx.project}, {d['department'].get('number', '')} {d['department'].get('name', '')}. Document hierarchy, design conditions, constants, criteria origin, conventions, key flags", "Note")
     r = 4
     # 1 document hierarchy
     put(ws, f"B{r}", "1  Scope and document hierarchy", "Section")
@@ -91,7 +91,7 @@ def write_basis(ctx: Ctx) -> None:
             style = CODE_STYLES[code][0] if not blank(v) else "Assumption"
             put(ws, f"B{r}", c["label"], "Text")
             cell = put(ws, f"C{r}", v, style, "General")
-            if isinstance(v, float) and abs(v) < 1:
+            if isinstance(v, float) and 0.01 <= abs(v) < 1:
                 cell.number_format = "0.00##"
             put(ws, f"D{r}", f"{c.get('unit', '')}  ({nm})", "Text")
             put(ws, f"E{r}", code, "Code")
@@ -400,7 +400,7 @@ def write_checks(ctx: Ctx) -> None:
         ("Rooms whose SOA and measured areas disagree beyond tolerance", f'=COUNTIF({RI.rng("agree")},"NO")', 0, '=IF(C{r}=0,"PASS","VERIFY")', "list on Room Information"),
         ("Rooms whose final supply is below either airflow case or the pressure minimum", f'=COUNTIF({AF.rng("ok")},"FAIL")', 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
         ("Rooms whose outdoor air is below the air-change minimum", f"=SUMPRODUCT(--({AF.rng('oa')}<{AF.rng('oa_air')}))", 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
-        ("Rooms whose outdoor air exceeds their supply", f"=SUMPRODUCT(--({AF.rng('oa')}>{AF.rng('supply')}))", 0, '=IF(C{r}=0,"PASS","VERIFY")', "exhaust or pressure need exceeds supply"),
+        ("Rooms whose outdoor air exceeds their supply", f"=SUMPRODUCT(--({AF.rng('oa')}>{AF.rng('supply')}))", 0, '=IF(C{r}=0,"PASS","FAIL")', "outdoor air is capped at supply; transfer air makes up the rest"),
         ("Pressure-controlled rooms with a ratio below 1.0", f'=COUNTIF({PS.rng("status")},"FAIL")', 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
         ("Pressure-controlled rooms with a ratio from 1.0 to 1.2 (VERIFY)", f'=COUNTIF({PS.rng("status")},"VERIFY")', 0, '=IF(C{r}=0,"PASS","VERIFY")', ""),
         ("Free-pressure spaces whose balance does not close", f'=COUNTIF({PS.rng("status")},"UNSOLVED")', 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
@@ -526,7 +526,7 @@ def write_readme(ctx: Ctx) -> None:
     r += 1
     for t in ("Airflow in L/s (m³/h on Pressure); pressure in Pa; power in kW (W in the engine); area m²; volume m³; temperature °C; "
               "enthalpy kJ/kg. ACH air changes per hour. AHU air handling unit; PAHU primary AHU; FCU fan coil unit; VAV variable air volume; "
-              "OA outdoor air; SOA schedule of accommodation; DPA departmental planning; RT refrigeration ton."):
+              "OA outdoor air; SOA schedule of accommodation; DPA departmental planning."):
         put(ws, f"B{r}", t, "TextWrap")
         ws.merge_cells(f"B{r}:H{r}")
         ws.row_dimensions[r].height = 42

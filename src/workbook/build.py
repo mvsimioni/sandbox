@@ -61,9 +61,10 @@ def _prepare(ctx: Ctx) -> None:
     links = []
     for r in ctx.rooms:
         for door in (r.get("pressure") or {}).get("doors", []):
-            if door["id"] in seen:
+            key = (door["id"], frozenset((r["number"], door["to"])))
+            if key in seen:
                 continue
-            seen.add(door["id"])
+            seen.add(key)
             if door["to"] not in tags:
                 raise InputError(f"door {door['id']}: node '{door['to']}' is not a room on Pressure or a pressure node")
             links.append(dict(door, room=r["number"], a=r["number"], b=door["to"]))

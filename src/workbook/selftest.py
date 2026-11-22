@@ -151,6 +151,49 @@ def ka_input() -> Dict[str, Any]:
     return d
 
 
+def compare_recompute(data: Dict[str, Any], rc: Path, tol_pct: float = TOL_PCT) -> List[Dict[str, Any]]:
+    """Independent recomputation (src.recompute.thermal, HIGHEST_FRACTION) against a recalculated workbook."""
+    from ..recompute.thermal import recompute
+    res = recompute(data, "HIGHEST_FRACTION")
+    wb = openpyxl.load_workbook(rc, data_only=True)
+    out: List[Dict[str, Any]] = []
+
+    def add(label, mine, theirs):
+        mine, theirs = float(mine or 0.0), float(theirs or 0.0)
+        diff = abs(mine - theirs)
+        pct = 100.0 * diff / abs(theirs) if theirs else (0.0 if diff < 1e-9 else 100.0)
+        out.append(dict(item=label, workbook=mine, recomputed=theirs, diff_pct=pct, ok=pct <= tol_pct or diff <= 0.05))
+
+    af = wb["Airflow"]
+    hdr = {h: i for i, h in enumerate(c.value for c in af[5])}
+    by_no = {r["number"]: r for r in res["rooms"]}
+    for row in af.iter_rows(min_row=7, values_only=True):
+        no = row[0]
+        if no in by_no:
+            r = by_no[no]
+            for lab, col, key in (("supply", "Final supply", "supply_lps"), ("outdoor air", "Outdoor air", "oa_lps"),
+                                  ("exhaust", "Exhaust", "exhaust_lps"), ("sensible W", "Room sensible", "sensible_w"),
+                                  ("latent W", "Room latent", "latent_w")):
+                add(f"room {no} {lab}", row[hdr[col]], r[key])
+    ah = wb["AHU"]
+    for t, a in enumerate(res["ahus"]):
+        pick = lambda key: ah.cell(row=7 + t, column=AHU_KEYS.index(key) + 1).value
+        add(f"AHU {a['tag']} supply", pick("sa_ahu"), a["supply_lps"])
+        add(f"AHU {a['tag']} outdoor air", pick("oa_rule"), a["oa_lps"])
+        add(f"AHU {a['tag']} coil kW", pick("coil"), a["coil_total_kw"])
+    ps = wb["Pressure"]
+    ph = {}
+    for i, c in enumerate(ps[5]):
+        if c.value and c.value not in ph:
+            ph[c.value] = i
+    for row in ps.iter_rows(min_row=7, values_only=True):
+        no = row[0]
+        if no in by_no and by_no[no].get("pressure") and by_no[no]["pressure"].get("mode") == "controlled" \
+                and isinstance(row[ph["Offset needed"]], (int, float)):
+            add(f"room {no} offset needed m3/h", row[ph["Offset needed"]], by_no[no]["pressure"]["offset_needed_m3h"])
+    return out
+
+
 def _cell(wb, sheet, row_pred, col):
     ws = wb[sheet]
     for r in ws.iter_rows(min_row=1):
@@ -299,6 +342,13 @@ def run(work: Optional[Path] = None, report: Optional[Path] = None) -> int:
     for k in ka:
         if not k["ok"]:
             fails.append(f"known answer {k.get('case')} {k.get('check', '')}: {k['computed']} vs {k['expected']}")
+    # (2b) independent recomputation against both recalculated workbooks (0.5 %)
+    rec = [dict(x, workbook_name="Rev A rebuild") for x in compare_recompute(data, rc)] + \
+          [dict(x, workbook_name="known-answer department") for x in compare_recompute(ka_data, krc)]
+    results["recompute"] = rec
+    for x in rec:
+        if not x["ok"]:
+            fails.append(f"recomputation {x['workbook_name']} {x['item']}: {x['workbook']:.3f} vs {x['recomputed']:.3f} ({x['diff_pct']:.2f} %)")
     # (3) error scan
     err = {"reva_rebuild": scan_errors(rc), "known_answer_dept": scan_errors(krc)}
     results["errors"] = err
@@ -344,6 +394,7 @@ def run(work: Optional[Path] = None, report: Optional[Path] = None) -> int:
     print(f"  outdoor air under the 8.2 rule: {cmp_['rule_oa']:.1f} L/s ({cmp_['crit_room']} fraction {cmp_['crit_frac']:.4f} x AHU supply); coil {cmp_['rule_coil']:.2f} kW")
     print("== Known answers ==")
     print(f"  {sum(1 for k in ka if k['ok'])} of {len(ka)} pass")
+    print(f"== Independent recomputation: {sum(1 for x in rec if x['ok'])} of {len(rec)} lines within {TOL_PCT} %")
     print(f"== Errors: {sum(len(v) for v in err.values())}; formulas {fs['n_formula']}; typed literals {len(fs['literals'])}; IFERROR {len(fs['iferror'])}")
     print(f"== Style proof: {results['style']['n_coded']} coded cells, {len(results['style']['problems'])} problems")
     print(f"== PDF: {pdf['pages']} pages, footer found {pdf['footer_found']}")

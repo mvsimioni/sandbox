@@ -14,7 +14,7 @@ from .styles import CODE_STYLES, put, tag_variant, link_to
 BUILTIN_SOURCES = [
     {"id": "GEN-ENGINE", "document": "Beca NDH Inpatients HVAC Load Calc template and Rev A worked example",
      "issue": "Rev A, 1 Oct 2026", "page": "sheet Level 1 Room Zones, AHU Summary",
-     "location": "formula chain and conventions (10 % safety factor, 1.21 / 1.2 / 1.18 air constants, 3.517 kW per RT)",
+     "location": "formula chain and conventions (10 % safety factor, 1.21 / 1.2 / 1.18 air constants)",
      "text_as_read": "template conventions", "method": "template_spec.md (out/qa)", "confidence": "high"},
     {"id": "GEN-CONFIG", "document": "config/project.yaml, Section 11 defaults of the brief",
      "issue": "22 Nov 2026", "page": "defaults_to_confirm", "location": "duct leakage 10 %; outdoor-air rule 5 % and 5 pp",
@@ -37,7 +37,6 @@ DEFAULTS: Dict[str, Tuple] = {
                           "GEN-ENGINE", "template"),
     "AirDensity": ("Air density", 1.2, "kg/m³", "S", "GEN-PRESSURE", "also the density of the door-gap equation"),
     "AirLatentFactor": ("Air constant, latent (infiltration)", 1.18, "W per (L/s kJ/kg)", "S", "GEN-ENGINE", "template"),
-    "KwPerRT": ("Refrigeration ton", 3.517, "kW per RT", "S", "GEN-ENGINE", "template"),
     "ConvM3hPerLps": ("Conversion, m³/h per L/s", 3.6, "–", "S", "GEN-ENGINE", "unit conversion"),
     "SecPerHour": ("Seconds per hour", 3600, "s", "S", "GEN-PRESSURE", "door-gap equation"),
     "WperkW": ("Watts per kilowatt", 1000, "W", "S", "GEN-ENGINE", "unit conversion"),
@@ -91,7 +90,7 @@ OPTIONAL_BLANK = {
 GROUPS = [
     ("Load method", ["SafetyFactor", "SupplyTemp", "InfiltrationACH", "RoofSolarGain", "OutdoorDB", "OutdoorWB", "OutdoorH",
                      "AirSensibleFactor", "AirDensity", "AirLatentFactor", "RoundTo", "ConvM3hPerLps", "PercentBase",
-                     "WperkW", "KwPerRT"]),
+                     "WperkW"]),
     ("AHU totalisation", ["DuctLeakage", "FanPressure", "FanEfficiency", "OAShare", "OADrop", "PAHUOffT", "PAHUOffH"]),
     ("Pressure method", ["AirtightLimit", "TighterLimit", "FlowN", "FlowNLow", "FlowNHigh", "DoorCd", "RefPressure",
                          "RatioFail", "RatioVerify", "ApplyFromPa", "SecPerHour", "MMperM", "CM2perM2", "GapSides",

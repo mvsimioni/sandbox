@@ -332,7 +332,7 @@ AF_F: Dict[str, str] = {
     "single": "={CR.single}",
     "exhaust": '=IF({single}="Y",{extract},IF({kind}="EXHAUST",MAX({ex_min},{off}),{ex_min}))',
     "ret": "={extract}-{exhaust}", "oa_air": "={ENG.oa}",
-    "oa": '=IF({supply}>0,MAX({oa_air},{exhaust}+IF({kind}="SUPPLY",{off},0)),0)',
+    "oa": '=IF({supply}>0,MIN({supply},MAX({oa_air},{exhaust}+IF({kind}="SUPPLY",{off},0))),0)',
     "frac": "=IF({supply}>0,{oa}/{supply},0)",
     "minflow": "=MIN({supply},MAX({ac},{oa},{pm}))",
     "ok": '=IF({supply}>=MAX({th},{ac},{pm}),"PASS","FAIL")',
@@ -403,6 +403,11 @@ def write_airflow(ctx: Ctx) -> None:
         put(ws, g("cmark0"), f'=IF(AND({g("in1")}=1,{g("frac")}>0,{g("frac")}={g("max1")}),{g("ahu")},"")', "CalcTag")
         put(ws, g("cmark1"), expand(
             ctx, f'=IF(AND({g("sepf")}=0,{g("supply")}>0,{g("frac")}>0,{g("frac")}=_xlfn.MAXIFS([AF.frac],[AF.ahu],{g("ahu")},[AF.sepf],0)),{g("ahu")},"")',
+            L, i), "CalcTag")
+        put(ws, g("ref0"), expand(
+            ctx, f'=IF(AND({g("supply")}>0,COUNTIFS({L.upto("ahu", i)},{g("ahu")},{L.upto("supply", i)},">0")=1),{g("ahu")},"")', L, i), "CalcTag")
+        put(ws, g("ref1"), expand(
+            ctx, f'=IF(AND({g("sepf")}=0,{g("supply")}>0,COUNTIFS({L.upto("ahu", i)},{g("ahu")},{L.upto("supply", i)},">0",{L.upto("sepf", i)},0)=1),{g("ahu")},"")',
             L, i), "CalcTag")
         put(ws, g("fcu"), f'=IF(OR({g("systype")}="FCU",{g("sepf")}=1),1,0)', "Calc", "d0")
         put(ws, g("fcurank"), f'=IF({g("fcu")}=1,SUM({L.upto("fcu", i)}),0)', "Calc", "d0")

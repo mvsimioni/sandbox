@@ -77,9 +77,9 @@ FRAME_TEXT = ("polygon_pv_wkt: page view (raw*page.rotation_matrix), pt, origin 
 def storey_info(key: str) -> dict:
     P = common.resolve_paths()
     reg = P["registers"]
-    rows = [r for r in common.read_csv_dicts(reg / "sheet_index.csv") if r["storey_key"] == key and int(r["page"]) <= 10]
+    rows = [r for r in common.read_csv_dicts(reg / "sheet_index.csv") if r["storey_key"] == key and int(r["page"]) <= 11]
     if not rows:
-        raise SystemExit("storey %s is not on pages 1 to 10 of out/registers/sheet_index.csv" % key)
+        raise SystemExit("storey %s is not on pages 1 to 11 of out/registers/sheet_index.csv" % key)
     r = rows[0]
     ap = sorted({int(x["page"]) for x in common.read_csv_dicts(reg / "appd_spaces.csv") if x["drawing_number"] == r["drawing_number"]})
     return {"key": key, "page": int(r["page"]), "page0": int(r["page"]) - 1, "drawing": r["drawing_number"], "title": r["title"],
