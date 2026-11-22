@@ -1507,9 +1507,9 @@ def test_department_mapping_covers_the_booklet_folder_and_skips_non_booklets() -
     if folder.is_dir():
         assert {p.name for p in folder.iterdir() if p.is_file()} == set(mapping)        # every file of the folder has an entry
     booklets = {n: e for n, e in mapping.items() if e["booklet"]}
-    assert len(booklets) == 19
+    assert len(booklets) == 30
     assert sorted(e["dept_no"] for e in booklets.values()) == sorted(
-        "01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 26 30 42".split())          # one department number per booklet
+        "01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 22 22 23 24 26 28 29 30 42".split())  # 22 has three booklets (MSOT, DSOT, AMSC)
     assert all(e["dept_title"].startswith(e["dept_no"] + " - ") and e["department_label"] for e in booklets.values())
     assert b.department_info(Path("IGH_DD Booklet_MDU_OCP.pdf")) == ("12", "Medical Day Unit")
     assert b.department_info(Path("20250804_IGH_DD Booklet_Data Centre R2_Markup.pdf")) == ("42", "Data Centre")
@@ -1538,3 +1538,367 @@ def test_registers_carry_dept_no_and_department_label_beside_department(tmp_path
     shutil.copy(src, folder / "AH Stacking Diagram.pdf")                                 # marked as not a booklet: skipped
     shutil.copy(src, folder / "Unlisted_Section_4.8_Mechanical_Ventilation_Strategy.pdf")
     assert [p.name for p in b.collect_inputs([str(folder)], tmp_path)] == ["Unlisted_Section_4.8_Mechanical_Ventilation_Strategy.pdf"]
+
+
+# --------------------------------------------------------------------------- #
+# Corrections after verification (4): Pharmacy layout, reviewer marks over cells, DI / ICU / MDU / Rehab
+# --------------------------------------------------------------------------- #
+def test_slightly_pressure_word_stays_in_the_pressure_column_and_long_title_keeps_its_mode(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    build_variant_criteria_page(doc, "area", [
+        ("IPAS / Kiosk", {"pressure": "SLIGHTLY +VE"}), ("Pantry", {"pressure": "SLIGHTLY -VE"}), ("Store", {"pressure": "NEUTRAL"})],
+        title="", subtitle="Basement 2 Pharmacy – Compounding Lab – Setback Mode 1")
+    page = doc[0]
+    # the title runs on past the section strip's left edge (x = 650): a 20 pt line below the strip, as on Pharmacy p8
+    page.insert_text((540, 100 + 20 * 0.85), "Mode 1", fontname="f", fontsize=20)
+    res = _parse(_save(doc, tmp_path, "IGH_DD Booklet_Pharmacy_Y.pdf"), tmp_path)
+    rows = res["criteria"]
+    assert [r["room_type_as_printed"] for r in rows] == ["IPAS / Kiosk", "Pantry", "Store"]      # no 'SLIGHTLY' in the name
+    assert [r["pressure_regime_as_printed"] for r in rows] == ["SLIGHTLY +VE", "SLIGHTLY -VE", "NEUTRAL"]
+    assert [r["pressure_direction"] for r in rows] == ["positive", "negative", "neutral"]
+    assert all(not r["room_type_norm"].endswith("slightly") for r in rows)
+
+
+def test_title_words_past_x650_below_the_strip_are_part_of_the_table_part(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    cv = Canvas(doc)
+    cv.page.insert_text((745, 18 + 15 * 0.85), STRIP_48, fontname="f", fontsize=15)
+    cv.text(64, 85, "Basement 2 Pharmacy – Compounding Lab –", 22)
+    cv.text(560, 85, "Setback Mode", 22)
+    cv.text(716, 85, "3", 22)                                    # the mode number prints right of x = 650
+    cv.rect(50, 120, 1140, 190, fill=(0.35, 0.6, 0.83))
+    for key, lines in HEAD_STYLES["area"].items():
+        for i, line in enumerate(lines):
+            cv.text(CENTRE[key] if key != "room" else 200, 148 + 14 * i - 7 * len(lines), line, 11, centre=True)
+    cv.text(150, 215, "Gown-Up", 11)
+    for key, val in {**BASE_CELLS, "pressure": "+15"}.items():
+        cv.text(CENTRE[key], 215, val, 11, centre=True)
+    _footer(cv, "140")
+    res = _parse(_save(doc, tmp_path, "IGH_DD Booklet_Pharmacy_Z.pdf"), tmp_path)
+    assert [r["table_part"] for r in res["criteria"]] == ["Basement 2 Pharmacy – Compounding Lab – Setback Mode 3"]
+
+
+def _rotated(page: "pymupdf.Page", x: float, y_bottom: float, text: str, size: float = 16.0) -> None:
+    page.insert_text((x, y_bottom), text, fontname="f", fontsize=size, rotate=90)
+
+
+def test_merged_department_cell_gives_the_zone_of_the_rows_it_spans(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    build_variant_criteria_page(doc, "area", [("Pantry", {"pressure": "NEUTRAL"}), ("Locker", {"pressure": "-VE"}),
+                                              ("UPS Room", {"pressure": "NEUTRAL"})], title="", subtitle="Basement 2 Pharmacy")
+    page = doc[0]
+    page.insert_text((58, 128 + 11 * 0.85), "DEPARTMENT", fontname="f", fontsize=11)
+    page.draw_rect(pymupdf.Rect(56, 205, 140, 275), color=None, fill=(0.8, 0.85, 0.95))        # merged cell over two rows
+    page.draw_rect(pymupdf.Rect(56, 275, 140, 309), color=None, fill=(0.9, 0.93, 0.97))        # a cell of its own
+    _rotated(page, 90, 268, "LEVEL B2 – PHARM", 7.0)                                           # reads bottom to top
+    _rotated(page, 80, 300, "B", 7.0)                                                          # wrapped one character per line
+    _rotated(page, 100, 300, "1", 7.0)
+    page.draw_rect(pymupdf.Rect(0, 0, 51, 842), color=None, fill=(0.5, 0.5, 0.5))              # the binding gutter strip
+    _rotated(page, 30, 600, "BINDING GUTER- TO BE REMOVED WHEN PRINTING", 12)
+    res = _parse(_save(doc, tmp_path, "IGH_DD Booklet_Pharmacy_W.pdf"), tmp_path)
+    rows = res["criteria"]
+    assert [r["room_type_as_printed"] for r in rows] == ["Pantry", "Locker", "UPS Room"]
+    assert [r["zone"] for r in rows] == ["LEVEL B2 – PHARM", "LEVEL B2 – PHARM", "B1"]
+    # a table with no DEPARTMENT column keeps a blank zone
+    doc2 = pymupdf.open()
+    build_variant_criteria_page(doc2, "area", [("Pantry", {"pressure": "NEUTRAL"})], title="", subtitle="I-Care – Operation Mode")
+    assert [r["zone"] for r in _parse(_save(doc2, tmp_path, "IGH_DD Booklet_I-CARE_Q.pdf"), tmp_path)["criteria"]] == [""]
+
+
+def _words(*items):
+    return [b.Word(x, y, x + 6.0 * len(t), y + 12.0, t, 12.0) for t, x, y in items]
+
+
+def test_wrapped_room_names_are_closed_up_after_a_hyphen_and_before_a_stranded_letter() -> None:
+    assert b.join_room_words(_words(("Workstation/Multi-", 60, 100), ("Purpose", 60, 118), ("Room", 110, 118))) == \
+        "Workstation/Multi-Purpose Room"
+    assert b.join_room_words(_words(("Preparation/Inspectio", 64, 421), ("n", 64, 442), ("Room", 76, 442))) == \
+        "Preparation/Inspection Room"
+    assert b.join_room_words(_words(("Sterile", 64, 205), ("Compounding", 110, 205), ("Clean", 64, 227), ("Room,", 104, 227))) == \
+        "Sterile Compounding Clean Room,"
+    assert b.join_room_words(_words(("ATDPS", 64, 205), ("–", 110, 205), ("Cleaing", 64, 227))) == "ATDPS – Cleaing"
+    assert b.join_room_words(_words(("Wing", 64, 205), ("A", 64, 227), ("Store", 80, 227))) == "Wing A Store"      # a capital is a word
+
+
+def _mark_rows(*boxes):
+    return [{"cells": {}, "box": box, "marks": []} for box in boxes]
+
+
+def _comment(tip, rect, text="comment", mod=None, order=0):
+    return {"kind": "comment", "type": "FreeText", "text": text, "author": "", "tip": tip, "rect": rect, "mod": mod, "order": order}
+
+
+def _region(kind, rect, created=None):
+    return {"kind": "region", "type": kind, "author": "rev", "rect": rect, "created": created}
+
+
+def test_circles_polygons_and_highlights_are_attached_to_the_rows_they_cover() -> None:
+    cols = b.TableColumns({"room": (60, 120), "pressure": (260, 330), "single_pass": (500, 560)}, 150.0, {})
+    rows = _mark_rows((60, 200, 560, 216), (60, 224, 560, 240), (60, 248, 560, 264))
+    words = _words(("Ultrasound", 60, 224), ("+ve", 280, 224), ("No", 520, 224))
+    marks = [_region("Circle", (250, 221, 340, 243)),                 # round the second row's pressure cell only
+             _region("Polygon", (55, 244, 565, 268)),                 # a cloud round the whole third row
+             _region("Highlight", (60, 225, 100, 238))]               # the first word of the second row
+    b.link_marks(rows, marks, words, cols)
+    assert rows[0]["marks"] == []
+    text1 = [m["text"] for m in rows[1]["marks"]]
+    assert text1[0] == "circled by a reviewer Circle annotation (rev) around its Pressure cell"
+    assert text1[1].startswith("highlighted by a reviewer Highlight annotation (rev)") and "'Ultrasound'" in text1[1]
+    assert [m["text"] for m in rows[2]["marks"]] == ["outlined by a reviewer Polygon annotation (rev) around its Room, Pressure and Single Pass cells"]
+
+
+def test_comment_is_linked_to_circled_rows_a_second_arrow_and_a_circle_drawn_just_after_it() -> None:
+    cols = b.TableColumns({"room": (60, 120), "pressure": (260, 330), "single_pass": (500, 560)}, 150.0, {})
+    # rows: Toilet, Ultrasound, Ultrasound Procedure, MRI, CT Procedure, CT Control Room
+    rows = _mark_rows((60, 420, 560, 437), (60, 444, 560, 461), (60, 468, 560, 485),
+                      (60, 500, 560, 517), (60, 524, 560, 541), (60, 548, 560, 580))
+    words: list = []
+    toilet_tip = _comment((212.0, 438.0), (212.0, 44.0, 552.0, 438.0), "Why +ve?", mod=1000.0, order=0)
+    air = _comment((520.0, 550.0), (600.0, 300.0, 900.0, 340.0), "Air purging", mod=5000.0, order=1)
+    marks = [toilet_tip, air,
+             _region("Circle", (250, 442, 340, 465), created=1009.0),         # 9 s after the first comment was saved
+             _region("Circle", (250, 466, 340, 488), created=1012.0),
+             _region("Circle", (480, 498, 580, 520), created=100.0),          # same cells (Single Pass) as the circle the arrow lands in
+             _region("Circle", (480, 522, 580, 544), created=110.0),
+             _region("Circle", (480, 546, 580, 584), created=120.0)]
+    rows[0]["marks"], rows[5]["marks"] = [toilet_tip], [air]       # the arrow tips as parse_criteria_page finds them (Toilet, CT Control Room)
+    b.link_marks(rows, marks, words, cols)
+    held = [[m.get("text") for m in r["marks"] if m["kind"] == "comment"] for r in rows]
+    assert held == [[], ["Why +ve?"], ["Why +ve?"], ["Air purging"], ["Air purging"], ["Air purging"]]
+    assert all(any(m["kind"] == "region" for m in rows[i]["marks"]) for i in range(1, 6)) and not rows[0]["marks"]
+
+
+def test_second_arrow_and_a_tip_below_the_last_row_attach_the_comment() -> None:
+    cols = b.TableColumns({"room": (60, 120), "pressure": (260, 330)}, 150.0, {})
+    rows = _mark_rows((60, 380, 560, 416), (60, 470, 560, 486))
+    c = _comment((301.0, 391.0), (301.0, 361.0, 542.0, 396.0), "inconsistent", order=0)
+    rows[0]["marks"] = [c]
+    arrow = {"kind": "arrow", "type": "Line", "verts": [(401.0, 380.0), (307.0, 481.0)]}
+    b.link_marks(rows, [c, arrow], [], cols)
+    assert [[m.get("text") for m in r["marks"]] for r in rows] == [["inconsistent"], ["inconsistent"]]
+    low = _comment((558.0, 500.0), (558.0, 515.0, 780.0, 616.0), "compressor", order=0)          # 14 pt below the last row
+    rows2 = _mark_rows((60, 380, 560, 416), (60, 470, 560, 486))
+    b.link_marks(rows2, [low], [], cols)
+    assert [len(r["marks"]) for r in rows2] == [0, 1]
+    far = _comment((558.0, 700.0), (558.0, 715.0, 780.0, 816.0), "far away", order=0)
+    rows3 = _mark_rows((60, 380, 560, 416))
+    b.link_marks(rows3, [far], [], cols)
+    assert rows3[0]["marks"] == []
+
+
+def test_pdf_seconds_reads_annotation_dates() -> None:
+    a, c = b.pdf_seconds("D:20250916065758+08'00'"), b.pdf_seconds("D:20250916065807+08'00'")
+    assert c - a == 9.0 and b.pdf_seconds("") is None and b.pdf_seconds("garbage") is None
+
+
+def test_marks_round_cells_end_to_end_and_released_departments_stay_as_released(tmp_path: Path) -> None:
+    def build(path_name: str) -> Path:
+        doc = pymupdf.open()
+        build_variant_criteria_page(doc, "area", [("Ultrasound", {"pressure": "+VE"}), ("Toilet", {"pressure": "-VE"})],
+                                    title="ACMV", subtitle="I-Care – Operation Mode")
+        page = doc[0]
+        page.add_circle_annot(pymupdf.Rect(CENTRE["pressure"] - 30, 205, CENTRE["pressure"] + 30, 232))
+        return _save(doc, tmp_path, path_name)
+
+    rows = _parse(build("IGH_DD Booklet_I-CARE_C.pdf"), tmp_path)["criteria"]
+    assert rows[0]["reviewer_markup"] == "circled by a reviewer Circle annotation around its Pressure cell" and rows[1]["reviewer_markup"] == ""
+    released = _parse(build("Paeds_Section_4.8_Mechanical_Ventilation_Strategy.pdf"), tmp_path)["criteria"]
+    assert [r["reviewer_markup"] for r in released] == ["", ""]          # a released department's register is not changed
+
+
+def test_number_under_single_pass_is_flagged_as_a_shifted_row_and_repeated_room_names_are_flagged(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    build_variant_criteria_page(doc, "area", [
+        ("Toilet", {"pressure": "-VE", "total": "20", "single": "20", "aclass": "NR", "filter": "3"}),
+        ("Anteroom (NEP ISO)", {"pressure": "-15", "total": "10"}), ("Anteroom (NEP ISO)", {"pressure": "15", "total": "2", "filter": "HEPA"}),
+        ("Store", {"pressure": "NEUTRAL"})], title="ACMV", subtitle="I-Care – Operation Mode")
+    rows = _parse(_save(doc, tmp_path, "IGH_DD Booklet_I-CARE_D.pdf"), tmp_path)["criteria"]
+    flag = [json_raw(r).get("source_flag", "") for r in rows]
+    assert "shifted one column" in flag[0] and "'20'" in flag[0] and "'NR'" in flag[0] and "'3'" in flag[0]
+    assert rows[0]["single_pass"] == "" and rows[0]["air_class"] == "NR" and rows[0]["filter"] == "3"      # as printed
+    assert flag[1] == flag[2] and "printed on 2 rows" in flag[1] and "-15 / 15" in flag[1] and flag[3] == ""
+    assert rows[1]["pressure_pa"] == "-15" and rows[2]["pressure_pa"] == "" and rows[2]["filter"] == "HEPA"   # values untouched (15 has no sign)
+
+
+def test_vision_rows_carry_the_department_column_as_zone(tmp_path: Path, monkeypatch) -> None:
+    import json
+    cols = ["room", "pressure", "min_oa", "min_total", "single_pass", "air_class", "filter", "rh", "temp", "afterhours", "setback"]
+    sidecar = tmp_path / "vision.json"
+    sidecar.write_text(json.dumps({"IGH_DD Booklet_IMG2.pdf": {"1": {"table_part": "Medical Day Unit – Operation Mode",
+                                                                      "department_column": "MDU", "cols": cols, "rows": [
+        ["Clean Utility", "+VE", "2", "6", "NR", "2", "MERV 15", "Max 60%", "21-24", "Y", "N"]]}}}), encoding="utf-8")
+    monkeypatch.setattr(b, "VISION_ROWS_PATH", sidecar)
+    doc = pymupdf.open()
+    _image_page(doc)
+    assert [r["zone"] for r in _parse(_save(doc, tmp_path, "IGH_DD Booklet_IMG2.pdf"), tmp_path)["criteria"]] == ["MDU"]
+
+
+def test_design_parameter_page_is_recorded_as_notes(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    cv = Canvas(doc)
+    cv.text(745, 18, "4   DEPARTMENT DRAWINGS", 15)
+    cv.text(745, 54, STRIP_48, 15)
+    cv.text(64, 75, "Basement 2 Pharmacy – Compounding Lab – Design Parameter", 26.76)
+    cv.text(66, 110, "1. Grade C:", 14)
+    cv.text(80, 130, "- Design parameter for Clean Room is Grade C", 14)
+    cv.text(66, 160, "2. Grade D:", 14)
+    cv.text(80, 180, "- ISO 8 recommends an air change range of 15-25 ACH", 14)
+    cv.text(82, 446, "Ramp-Down Strategies:", 14)
+    cv.text(82, 475, "Mode", 14)
+    cv.text(416, 475, "Description", 14)
+    cv.text(82, 505, "Operation Mode", 14)
+    cv.text(416, 505, "Optimal operational parameters", 14)
+    cv.text(82, 534, "Setback Mode 1", 14)
+    cv.text(416, 534, "ACH reduced to minimum allowable limit,", 14)
+    cv.text(416, 556, "maintained", 14)
+    cv.text(82, 584, "Setback Mode 2", 14)
+    cv.text(416, 584, "CHW supply cut off", 14)
+    cv.text(82, 643, "Recommend Setback Mode: Setback Mode", 14)
+    cv.text(416, 643, "Greater Energy Savings: CHW energy usage is dominant", 14)
+    cv.text(82, 664, "2", 14)
+    cv.text(416, 664, "cutting-off supply", 14)
+    cv.text(416, 707, "Easier Control: Adjusting CHW supply is straightforward", 14)
+    _footer(cv, "137")
+    res = _parse(_save(doc, tmp_path, "IGH_DD Booklet_Pharmacy_P.pdf"), tmp_path)
+    assert res["pages"][0]["class"] == "other"
+    got = [(n["note_number"], n["text"], n["note_kind"]) for n in res["notes"] if n["note_kind"] == "design parameter text"]
+    assert got == [
+        ("1", "Grade C: - Design parameter for Clean Room is Grade C", "design parameter text"),
+        ("2", "Grade D: - ISO 8 recommends an air change range of 15-25 ACH", "design parameter text"),
+        ("Operation Mode", "Optimal operational parameters", "design parameter text"),
+        ("Setback Mode 1", "ACH reduced to minimum allowable limit, maintained", "design parameter text"),
+        ("Setback Mode 2", "CHW supply cut off", "design parameter text"),
+        ("Recommend Setback Mode", "Setback Mode 2", "design parameter text"),
+        ("Greater Energy Savings", "CHW energy usage is dominant cutting-off supply", "design parameter text"),
+        ("Easier Control", "Adjusting CHW supply is straightforward", "design parameter text")]
+
+
+def test_wrapped_room_name_is_closed_up_on_a_page_and_left_as_before_for_a_released_department(tmp_path: Path) -> None:
+    def build(name: str) -> list:
+        doc = pymupdf.open()
+        build_variant_criteria_page(doc, "area", [("Workstation/Multi-", {"pressure": "NEUTRAL"}),
+                                                  ("Preparation/Inspectio", {"pressure": "NEUTRAL"})],
+                                    title="ACMV", subtitle="I-Care – Operation Mode")
+        doc[0].insert_text((150, 215 + 13 + 9), "Purpose Room", fontname="f", fontsize=11)
+        doc[0].insert_text((150, 249 + 13 + 9), "n Room", fontname="f", fontsize=11)
+        return [r["room_type_as_printed"] for r in _parse(_save(doc, tmp_path, name), tmp_path)["criteria"]]
+
+    assert build("IGH_DD Booklet_I-CARE_E.pdf") == ["Workstation/Multi-Purpose Room", "Preparation/Inspection Room"]
+    assert build("Palliative_Section_4.8_Mechanical_Ventilation_Strategy.pdf") == \
+        ["Workstation/Multi- Purpose Room", "Preparation/Inspectio n Room"]        # released: its register is not changed
+
+
+# --------------------------------------------------------------------------- #
+# Short DD booklets: A4 pages stored portrait with /Rotate 90 (AMSC, CATH, DSOT, Endo, LabMed, MSOT)
+# --------------------------------------------------------------------------- #
+K = 842.0 / 1191.0           # the tests draw in A3 space; the page is A4
+
+
+def _short_page(doc: "pymupdf.Document", stamp_number: str = "111"):
+    """A /Rotate 90 page, portrait mediabox 595 x 842, drawn with a helper that takes upright A3 coordinates."""
+    page = doc.new_page(width=595.0, height=842.0)
+    page.set_rotation(90)
+    page.insert_font(fontname="f", fontfile=FONT_FILE)
+    inv = ~page.rotation_matrix
+
+    def text(x: float, y: float, s: str, size: float = 12.0) -> None:
+        dx, dy = text.offset          # a second layer is laid down 12 pt right and 2.4 pt down (LabMed p6)
+        p = pymupdf.Point((x + dx) * K, (y + dy + size * 0.85) * K) * inv
+        page.insert_text(p, s, fontname="f", fontsize=size * K, rotate=90)
+
+    def rect(x0: float, y0: float, x1: float, y1: float) -> None:
+        r = pymupdf.Rect(x0 * K, y0 * K, x1 * K, y1 * K) * inv
+        page.draw_rect(pymupdf.Rect(min(r.x0, r.x1), min(r.y0, r.y1), max(r.x0, r.x1), max(r.y0, r.y1)),
+                       color=None, fill=(0.8, 0.85, 0.95))
+
+    text.offset = (0.0, 0.0)
+    text(700, 24, "4 DEPARTMENT DRAWINGS", 28)
+    text(660, 59, "4.8 MECHANICAL VENTILATION STRATEGY | DESIGN CRITERIA", 15)
+    text(60, 800, "ALEXANDRA HOSPITAL REDEVELOPMENT PROJECT | DETAILED DESIGN BOOKLET | MAY 2025", 12)
+    text(1150, 805, stamp_number, 16)
+    return text, rect
+
+
+def _short_header(text, first: str = "Theatre") -> None:
+    text(first and 100, 142, first, 14) if first else None
+    text(239, 142, "Room", 12)
+    for x, lines in ((482, ["Pressure", "Regime,", "Pa"]), (551, ["Min.", "Outd", "oor ACH"]),
+                     (623, ["Min.", "Total", "ACH"]), (705, ["Single", "Pass"]), (769, ["Air", "Class"]),
+                     (849, ["Filter"]), (906, ["Relative H", "umidity"]), (979, ["Design Te", "mperatur", "e, C"]),
+                     (1049, ["Afterhour", "s mode,", "Y/N"]), (1124, ["Setback", "mode,", "Y/N"])):
+        for i, ln in enumerate(lines):
+            text(x, 125 + 17 * i, ln, 12)
+    text(1088, 160, "1", 9)
+
+
+def _short_row(text, y: float, room: str, vals: list) -> None:
+    text(246, y, room, 12)
+    for x, v in zip((492, 575, 645, 715, 785, 825, 925, 990, 1070, 1140), vals):
+        text(x, y, v, 12)
+
+
+def test_short_booklet_rotated_page_rows_and_group_labels(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    text, rect = _short_page(doc)
+    _short_header(text)
+    rect(56, 175, 234, 300)
+    rect(56, 300, 234, 420)
+    for y0, y1 in ((175, 237), (237, 300), (300, 360), (360, 420)):
+        rect(234, y0, 474, y1)
+    text(80, 215, "Standard", 12)
+    text(80, 233, "Operating Theatre", 12)
+    text(80, 345, "NEP", 12)
+    text(80, 363, "Operating Theatre", 12)
+    vals = ["+25", "5", "25", "N/R", "2", "HEPA", "30-60", "18-25", "N", "Y"]
+    _short_row(text, 200, "Operating Theatre", vals)
+    _short_row(text, 262, "Clean Up & Dirty Utility", ["-5", "2", "20", "Yes", "4", "MERV 15", "≤60", "20-24", "N", "Y"])
+    _short_row(text, 322, "Ante Room (Staff)", ["+35", "15", "15", "Yes", "1", "HEPA", "30-60", "18-25", "N", "Y"])
+    _short_row(text, 382, "Anaesthetic Preparation", ["-5", "15", "15", "Yes", "4", "MERV 15", "30-60", "18-25", "N", "Y"])
+    res = _parse(_save(doc, tmp_path, "DD Booklet_DSOT_X.pdf"), tmp_path)
+    rows = res["criteria"]
+    assert res["page_failures"] == [] and [r["room_type_as_printed"] for r in rows] == [
+        "Operating Theatre", "Clean Up & Dirty Utility", "Ante Room (Staff)", "Anaesthetic Preparation"]
+    assert [r["zone"] for r in rows] == ["Standard Operating Theatre"] * 2 + ["NEP Operating Theatre"] * 2
+    first = rows[0]
+    assert (first["pressure_regime_as_printed"], first["pressure_pa"], first["min_oa_ach"], first["min_total_ach"]) == ("+25", "25", "5", "25")
+    assert (first["single_pass"], first["air_class"], first["filter"], first["rh_as_printed"], first["temp_as_printed"]) == \
+        ("NR", "2", "HEPA", "30-60", "18-25")
+    assert (first["afterhours"], first["setback"], first["note_refs"], first["booklet_page"]) == ("N", "Y", "1", "111")
+    assert rows[1]["single_pass"] == "Y" and rows[1]["rh_as_printed"] == "≤60"
+    x0, y0, x1, y1 = (float(v) for v in first["bbox"].split(","))        # boxes are in A4 points of the displayed page
+    assert 0 < x0 < x1 <= 842.0 and 0 < y0 < y1 <= 595.0
+
+
+def test_short_booklet_without_group_column_and_with_rooms_caption(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    text, rect = _short_page(doc, "95")
+    text(73, 38, "Rooms Part 2", 20)
+    _short_header(text, first="")
+    for y0, y1 in ((175, 237), (237, 300)):
+        rect(56, y0, 474, y1)
+    _short_row(text, 200, "Anteroom (Bronchoscopy)", ["+10", "10", "10", "N/R", "4", "HEPA", "40-60", "21-24", "N", "N"])
+    _short_row(text, 262, "Enclosed (Endo)", ["Neutral", "2", "6", "N/R", "2", "MERV 15", "≤60", "21-24", "N", "N"])
+    res = _parse(_save(doc, tmp_path, "DD Booklet_Endo_X.pdf"), tmp_path)
+    rows = res["criteria"]
+    assert [r["room_type_as_printed"] for r in rows] == ["Anteroom (Bronchoscopy)", "Enclosed (Endo)"]
+    assert all(r["zone"] == "" and r["table_part"] == "Rooms Part 2" for r in rows)       # not the Emergency zoned layout
+    assert rows[1]["pressure_direction"] == "neutral" and rows[0]["pressure_pa"] == "10"
+
+
+def test_short_booklet_second_layer_over_the_first_is_not_read_twice(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    text, rect = _short_page(doc)
+    rect(56, 175, 234, 560)
+    for i in range(8):
+        rect(234, 175 + 48 * i, 474, 223 + 48 * i)
+    for offset, air in (((0.0, 0.0), "3"), ((12.0, 2.4), "4")):          # the covered layer says Air Class 3, the top one 4
+        text.offset = offset
+        _short_header(text)
+        for i in range(8):
+            _short_row(text, 190 + 48 * i, "Room %d" % (i + 1), ["-20", "2", "8", "Yes", air, "MERV 15", "30-60", "21-23", "N", "N"])
+        text(80, 360, "MICROBIOLOGY", 14)
+    res = _parse(_save(doc, tmp_path, "DD Booklet_LabMed_X.pdf"), tmp_path)
+    rows = res["criteria"]
+    assert len(rows) == 8 and [r["room_type_as_printed"] for r in rows][:2] == ["Room 1", "Room 2"]
+    assert {r["air_class"] for r in rows} == {"4"} and {r["min_oa_ach"] for r in rows} == {"2"}
+    assert {r["zone"] for r in rows} == {"MICROBIOLOGY"}

@@ -110,6 +110,14 @@ SPLIT_HEADER_VOCAB = HEADER_VOCAB | {"re", "gime,", "outdo", "or", "hu", "midity
 # I-CARE (4.8): the first heading is 'AREA / ROOM' and the table sits under a 28 pt 'ACMV' heading with the operating mode
 # ('I-Care - Operation Mode') as its subtitle; used only when neither earlier header is found
 AREA_HEADER_VOCAB = HEADER_VOCAB | {"area", "/", "area/room", "department", "temperatur", "e"}
+# The six short DD booklets (A4, see ``page_xform``) wrap the headings mid-word in their cells ('Afterhour' / 's',
+# 'Design Te' / 'mperatur' / 'e, C', 'Relative H' / 'umidity', 'Min. Outd' / 'oor ACH'), may head the first column
+# 'Theatre', 'Department' or 'AREA / ROOM', and LabMed adds a 'Min. Total ACH (Purging)' column; used only after
+# the three header vocabularies above found nothing
+SHORT_HEADER_VOCAB = SPLIT_HEADER_VOCAB | AREA_HEADER_VOCAB | {
+    "theatre", "afterhour", "s", "te", "mperatur", "mperature", "h", "umidity", "m", "ode,", "outd", "oor",
+    "(purging)", ",c", "rooms", "re", "outdoo", "r", "e,"}
+SHORT_EXTRA_KEYS: List[Tuple[str, str]] = [("min_total_purging", r"purging")]
 NO_CAPTION_PART = "(no caption printed)"
 ZONED_CAPTION_RE = re.compile(r"^Rooms?\s+Part\s*(\d+)(?:\s*[–—\-]\s*(.+))?$", re.I)
 # Zones of the Emergency criteria table.  The table prints no zone column: the zone is the leading words of the room
@@ -192,6 +200,30 @@ def md(text: Any) -> str:
     return str(text).replace("|", "\\|").replace("\n", " ")
 
 
+A3_WIDTH = 1191.0       # every long booklet is A3 landscape; the geometry thresholds below are in that page space
+
+
+def page_xform(page: "pymupdf.Page") -> Optional["pymupdf.Matrix"]:
+    """Matrix from the stored page space to the page space the parser works in, or ``None`` (the page is used as is).
+
+    The six short DD booklets (AMSC, CATH, DSOT, Endo, LabMed, MSOT) are A4 pages stored portrait with /Rotate 90, so
+    the text layer comes out turned on its side; they are turned upright and enlarged to the A3 width of the other
+    booklets, so that the one set of geometry thresholds reads every file.  Registers carry the boxes back in A4
+    points (see ``unscale_boxes``)."""
+    if not page.rotation:
+        return None
+    m = pymupdf.Matrix(page.rotation_matrix)
+    if page.rect.width < 900.0:
+        k = A3_WIDTH / page.rect.width
+        m = m * pymupdf.Matrix(k, k)
+    return m
+
+
+def page_scale(page: "pymupdf.Page") -> float:
+    """Enlargement ``page_xform`` applies (1.0 for the A3 booklets)."""
+    return A3_WIDTH / page.rect.width if page.rotation and page.rect.width < 900.0 else 1.0
+
+
 def page_words(page: "pymupdf.Page") -> List[Word]:
     """Words of a page built from characters: U+200B is dropped from text and boxes.
 
@@ -200,6 +232,8 @@ def page_words(page: "pymupdf.Page") -> List[Word]:
     """
     out: List[Word] = []
     zero_width = "\u200b\u200c\u200d\u2060\ufeff"
+    rot = page_xform(page)      # /Rotate pages (the six short DD booklets): text is stored unrotated
+    k = page_scale(page)
     for block in page.get_text("rawdict").get("blocks", []):
         for line in block.get("lines", []):
             cur: List[Tuple[str, Tuple[float, float, float, float], float]] = []
@@ -217,6 +251,8 @@ def page_words(page: "pymupdf.Page") -> List[Word]:
                 for ch in span.get("chars", []):
                     c = ch["c"]
                     bbox = tuple(ch["bbox"])
+                    if rot is not None:
+                        bbox = tuple(pymupdf.Rect(bbox) * rot)
                     if c in zero_width:
                         state["pending"] = True
                         continue
@@ -229,10 +265,47 @@ def page_words(page: "pymupdf.Page") -> List[Word]:
                             and bbox[0] - state["last_x1"] > 1.5:
                         flush()
                     state["pending"] = False
-                    cur.append((c, bbox, size))
+                    cur.append((c, bbox, size * k))
                     state["last_x1"] = bbox[2]
             flush()
-    return [w for w in out if clean(w.text)]
+    out = [w for w in out if clean(w.text)]
+    if rot is not None:
+        out = _drop_double_print(out)
+    return out
+
+
+def _drop_double_print(words: List[Word]) -> List[Word]:
+    """Keep only the visible layer of a page whose text is laid down twice (LabMed p6: the second layer, 12 points right
+    and 2.4 points down, is painted over the first, and the two differ here and there: Air Class '3' under '4').
+
+    Evidence first: at least eight same-text words must have a twin to the right (up to 16 points) on nearly the same
+    line, and they must agree on one offset (within 1.5 points), else the page is left as it is.  Every word that has any
+    word at that offset from it is in the covered layer and is dropped; the layer on top stays, as printed."""
+    by_text: Dict[str, List[Word]] = defaultdict(list)
+    for w in words:
+        by_text[w.text].append(w)
+    offsets: List[Tuple[float, float]] = []
+    for ws in by_text.values():
+        for a in ws:
+            for b in ws:
+                if 4.0 <= b.x0 - a.x0 <= 16.0 and abs(b.cy - a.cy) < 4.0:
+                    offsets.append((b.x0 - a.x0, b.cy - a.cy))
+    if len(offsets) < 8:
+        return words
+    dx = sorted(o[0] for o in offsets)[len(offsets) // 2]
+    dy = sorted(o[1] for o in offsets)[len(offsets) // 2]
+    if sum(1 for o in offsets if abs(o[0] - dx) <= 1.5 and abs(o[1] - dy) <= 1.5) < 8:
+        return words
+    grid: Dict[Tuple[int, int], List[Word]] = defaultdict(list)
+    for w in words:
+        grid[(int(w.x0 // 4), int(w.cy // 4))].append(w)
+
+    def covered(a: Word) -> bool:
+        gx, gy = int((a.x0 + dx) // 4), int((a.cy + dy) // 4)
+        return any(abs(b.x0 - (a.x0 + dx)) <= 1.5 and abs(b.cy - (a.cy + dy)) <= 1.5 and b is not a
+                   for ix in (gx - 1, gx, gx + 1) for iy in (gy - 1, gy, gy + 1) for b in grid.get((ix, iy), []))
+
+    return [w for w in words if not covered(w)]
 
 
 def cluster_lines(words: Sequence[Word], tol: float = 4.0) -> List[List[Word]]:
@@ -254,9 +327,33 @@ def join_words(words: Sequence[Word]) -> str:
     return clean(" ".join(w.text for line in cluster_lines(words) for w in line))
 
 
+def join_room_words(words: Sequence[Word]) -> str:
+    """Join a wrapped room name.  Where the cell breaks a line inside a word the pieces are closed up: after a hyphen
+    (ICU HDU ``Multi-`` / ``Purpose Room`` reads ``Multi-Purpose Room``) and before a stranded lower-case letter
+    (Pharmacy ``Preparation/Inspectio`` / ``n Room`` reads ``Preparation/Inspection Room``).  Words on one line are joined
+    with a space as before."""
+    out = ""
+    prev: Optional[Word] = None
+    for line in cluster_lines(words):
+        for i, w in enumerate(line):
+            if i == 0 and prev is not None:
+                if re.search(r"[A-Za-z]-$", prev.text) and re.match(r"[A-Za-z]", w.text):
+                    out += w.text
+                    prev = w
+                    continue
+                if re.fullmatch(r"[b-z]", w.text) and len(line) > 1 and re.search(r"[A-Za-z]{4}$", prev.text):
+                    out += w.text
+                    prev = w
+                    continue
+            out += (" " if out else "") + w.text
+            prev = w
+    return clean(out)
+
+
 def is_gutter(word: Word) -> bool:
     """The rotated 'BINDING GUTER' strip along the left edge."""
-    return word.x1 < 50.0
+    # the A4 short booklets, enlarged to A3 width, set the 24 pt gutter note a little wider (x1 about 57)
+    return word.x1 < 50.0 or (word.x0 < 40.0 and word.x1 < 62.0 and 23.0 <= word.size < 25.0)
 
 
 MONTHS = ("JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE", "JULY", "AUGUST", "SEPTEMBER", "OCTOBER",
@@ -710,7 +807,8 @@ def find_header(words: Sequence[Word], vocab: Optional[set] = None) -> Optional[
             hi += 1
         header = [w for ln in all_lines[lo:hi + 1] for w in ln]
         texts = " ".join(w.text.lower() for w in header)
-        split = vocab is SPLIT_HEADER_VOCAB                 # headings wrapped mid-word: match on the text with the breaks closed
+        short = vocab is SHORT_HEADER_VOCAB
+        split = vocab is SPLIT_HEADER_VOCAB or short                # headings wrapped mid-word: match on the text with the breaks closed
         if "pressure" not in texts or "midity" not in texts:     # 'midity' also closes the wrapped 'Hu' / 'midity'
             continue
         # footnote superscripts in the header: digit-only words smaller than the header text
@@ -725,7 +823,7 @@ def find_header(words: Sequence[Word], vocab: Optional[set] = None) -> Optional[
         for cl in clusters:
             text = join_words(cl).lower()
             closed = text.replace(" ", "")
-            for key, pat in HEADER_KEYS:
+            for key, pat in (SHORT_EXTRA_KEYS + HEADER_KEYS if short else HEADER_KEYS):
                 if key not in mapping and (re.search(pat, text) or (split and re.search(pat, closed))):
                     mapping[key] = (min(w.x0 for w in cl), max(w.x1 for w in cl))
                     texts[key] = join_words(cl)
@@ -783,7 +881,7 @@ def department_cells(dept_words: Sequence[Word], rects: Sequence[Tuple[float, fl
     column that holds such words is one cell; ``(y0, y1, text)`` is its extent and its text as printed (a wrap of one
     or two characters per line is closed up: ``B`` / ``1`` reads ``B1``).  No rectangle, no zone."""
     out: List[Tuple[float, float, str]] = []
-    cells = [r for r in rects if r[2] <= room_x0 + 1.0 and r[0] < edge and r[3] - r[1] > 20.0]
+    cells = [r for r in rects if r[2] <= room_x0 + 1.0 and 50.0 <= r[0] < edge and r[3] - r[1] > 20.0]
     for r in sorted(cells, key=lambda r: r[1]):
         ws = [w for w in dept_words if r[0] <= w.cx <= r[2] and r[1] <= w.cy <= r[3]]
         if not ws:
@@ -800,10 +898,47 @@ def department_cells(dept_words: Sequence[Word], rects: Sequence[Tuple[float, fl
     return out
 
 
+def group_cells(words: Sequence[Word], rects: Sequence[Tuple[float, float, float, float]], cols: "TableColumns",
+                top: float, bottom: float) -> Tuple[List[Tuple[float, float, str]], set]:
+    """Group-label cells of a short DD booklet table: filled cells at the left edge whose right neighbour is the room
+    cell (which runs on to the value columns).  Returns ``[(y0, y1, label)]`` (label as printed, lines joined with a
+    space) and the ids of the words the labels are made of.  No such cell, no zone; a room name that spans the group and
+    room cells (CATH 'Sterile Prep Room') is not a group label and stays in the table."""
+    pressure_x0 = cols.clusters["pressure"][0]
+    body = [r for r in rects if r[1] >= top - 1.0 and r[3] <= bottom + 1.0 and r[3] - r[1] > 20.0]
+    cells = []
+    for r in body:
+        if not (50.0 <= r[0] < 100.0 and r[2] < pressure_x0 - 20.0):
+            continue
+        if any(abs(o[0] - r[2]) <= 1.5 and o[2] > r[2] + 40.0 and o[2] <= pressure_x0 + 15.0
+               and o[1] < r[3] - 1.0 and o[3] > r[1] + 1.0 for o in body):
+            cells.append(r)
+    out: List[Tuple[float, float, str]] = []
+    taken: set = set()
+    for r in sorted(cells, key=lambda r: r[1]):
+        ws = [w for w in words if r[0] <= w.cx <= r[2] and r[1] <= w.cy <= r[3] and not is_gutter(w)]
+        if not ws:
+            continue
+        if sum(w.y1 - w.y0 for w in ws) > 1.5 * sum(w.x1 - w.x0 for w in ws):
+            # turned text (LabMed 'PATHOLOGY'): reads bottom to top, a wrapped line starts to the right of the one before
+            cols_: List[List[Word]] = []
+            for w in sorted(ws, key=lambda w: w.cx):
+                if cols_ and abs(w.cx - cols_[-1][0].cx) <= 0.5 * max(w.x1 - w.x0, 1.0):
+                    cols_[-1].append(w)
+                else:
+                    cols_.append([w])
+            label = clean(" ".join(" ".join(w.text for w in sorted(c, key=lambda w: -w.y1)) for c in cols_))
+        else:
+            label = clean(" ".join(join_words(ln) for ln in cluster_lines(ws)))
+        out.append((r[1], r[3], label))
+        taken.update(id(w) for w in ws)
+    return out, taken
+
+
 def parse_criteria_page(words: List[Word], page_h: float, page_w: float,
                         rects: Optional[Sequence[Tuple[float, float, float, float]]] = None,
                         marks: Optional[Sequence[Dict[str, Any]]] = None,
-                        zoned: Optional[Dict[str, Any]] = None
+                        zoned: Optional[Dict[str, Any]] = None, legacy: bool = False, short: bool = False
                         ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], str, List[str]]:
     """Parse one criteria page.
 
@@ -819,6 +954,14 @@ def parse_criteria_page(words: List[Word], page_h: float, page_w: float,
     ``zoned`` is the caption of an Emergency 4.1.8 page (see ``zoned_caption``): the table is the same eleven-column
     table, but it is captioned 'Rooms Part N' (not 'Room conditions - Part N'), its temperature heading wraps
     mid-word and a title after the part number ('PANDEMIC SURGE AFFECTED ROOMS') is the operating mode of every row.
+
+    ``legacy`` (the released departments, ``RELEASED_DEPARTMENTS``): the marks that circle or highlight cells are not attached
+    to rows (``link_marks``) and a wrapped room name is joined as before (``join_room_words``), so that their registers stay as
+    released.
+
+    ``short`` (the six A4 short DD booklets, see ``page_xform``): the left-hand group label of the table ('Standard
+    Procedure Room', 'NEP Operating Theatre', 'PATHOLOGY') is horizontal text in its own filled cell and is the ``zone``
+    of the rows beside it (``group_cells``); the headings are read with ``SHORT_HEADER_VOCAB``.
 
     Returns ``(rows, notes, table_part, page_failures)``.  Each row is a dict with the raw
     cells (``cells``), the room text, the box, the note references and ``mode`` (the
@@ -839,6 +982,8 @@ def parse_criteria_page(words: List[Word], page_h: float, page_w: float,
         cols = find_header(words, SPLIT_HEADER_VOCAB)       # headings wrapped mid-word (ICU HDU)
         if cols is None:
             cols = find_header(words, AREA_HEADER_VOCAB)    # 'AREA / ROOM' (I-CARE)
+        if cols is None and short:
+            cols = find_header(words, SHORT_HEADER_VOCAB)   # the A4 short DD booklets
     if cols is not None and not table_part and not zoned:
         # no 'Room conditions - Part N' caption: the title above the table names the mode ('I-Care - Operation Mode',
         # 'Basement 2 Pharmacy - Compounding Lab - Operation Mode', 'OP Level 1 Pharmacy'); none printed: a source gap
@@ -875,14 +1020,18 @@ def parse_criteria_page(words: List[Word], page_h: float, page_w: float,
 
     room_x0 = cols.clusters.get("room", (0.0, 0.0))[0]
     dept_zones: List[Tuple[float, float, str]] = []
-    dept_hdr = [w for w in words if w.text.upper() == "DEPARTMENT" and w.y1 <= cols.header_bottom + 1.0
+    dept_hdr = [] if short else [w for w in words if w.text.upper() == "DEPARTMENT" and w.y1 <= cols.header_bottom + 1.0
                 and w.x0 < 650 and w.cx < room_x0]
     if dept_hdr:     # a DEPARTMENT column of vertical merged text ('LEVEL B2 - PHARM') left of the room column is not row text
         edge = (dept_hdr[0].cx + room_x0) / 2.0
         note_y = find_notes_top(words, cols.header_bottom, page_h)         # the note under the table is not department text
         dept_words = [w for w in words if w.cx < edge and cols.header_bottom - 0.5 <= w.y0 < note_y - 0.5]
-        dept_zones = department_cells(dept_words, rects or [], edge, room_x0)
+        dept_zones = department_cells([w for w in dept_words if not is_gutter(w)], rects or [], edge, room_x0)
         words = [w for w in words if w not in dept_words]
+    if short:
+        note_y = find_notes_top(words, cols.header_bottom, page_h)
+        dept_zones, taken = group_cells(words, rects or [], cols, cols.header_bottom, note_y)
+        words = [w for w in words if id(w) not in taken]
     notes_top = find_notes_top(words, cols.header_bottom, page_h)
     footer_top = page_h       # the footer stamp and page number are already out of ``words`` (see footer_furniture)
     body = [w for w in words if w.y0 >= cols.header_bottom - 0.5 and w.y0 < min(notes_top, footer_top) - 0.5
@@ -1019,7 +1168,7 @@ def parse_criteria_page(words: List[Word], page_h: float, page_w: float,
                 ref_ws = [w for w in ws if re.fullmatch(r"\d", w.text) and w.size and w.size < big * 0.8
                           and w is ws[-1]]
             refs.extend(w.text for w in ref_ws)
-            cells[col] = join_words([w for w in ws if w not in ref_ws])
+            cells[col] = (join_room_words if col == "room" and not legacy else join_words)([w for w in ws if w not in ref_ws])
             if col == "room" and re.search(r"\*$", cells[col]):
                 refs.append("*")          # '*' footnote reference printed after the room name
         for col, col_refs in cols.header_refs.items():
@@ -1034,6 +1183,8 @@ def parse_criteria_page(words: List[Word], page_h: float, page_w: float,
             "pressure_words": [w for w in anchor["by_col"].get("pressure", [])],
             "zone": next((z for y0, y1, z in dept_zones if y0 - 1.0 <= anchor["cy"] <= y1 + 1.0), ""),
         })
+    if marks and not legacy:
+        link_marks(rows, marks, words, cols)
     notes = foot_notes + (parse_block_note(words, notes_top, footer_top) if notes_top < footer_top else [])
     if zoned is not None:
         zoned["header_text"] = dict(cols.header_text)       # the column headings as printed, for the report
@@ -1057,6 +1208,118 @@ def _row_marks(box: Tuple[float, float, float, float], room_words: Sequence[Word
         elif m.get("tip") and box[0] - pad <= m["tip"][0] <= box[2] + pad and box[1] - pad <= m["tip"][1] <= box[3] + pad:
             out.append(m)
     return out
+
+
+REGION_VERBS = {"Circle": "circled", "Square": "boxed", "Polygon": "outlined", "PolyLine": "outlined",
+                "Highlight": "highlighted", "Underline": "underlined", "Squiggly": "underlined"}
+REGION_SHAPES = ("Circle", "Square", "Polygon", "PolyLine")          # marks that enclose cells (a highlight marks text)
+COLUMN_LABELS = {"room": "Room", "pressure": "Pressure", "min_oa": "Min. Outdoor ACH", "min_total": "Min. Total ACH",
+                 "single_pass": "Single Pass", "air_class": "Air Class", "filter": "Filter", "rh": "Relative Humidity",
+                 "temp": "Design Temperature", "afterhours": "Afterhours", "setback": "Setback"}
+CIRCLE_AFTER_COMMENT_S = 30.0       # a circle drawn within this many seconds after a comment was last saved belongs to it
+
+
+def _overlap_rows(rows: Sequence[Dict[str, Any]], rect: Sequence[float]) -> List[int]:
+    """Rows a reviewer mark covers: the vertical overlap is at least half of the smaller of the row and the mark."""
+    out = []
+    for i, r in enumerate(rows):
+        b = r["box"]
+        ov = min(b[3], rect[3]) - max(b[1], rect[1])
+        if ov > 0 and ov >= 0.5 * min(b[3] - b[1], rect[3] - rect[1]) and min(b[2], rect[2]) > max(b[0], rect[0]):
+            out.append(i)
+    return out
+
+
+def _tip_rows(rows: Sequence[Dict[str, Any]], pt: Sequence[float], pad: float = 6.0) -> List[int]:
+    return [i for i, r in enumerate(rows) if r["box"][0] - pad <= pt[0] <= r["box"][2] + pad
+            and r["box"][1] - pad <= pt[1] <= r["box"][3] + pad]
+
+
+def link_marks(rows: List[Dict[str, Any]], marks: Sequence[Dict[str, Any]], words: Sequence[Word],
+               cols: "TableColumns") -> None:
+    """Attach the reviewer marks that cover cells, and settle which rows each comment is about.
+
+    * A circle, box, outline or highlight (``region``) belongs to every row it covers (``_overlap_rows``); the row records
+      the mark, the cells (columns) inside it and, for a highlight, the words under it.
+    * A comment keeps the row its callout arrow ends in.  It is also attached to (a) the row where a second arrow (a Line
+      that starts inside the comment box) ends; (b) the rows of the circle or outline that the callout tip lies inside, and
+      of every other circle around the same cells (DI p2: the arrow lands in the circle round 'No (c/w Air Purging)' and
+      the MRI and CT Procedure 'No' cells carry the same circle); (c) when the tip is in no circle, the rows of a circle
+      drawn within 30 s after the comment was last saved (DI p2 'Why is Ultrasound and U/S Procedure +ve?': the two +ve
+      circles were drawn 9 and 12 s later).  When circled rows are found that do not include the row at the arrow tip, the tip
+      row is dropped (the arrow ends in the gap between Toilet and Ultrasound).  A tip that lies below the last row (Pharmacy
+      p4 'compressor room' comment) is taken to point at that row."""
+    regions = [m for m in marks if m["kind"] == "region"]
+    comments = [m for m in marks if m["kind"] == "comment"]
+    arrows = [m for m in marks if m["kind"] == "arrow"]
+
+    def cols_in(rect: Sequence[float]) -> Tuple[str, ...]:
+        inside = tuple(k for k in cols.order if rect[0] <= sum(cols.clusters[k]) / 2.0 <= rect[2])
+        if inside:
+            return inside
+        for k in cols.order:        # a mark that holds no header centre (a highlight of one word): the column it sits in
+            lo, hi = cols.bounds[k]
+            if lo <= (rect[0] + rect[2]) / 2.0 < hi:
+                return (k,)
+        return ()
+
+    reg_rows = {id(m): _overlap_rows(rows, m["rect"]) for m in regions}
+    for m in regions:
+        names = cols_in(m["rect"])
+        for i in reg_rows[id(m)]:
+            under = join_words([w for w in words if m["rect"][0] <= w.cx <= m["rect"][2]
+                                and rows[i]["box"][1] - 1.0 <= w.cy <= rows[i]["box"][3] + 1.0
+                                and m["rect"][1] <= w.cy <= m["rect"][3]])
+            labels = [COLUMN_LABELS.get(k, k) for k in names]
+            where = (" around its %s cell%s" % ((", ".join(labels[:-1]) + " and " + labels[-1]) if len(labels) > 1 else labels[0],
+                                                "s" if len(labels) > 1 else "")
+                     if 0 < len(names) < 5 else " around the whole row" if names else "")
+            text = "%s by a reviewer %s annotation%s%s%s" % (
+                REGION_VERBS[m["type"]], m["type"], " (%s)" % m["author"] if m["author"] else "", where,
+                " ('%s')" % under if m["type"] == "Highlight" and under else "")
+            rows[i]["marks"].append({"kind": "region", "type": m["type"], "text": text})
+    held = {id(c): {i for i, r in enumerate(rows) if any(x is c for x in r["marks"])} for c in comments}
+    for r in rows:
+        r["marks"] = [x for x in r["marks"] if x["kind"] != "comment"]
+    for c in comments:
+        final = set(held[id(c)])
+        circ: set = set()
+        tip_regs = [m for m in regions if m["type"] in REGION_SHAPES and c.get("tip")
+                    and m["rect"][0] - 2.0 <= c["tip"][0] <= m["rect"][2] + 2.0
+                    and m["rect"][1] - 2.0 <= c["tip"][1] <= m["rect"][3] + 2.0]
+        for m in tip_regs:
+            circ.update(reg_rows[id(m)])
+        circles_tip = [m for m in tip_regs if m["type"] == "Circle"]
+        for m in circles_tip:       # the same circle round the same cells elsewhere on the page: the same query
+            same = cols_in(m["rect"])
+            if 0 < len(same) < 5:
+                for o in regions:
+                    if o["type"] == "Circle" and cols_in(o["rect"]) == same:
+                        circ.update(reg_rows[id(o)])
+        if not tip_regs and c.get("mod") is not None:
+            for o in regions:
+                if o["type"] == "Circle" and o.get("created") is not None \
+                        and 0.0 <= o["created"] - c["mod"] <= CIRCLE_AFTER_COMMENT_S:
+                    circ.update(reg_rows[id(o)])
+        for a in arrows:
+            p, q = a["verts"]
+            box = c["rect"]
+            for here, there in ((p, q), (q, p)):
+                if box[0] - 3.0 <= here[0] <= box[2] + 3.0 and box[1] - 3.0 <= here[1] <= box[3] + 3.0:
+                    final.update(_tip_rows(rows, there))
+        if circ and not (final & circ):
+            final -= held[id(c)]
+        final |= circ
+        if not final and c.get("tip") and rows:
+            last = max(range(len(rows)), key=lambda i: rows[i]["box"][3])
+            b = rows[last]["box"]
+            if b[0] <= c["tip"][0] <= b[2] and 0.0 < c["tip"][1] - b[3] <= 30.0:
+                final.add(last)
+        for i in final:
+            rows[i]["marks"].append(c)
+    for r in rows:      # strikes first, then comments in the order of the page's annotations, then the other marks
+        r["marks"].sort(key=lambda m: (0 if m["kind"] == "strike" else 1 if m["kind"] == "comment" else 2,
+                                       m.get("order", 0)))
 
 
 def find_notes_top(words: Sequence[Word], below_y: float, page_h: float) -> float:
@@ -1183,8 +1446,9 @@ def build_criteria_rows(rows: List[Dict[str, Any]], meta: Dict[str, Any], table_
             "temp_as_printed": c.get("temp", ""), "temp_min_c": t_min, "temp_max_c": t_max,
             "afterhours": ah, "setback": sb, "note_refs": ";".join(row["note_refs"]),
             "bbox": fmt_bbox(row["box"]), "confidence": "%.2f" % confidence,
-            "reviewer_markup": "; ".join("struck through by a reviewer %s annotation%s" % (
-                m["type"], " (%s)" % m["author"] if m["author"] else "") for m in strikes),
+            "reviewer_markup": "; ".join(["struck through by a reviewer %s annotation%s" % (
+                m["type"], " (%s)" % m["author"] if m["author"] else "") for m in strikes]
+                + [m["text"] for m in row.get("marks", []) if m["kind"] == "region"]),
             "reviewer_comments": " || ".join(m["text"] for m in comments),
             "raw_cells": json.dumps({**{k: c.get(k, "") for k in
                                         ("min_oa", "min_total", "single_pass", "afterhours", "setback")},
@@ -1195,6 +1459,82 @@ def build_criteria_rows(rows: List[Dict[str, Any]], meta: Dict[str, Any], table_
                                     ensure_ascii=False),
         })
     return out
+
+
+def design_parameter_notes(words: Sequence[Word]) -> List[Dict[str, Any]]:
+    """Text of a 'Design Parameter' page (Pharmacy Compounding Lab p5) as notes: the numbered items ('1. Grade C:' with its
+    bullets), the rows of the 'Ramp-Down Strategies' table (``number`` is the mode: 'Operation Mode', 'Setback Mode 1' ...;
+    the table has a mode column on the left and a description column from x = 410) and the 'Recommend Setback Mode' paragraph
+    with its two reasons (right column).  The title, the section strip and the footer are not part of it; the caller removes
+    reviewer comments from the page first, so that their text is not read."""
+    body = [w for w in words if not is_gutter(w) and w.y0 >= 105.0 and not (w.x0 >= 735 and w.y0 < 90)]
+    notes: List[Dict[str, Any]] = []
+    in_ramp = False
+    left: Optional[Dict[str, Any]] = None
+    right: Optional[Dict[str, Any]] = None
+
+    def add(number: str, text: str, box: Tuple[float, float, float, float]) -> Dict[str, Any]:
+        n = {"number": number, "text": text, "box": box}
+        notes.append(n)
+        return n
+
+    def extend(n: Dict[str, Any], text: str, box: Tuple[float, float, float, float]) -> None:
+        n["text"] = clean(n["text"] + " " + text)
+        n["box"] = union_box([n["box"], box])
+
+    for ln in cluster_lines(body):
+        text = join_words(ln)
+        box = union_box(w.box() for w in ln)
+        if re.match(r"^Ramp-Down Strategies:?$", text):
+            in_ramp = True
+            continue
+        if not in_ramp:
+            m = re.match(r"^(\d+)\.\s+(.*)$", text)
+            if m:
+                left = add(m.group(1), m.group(2), box)
+            elif left is not None:
+                extend(left, text, box)
+            continue
+        lt = join_words([w for w in ln if w.x0 < 410.0])
+        rt = join_words([w for w in ln if w.x0 >= 410.0])
+        lbox = union_box(w.box() for w in ln if w.x0 < 410.0)
+        rbox = union_box(w.box() for w in ln if w.x0 >= 410.0)
+        if lt == "Mode" and rt == "Description":
+            continue
+        m_mode = re.fullmatch(r"(Operation Mode|Setback Mode \d)", lt)
+        m_rec = re.match(r"^(Recommend Setback Mode)\s*:\s*(.*)$", lt)
+        m_why = re.match(r"^(Greater Energy Savings|Easier Control)\s*:\s*(.*)$", rt)
+        if m_mode:
+            left = right = add(m_mode.group(1), rt, box)
+            continue
+        if m_rec:
+            left = add(m_rec.group(1), m_rec.group(2), lbox)
+        elif lt and left is not None:
+            extend(left, lt, lbox)
+        if m_why:
+            right = add(m_why.group(1), m_why.group(2), rbox)
+        elif rt and right is not None:
+            extend(right, rt, rbox)
+    return notes
+
+
+def flag_repeated_rooms(built: List[Dict[str, Any]]) -> None:
+    """A room name printed on two rows of one page with different values (ICU HDU p6: 'Anteroom (NEP ISO)' with -15 Pa and
+    again with 15 Pa and HEPA) would collide in any join on the room name.  Each such row gets a ``source_flag`` in
+    ``raw_cells``; the values are not changed."""
+    groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for r in built:
+        groups[r["room_type_norm"]].append(r)
+    for norm, grp in groups.items():
+        if len(grp) < 2 or len({(g["pressure_regime_as_printed"], g["min_total_ach"], g["filter"]) for g in grp}) < 2:
+            continue
+        for g in grp:
+            raw = json.loads(g["raw_cells"])
+            note = ("the room name %r is printed on %d rows of this page with different values (pressure %s): a join on the "
+                    "room name collides; the register keeps each row as printed"
+                    % (g["room_type_as_printed"], len(grp), " / ".join(x["pressure_regime_as_printed"] for x in grp)))
+            raw["source_flag"] = (raw["source_flag"] + "; " + note) if raw.get("source_flag") else note
+            g["raw_cells"] = json.dumps(raw, ensure_ascii=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -1548,6 +1888,20 @@ def page_lines(page: "pymupdf.Page") -> List[Dict[str, Any]]:
     return out
 
 
+def pdf_seconds(date: Any) -> Optional[float]:
+    """Seconds since the start of the year 2000 of a PDF date string ``D:20250916065758+08'00'`` (the time zone is
+    ignored: only differences between annotations of one page are used); ``None`` when it does not parse."""
+    m = re.match(r"D?:?(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})", str(date or ""))
+    if not m:
+        return None
+    import datetime
+    y, mo, d, h, mi, sec = (int(g) for g in m.groups())
+    try:
+        return (datetime.datetime(y, mo, d, h, mi, sec) - datetime.datetime(2000, 1, 1)).total_seconds()
+    except ValueError:
+        return None
+
+
 def page_annotations(page: "pymupdf.Page") -> List[Dict[str, Any]]:
     """Reviewer comments (PDF annotations carrying text) of a page, text verbatim."""
     out: List[Dict[str, Any]] = []
@@ -1560,6 +1914,7 @@ def page_annotations(page: "pymupdf.Page") -> List[Dict[str, Any]]:
         tip = tuple(verts[0]) if verts and annot.type[1] == "FreeText" else None    # callout arrow tip
         out.append({"text": text, "rect": tuple(annot.rect), "author": clean(info.get("title", "") or ""),
                     "date": clean(info.get("modDate", "") or info.get("creationDate", "") or ""),
+                    "mod": pdf_seconds(info.get("modDate", "") or info.get("creationDate", "")),
                     "kind": annot.type[1], "tip": tip})
     return out
 
@@ -1582,6 +1937,8 @@ def page_markup(page: "pymupdf.Page") -> List[Dict[str, Any]]:
                           and abs(verts[0][0] - verts[1][0]) >= 15.0)
         out.append({"kind": kind, "rect": rect, "author": clean(info.get("title", "") or ""),
                     "date": clean(info.get("modDate", "") or info.get("creationDate", "") or ""),
+                    "created": pdf_seconds(info.get("creationDate", "") or info.get("modDate", "")),
+                    "verts": [tuple(v) for v in verts[:2]] if kind == "Line" else [],
                     "strike": horizontal or kind == "StrikeOut",
                     "y": (rect[1] + rect[3]) / 2.0, "x0": rect[0], "x1": rect[2]})
     return out
@@ -1794,16 +2151,21 @@ def _note_row(src: str, dept: str, booklet: str, pdf_page: int, number: str, tex
             "author": author, "date": date}
 
 
+def _drawing_rects(page: "pymupdf.Page") -> List[Tuple[Dict[str, Any], "pymupdf.Rect"]]:
+    """Drawings with their rectangles in the displayed (rotated) page space."""
+    rot = page_xform(page)
+    return [(d, (pymupdf.Rect(d["rect"]) * rot) if rot is not None else d["rect"]) for d in page.get_drawings()]
+
+
 def _fills(page: "pymupdf.Page") -> List[Tuple[float, float, float, float]]:
-    return [tuple(d["rect"]) for d in page.get_drawings()
-            if d.get("fill") is not None and d["rect"].width > 20 and d["rect"].height > 10]
+    return [tuple(r) for d, r in _drawing_rects(page)
+            if d.get("fill") is not None and r.width > 20 and r.height > 10]
 
 
 def _rules(page: "pymupdf.Page") -> List[Tuple[float, float, float]]:
     """Horizontal rule segments ``(y, x0, x1)``: stroked lines or hairline rectangles wider than 100 points."""
     out = []
-    for d in page.get_drawings():
-        r = d["rect"]
+    for d, r in _drawing_rects(page):
         if r.height < 2.5 and r.width > 100:
             out.append(((r.y0 + r.y1) / 2.0, r.x0, r.x1))
     return out
@@ -1826,6 +2188,26 @@ def other_heading(words: Sequence[Word]) -> str:
     return ""
 
 
+BOXED_REGISTERS = ("criteria", "notes", "standby_notes", "standby", "zoning", "pressure", "room_data", "failures")
+
+
+def unscale_boxes(result: Dict[str, Any], start: Dict[str, int], entry: Dict[str, Any], k: float) -> None:
+    """Bring the boxes of the rows a short-booklet page just added back to PDF points (the page was read at ``k`` times
+    its size, see ``page_xform``)."""
+    def back(text: Any) -> Any:
+        if not isinstance(text, str) or not text:
+            return text
+        return ",".join("%.1f" % (float(v) / k) for v in text.split(","))
+
+    for key, n0 in start.items():
+        for row in result[key][n0:]:
+            for field in ("bbox", "legend_bbox"):
+                if field in row:
+                    row[field] = back(row[field])
+    if entry.get("number_box"):
+        entry["number_box"] = tuple(v / k for v in entry["number_box"])
+
+
 def parse_pdf(path: Path, root: Path) -> Dict[str, Any]:
     """Parse one booklet PDF into registers, page map and failures."""
     dept = department_from_name(path)
@@ -1839,7 +2221,8 @@ def parse_pdf(path: Path, root: Path) -> Dict[str, Any]:
         for index in range(len(doc)):
             page = doc[index]
             pdf_page = index + 1
-            page_h, page_w = page.rect.height, page.rect.width
+            marks_at = {key: len(result[key]) for key in BOXED_REGISTERS}
+            page_h, page_w = page.rect.height * page_scale(page), page.rect.width * page_scale(page)
             all_words = page_words(page)
             booklet = printed_page_number(all_words, page_h, page_w)
             words = strip_furniture(all_words, page_h, page_w)     # footer stamp and page number are not body text
@@ -1885,15 +2268,27 @@ def parse_pdf(path: Path, root: Path) -> Dict[str, Any]:
 
             if cls == "criteria":
                 marks = [{"kind": "comment", "type": a["kind"], "text": a["text"], "author": a["author"],
-                          "tip": a["tip"]} for a in annots if a["tip"]]
+                          "tip": a["tip"], "rect": a["rect"], "mod": a["mod"], "order": n}
+                         for n, a in enumerate(annots) if a["tip"]]
                 marks += [{"kind": "strike", "type": m["kind"], "author": m["author"], "y": m["y"], "x0": m["x0"],
                            "x1": m["x1"], "idx": i} for i, m in enumerate(markup) if m["strike"]]
-                zoned = zoned_caption(words)       # Emergency 4.1.8 layout: 'Rooms Part N', rows grouped by zone
-                rows, notes, part, pfail = parse_criteria_page(words, page_h, page_w, _fills(page), marks, zoned)
+                # marks that circle, box, outline or highlight cells, and the second arrow of a comment (a Line that is not
+                # a strike-through); parse_criteria_page attaches them to the rows they cover (``link_marks``)
+                marks += [{"kind": "region", "type": m["kind"], "author": m["author"], "rect": m["rect"],
+                           "created": m["created"]} for m in markup if m["kind"] in REGION_VERBS and not m["strike"]]
+                marks += [{"kind": "arrow", "type": "Line", "verts": m["verts"]}
+                          for m in markup if m["kind"] == "Line" and not m["strike"] and len(m["verts"]) == 2]
+                short = page_scale(page) != 1.0
+                # Emergency 4.1.8 layout: 'Rooms Part N', rows grouped by zone (the short booklets print 'Rooms Part N' too, with no zones)
+                zoned = None if short else zoned_caption(words)
+                rows, notes, part, pfail = parse_criteria_page(words, page_h, page_w, _fills(page), marks, zoned,
+                                                               legacy=dept in RELEASED_DEPARTMENTS, short=short)
                 if image_box is not None and not rows:      # no text-layer table: the rows keyed in by eye
                     rows = vision_page_rows(vision, image_box)
                     part, pfail, notes = vision.get("table_part", ""), [], []
                 built = build_criteria_rows(rows, meta, part, result["failures"], zoned=zoned is not None)
+                if dept not in RELEASED_DEPARTMENTS:
+                    flag_repeated_rooms(built)
                 if zoned is not None:
                     result["zoned_pages"].append({"pdf_page": pdf_page, "booklet_page": booklet, "strip": strip,
                                                   "caption": zoned["caption"], "part": zoned["part"],
@@ -1999,6 +2394,13 @@ def parse_pdf(path: Path, root: Path) -> Dict[str, Any]:
             else:
                 if cls == "other":
                     entry["detail"] = other_heading(words)
+                    if re.search(r"Design Parameter\s*$", entry["detail"], re.I):
+                        # Pharmacy p5: grade C / D design parameters and the table of ramp-down modes (what 'Setback Mode
+                        # 1 / 2 / 3' of the criteria pages mean) are text, not a criteria table: recorded as notes
+                        drop_annotations(page)
+                        for n in design_parameter_notes(strip_furniture(page_words(page), page_h, page_w)):
+                            result["notes"].append(_note_row(src, dept, booklet, pdf_page, n["number"], n["text"],
+                                                             n["box"], "design parameter text"))
                     if strip and not re.search(r"MECHANICAL VENTILATION", strip, re.I):
                         entry["detail"] = ("%s [%s: another section of the booklet]" % (entry["detail"], strip)).strip()
                     elif annots or markup:
@@ -2006,6 +2408,8 @@ def parse_pdf(path: Path, root: Path) -> Dict[str, Any]:
                         # still recorded, so they are not lost with the table
                         annotation_notes(result["notes"], "reviewer annotation")
             result["pages"].append(entry)
+            if page_scale(page) != 1.0:
+                unscale_boxes(result, marks_at, entry, page_scale(page))
         _infer_missing_page_numbers(doc, result)
         sections = sorted({e["section"] for e in result["pages"] if e["section"]})
         if len(sections) > 1:           # a combined file (Rehab Med): the section strip tells the parts apart
@@ -2576,8 +2980,8 @@ def _folder_update_section(results: List[Dict[str, Any]]) -> List[str]:
               "- **Left as a failed field**: OP DI p13 `Toilet` prints `20` under Single Pass, `NR` under Air Class and `3` under Filter (the values of the cells to the right appear "
               "shifted by one column in the source; Min. Total ACH is `20`). It is read as printed and Single Pass `20` is the one failed field of the file.",
               "- Three OP DI rows are struck through by a reviewer and keep their values at confidence 0.50: p12 `Treatment Room`, p12 `Nurse Assessment` (comment: `Not DI but Breast Clinic`) and "
-              "p13 `Patient Education`. Reviewer comments are linked to the row where their arrow ends: the p2 comment `Why is Ultrasound and U/S Procedure +ve?` therefore sits on `Toilet` (the arrow "
-              "ends on that row) although it refers to the circled `+ve` cells of `Ultrasound` and `Ultrasound Procedure`.",
+              "p13 `Patient Education`. Reviewer comments are linked to the row where their arrow ends and, since the fourth verification, also to the rows "
+              "of the circles they refer to (the p2 comment `Why is Ultrasound and U/S Procedure +ve?` is on `Ultrasound` and `Ultrasound Procedure`, no longer on `Toilet`; see Corrections after verification (4)).",
               "- p5 to p8 carry the headings `AHU ZONING IP DIAGNOSTIC IMAGING` and `PRESSURE REGIME` under a stale strip (`4.1 DEPARTMENT LAYOUT PLAN`); a plan headed so is now read as such "
               "(`classify_page`), while a page of another section without such a heading stays `other`.", ""]
     ot = part("IGH_DD Booklet_ORTHO_BATCH 1.pdf")
@@ -2599,10 +3003,10 @@ def _folder_update_section(results: List[Dict[str, Any]]) -> List[str]:
               "- %d criteria rows: p4 (Basement 2 Pharmacy, 10), p7 to p10 (Compounding Lab: operation mode and setback modes 1 to 3, 9 rows each; the table has "
               "**no Afterhours and no Setback columns**, which is reported per page as `header columns not found: afterhours, setback` and is not a missing value), p16 (OP Level 1, 10) and p17 (1). "
               "Pressure is printed `SLIGHT +VE`, `SLIGHTLY +VE`, `SLIGHTLY -VE` and `NEUTRAL` (a direction, no figure) and Single Pass, Relative Humidity and Temperature `N/R` (all accepted as not required). "
-              "p4 has a `DEPARTMENT` column of vertical merged text (`LEVEL B2 – PHARM`, `B 1`) that is not read as row text and is not carried (no column for it); "
+              "p4 has a `DEPARTMENT` column of vertical merged text (`LEVEL B2 – PHARM`, `B 1`) that is not read as row text; its text is carried as `zone` (see Corrections after verification (4)); "
               "p9 and p10 end with an unnumbered paragraph that starts `Note:`, recorded as a note, not as a row." % len(ph["criteria"]),
               "- **Not read as tables** (class `other`): p1 and p2 (`Overall AHU Zoning & Redundancy`), p3 and p6 (`Pressure Regime Overview`), p5 (`Compounding Lab – Design Parameter`: grade C and D text and a "
-              "`Ramp-Down Strategies` table of modes) and p11 (`Cleanroom Data`). They hold plans, text and tables of another kind. Their reviewer comments are in `criteria_notes.csv`.", ""]
+              "`Ramp-Down Strategies` table of modes, now recorded as notes of kind `design parameter text`) and p11 (`Cleanroom Data`). They hold plans, text and tables of another kind. Their reviewer comments are in `criteria_notes.csv`.", ""]
     dc = part("20250804_IGH_DD Booklet_Data Centre R2_Markup.pdf")
     if dc:
         L += ["### IGH Data Centre R2 Markup", "",
@@ -2653,6 +3057,62 @@ def _corrections_section_3(results: List[Dict[str, Any]]) -> List[str]:
           "- MDU OCP p3 and p4: 17 rows keyed in by eye from images (confidence 0.80); they should be checked against the source before use.",
           "- Healthy Aging p23 (two standby rows) and p25 to p26 (an OP operation-mode table) stay unparsed so that the department's registers are unchanged; `FROZEN_LAYOUT_FILES` names the file, "
           "and removing it from that list reads them.", ""]
+    return L
+
+
+def _corrections_section_4(results: List[Dict[str, Any]]) -> List[str]:
+    """Corrections made after the fourth verification, which checked the criteria registers cell by cell (figures from this run)."""
+    by = {r["department"]: r for r in results}
+    if "IGH DI Signed All AH" not in by or "IGH Pharmacy BATCH 2 New signed" not in by:
+        return []
+
+    def n(dept: str) -> int:
+        return len(by[dept]["criteria"]) if dept in by else 0
+
+    def with_(dept: str, field: str, pdf_page: Optional[int] = None) -> int:
+        return sum(1 for r in by[dept]["criteria"] if r[field] and (pdf_page is None or r["pdf_page"] == pdf_page)) if dept in by else 0
+
+    di, ph, rh = by["IGH DI Signed All AH"], by["IGH Pharmacy BATCH 2 New signed"], by.get("Rehab Med Combined", {"criteria": []})
+    zoned_p4 = sorted({r["zone"] for r in ph["criteria"] if r["pdf_page"] == 4 and r["zone"]})
+    parts = sorted({r["table_part"] for r in ph["criteria"] if r["pdf_page"] in (7, 8, 9, 10)})
+    L: List[str] = ["", "## Corrections after verification (4)", "",
+                    "Nine independent verifiers read the criteria tables of nine departments against the PDFs (`out/qa/verify/criteria_*.md`). Seven found no value that differs; Pharmacy (60 cells) and "
+                    "Rehab Med (5 mark-up cells) did. The values of the other departments were right, but several findings concerned what the registers leave out. No row was added or lost: the row counts "
+                    "before and after are equal for every department. Departments in `RELEASED_DEPARTMENTS` are unchanged: the new mark and room-name handling is switched off for them (`legacy`), and a "
+                    "cell-by-cell comparison of the registers before and after shows only the departments named below.", "",
+                    "| Department (rows before / after) | Finding | Change | Result in this run |", "|---|---|---|---|",
+                    "| IGH Pharmacy BATCH 2 (%d / %d) | p4: `SLIGHTLY` started left of the Pressure heading, so it went into the room name (6 rooms ended `slightly`) and the pressure was stored as `+VE` / `-VE` | A `SLIGHT` / `SLIGHTLY` word that lies over the Pressure column is a pressure word (`TableColumns.column_of`) | the 6 rooms read as printed, pressure `SLIGHTLY +VE` / `SLIGHTLY -VE` (direction unchanged) |" % (n("IGH Pharmacy BATCH 2 New signed"), n("IGH Pharmacy BATCH 2 New signed")),
+                    "| IGH Pharmacy BATCH 2 | p4: the DEPARTMENT column (`LEVEL B2 – PHARM`, `B1`) was dropped, so the B1 / B2 level was lost | The merged rotated cell is read (`department_cells`): the words inside each filled rectangle left of the room column, bottom to top, are the `zone` of the rows that rectangle spans | zone %s on p4 (9 rows `LEVEL B2 – PHARM`, `UPS/Compressor Room` `B1`) |" % (", ".join("`%s`" % z for z in zoned_p4) or "n/a"),
+                    "| IGH Pharmacy BATCH 2 | p7 to p10: the table caption stopped at x = 650, so the mode digit (and on p7 the word `Mode`) was cut off and Setback Modes 1, 2 and 3 all read `... Setback Mode` | The title line is read to its end when the words past x = 650 sit on the title's own line below the section strip | %s |" % "; ".join("`%s`" % t for t in parts),
+                    "| IGH Pharmacy BATCH 2 | `Preparation/Inspectio n Room` (4 rows): the cell breaks inside a word | A stranded lower-case letter at the start of a wrapped line is closed up to the word before it (`join_room_words`) | `Preparation/Inspection Room` on 4 rows |",
+                    "| IGH Pharmacy BATCH 2 | the p4 comment about the compressor room (arrow tip 23 pt below the last row) was not attached | A tip that lies within 30 pt below the last row is taken to point at that row (`link_marks`) | on `UPS/Compressor Room` (%d row with a comment on p4) |" % with_("IGH Pharmacy BATCH 2 New signed", "reviewer_comments", 4),
+                    "| IGH Pharmacy BATCH 2 | p5 `Compounding Lab – Design Parameter` (grade C / D text and the table of ramp-down modes) was not captured | Recorded in `criteria_notes.csv` as notes of kind `design parameter text` (`design_parameter_notes`): items 1 and 2, `Operation Mode`, `Setback Mode 1` to `3`, `Recommend Setback Mode`, `Greater Energy Savings`, `Easier Control` | %d notes |" % sum(1 for x in ph["notes"] if x["note_kind"] == "design parameter text"),
+                    "| IGH Pharmacy BATCH 2 | Min. Outdoor ACH `NR` on `Change Room/Toilet` and `Locker` reads blank | Not changed: every department stores a `NR`, `-` or empty Min. Outdoor ACH as blank and keeps the printed word in `raw_cells` (`min_oa`: `NR`) | the 2 rows carry `\"min_oa\": \"NR\"` |",
+                    "| IGH DI Signed All AH (%d / %d) | p2: the comment `Why is Ultrasound and U/S Procedure +ve?` was on `Toilet` | A comment is also attached to the rows of a circle drawn within 30 s after the comment was last saved when its arrow tip is in no circle (`link_marks`); when circled rows are found and the tip row is not among them, the tip row is dropped | on `Ultrasound` and `Ultrasound Procedure` (the circles were drawn 9 s and 12 s later); `Toilet` has none |" % (n("IGH DI Signed All AH"), n("IGH DI Signed All AH")),
+                    "| IGH DI Signed All AH | p2: the air-purging comment was only on `CT Control Room`; the circled `No` cells of `MRI` and `CT Procedure` carried nothing | A comment whose arrow tip lies in a circle is also attached to every other circle round the same cells (same columns) on the page | the comment is on `MRI`, `CT Procedure` and `CT Control Room` |",
+                    "| IGH DI Signed All AH | circles with no text were not attached to any row (`reviewer_markup` empty) | Circles, boxes, outlines and highlights are attached to the rows they cover (at least half of the smaller of the row and the mark, `_overlap_rows`) as `circled by a reviewer Circle annotation (author) around its Pressure cell` | %d rows with `reviewer_markup` on the DI pages, 3 of them the struck-through rows as before (new: p2 MRI, CT Procedure, CT Control Room, Ultrasound, Ultrasound Procedure; p3 X-Ray; p12 Tech Work, and the circles round the names of the two struck rows) |" % with_("IGH DI Signed All AH", "reviewer_markup"),
+                    "| IGH DI Signed All AH | p12: the comment `Not DI but Breast Clinic` is now also on `Treatment Room` | Follows from the rule above: the circle round the `Nurse Assessment` name the arrow lands in has a twin round the `Treatment Room` name, and both rows are struck through. **Owner to confirm** that the comment covers both rows. | 1 row |",
+                    "| IGH DI Signed All AH | p13 `Toilet`: the source row is shifted one column (Single Pass `20`, Air Class `NR`, Filter `3`) and the CSV had no sign of it | A number under Single Pass adds a `source_flag` to `raw_cells` that names the three cells; the values stay as printed and Single Pass `20` stays the one failed field | 1 row flagged |",
+                    "| IGH DI Signed All AH | `SS 553` under Min. OA (8 rows) and the qualifiers (`No (c/w Air Purging)`, `Non-Recirculating`, `24 hrs AC`) survive only in `raw_cells` | Not changed (owner decisions listed below): the printed words are in `raw_cells`; the normalised fields stay blank / `N` / `Y` / as printed | unchanged |",
+                    "| Rehab Med Combined (%d / %d) | p5: the second arrow (a Line annotation) of `inconsistent with other departments - these are usually +ve` ends in `Treatment Room`; the comment was only on `Clean Utility / Medication Room` | A Line that starts inside a comment's box is its second arrow; the row where it ends gets the comment | on `Treatment Room` and `Clean Utility / Medication Room` (%d rows with a comment on p5, the other 3 by their own arrows) |" % (n("Rehab Med Combined"), n("Rehab Med Combined"), with_("Rehab Med Combined", "reviewer_comments", 5)),
+                    "| Rehab Med Combined | the clouds (p5 `Clean Utility / Medication Room`, `Treatment Room`; p36 `P&O Workshop`) and the highlights on `Transitional Living` were not on any row | Attached as `reviewer_markup` (see above) | %d rows with `reviewer_markup` |" % with_("Rehab Med Combined", "reviewer_markup"),
+                    "| IGH MDU OCP (%d / %d) | the merged `MDU` department cell of the image pages was not kept | `department_column` of `src/booklet48_vision_rows.json` (already in the file) is now read as `zone` for the keyed-in rows | zone `MDU` on %d rows |" % (n("IGH MDU OCP"), n("IGH MDU OCP"), with_("IGH MDU OCP", "zone")),
+                    "| ICU HDU (%d / %d) | `Multi- Purpose Room` (a stray space after the hyphen stopped an exact match of `room_type_norm`) | A line that ends in a hyphen is joined to the next without a space (`join_room_words`) | `Multi-Purpose Room` |" % (n("ICU HDU"), n("ICU HDU")),
+                    "| ICU HDU | `Anteroom (NEP ISO)` is printed twice with different values (-15 Pa / 15 Pa, HEPA), so a join on the room type collides | Each such row gets a `source_flag` (`flag_repeated_rooms`, not for released departments); the values are not changed, because the booklet prints the name twice (the second is probably the PP ISO anteroom: **a query for the designer**) | 2 rows flagged |",
+                    "| ICU HDU | the unsigned `30` and `15` on the PP ISO rows leave Pa and direction blank | Not changed: the sign is not printed and is not guessed. Evidence for the owner: on p18 (booklet p. 151) the 1BED ISO PP room is filled green (positive in the legend) with an outward arrow, which supports +30 | unchanged (2 failed fields) |",
+                    "| IGH I-CARE, IGH ORTHO, IGH Surgical GS OCP, IGH Surgical OPCC | no value or reviewer defect found | None. The page-map remarks (the sheets titled `MODE OF VENTILATION` / `NORMAL MODE ... AIR RECIRCULATION` are classed `zoning keyplan`; the raster legend at the top right of I-CARE p15 is not found by `raster_legend`; the comments on the General Surgery plan pages, such as the ESWL 24HR AC comment, are not linked to criteria rows) concern the plan pages, not the criteria registers, and are left as they are | unchanged |", ""]
+    L += ["Tests: 13 new tests in `tests/test_booklet48_parser.py` (`test_slightly_pressure_word_stays_in_the_pressure_column_and_long_title_keeps_its_mode`, `test_title_words_past_x650_below_the_strip_are_part_of_the_table_part`, "
+          "`test_merged_department_cell_gives_the_zone_of_the_rows_it_spans`, `test_wrapped_room_names_are_closed_up_after_a_hyphen_and_before_a_stranded_letter`, `test_wrapped_room_name_is_closed_up_on_a_page_and_left_as_before_for_a_released_department`, "
+          "`test_circles_polygons_and_highlights_are_attached_to_the_rows_they_cover`, `test_comment_is_linked_to_circled_rows_a_second_arrow_and_a_circle_drawn_just_after_it`, `test_second_arrow_and_a_tip_below_the_last_row_attach_the_comment`, "
+          "`test_pdf_seconds_reads_annotation_dates`, `test_marks_round_cells_end_to_end_and_released_departments_stay_as_released`, `test_number_under_single_pass_is_flagged_as_a_shifted_row_and_repeated_room_names_are_flagged`, "
+          "`test_vision_rows_carry_the_department_column_as_zone`, `test_design_parameter_page_is_recorded_as_notes`). No assertion of an earlier test was changed.", ""]
+    L += ["### Owner decisions still open after the fourth verification", "",
+          "- A comment is attached to circled rows by three rules (arrow tip in a circle; the same circle round the same cells elsewhere; a circle drawn within 30 s after the comment was saved). They were written for DI p2 and apply to every non-released department; "
+          "the rows they add are listed above and can be removed by editing `link_marks`.",
+          "- The pantry-smell comment on Pharmacy p4 (arrow tip above the table header) and the table-level comments on Pharmacy p16 and p17 stay in `criteria_notes.csv` only: no row is under their arrows.",
+          "- Rehab Med: `table_part` reads `Part 1` / `Part 2` for both the inpatient (4.1.8, booklet p. 119-120) and outpatient (4.2.8, booklet p. 213-214) tables; `pdf_page` and `booklet_page` tell them apart (the section is in the page map).",
+          "- MDU OCP: the 17 rows are keyed in from images with the bbox of the whole table; they are checked against the source by the verifier (323 cells, no difference).",
+          "- Pending outside this task: the folder holds two extracts (`IGH_DD Booklet_Dental_BATCH 1.pdf`, `IGH_DD Booklet_ENT_DPE comments.pdf`) that are not yet in `src/booklet_departments.json`; they are parsed (Dental 17 criteria rows) with an empty department number, and `test_department_mapping_covers_the_booklet_folder_and_skips_non_booklets` fails for that reason, not because of this change.", ""]
     return L
 
 
@@ -2975,6 +3435,7 @@ def build_report(results: List[Dict[str, Any]], notes_all: List[Dict[str, Any]])
     L += _corrections_section_2(results)
     L += _folder_update_section(results)
     L += _corrections_section_3(results)
+    L += _corrections_section_4(results)
     return "\n".join(L).rstrip() + "\n"
 
 
