@@ -22,9 +22,12 @@ for the reviewing engineer's approval at the gates defined in the brief.
 ```text
 python -m src.drive_io doctor | list | pull | push-markdown      # the only module that touches Drive
 python -m src.manifest build                                     # manifest, skipped zips, anomaly report
-python -m src.census run                                         # page census by script
+python -m src.census run                                         # page census by script (pull and upload ledgers)
+python -m src.blocked_inputs build                               # out/qa/blocked_inputs.csv from the pull plan and ledgers
 python -m src.pressure --selftest                                # pressure-offset method, known-answer tests
-python -m src.checks phase0 … phase5                             # pass/fail per phase
+python -m src.convert run [--roots … --dept NN --only-class RDS] # stage 1A: MarkItDown + sidecars + Markdown + grade
+python -m src.md_writer render | python -m src.recall_check run  # re-render or re-check one file from its sidecar
+python -m src.checks phase0 … phase5 [--scope converted]         # pass/fail per phase
 python -m src.decisions add|list                                 # out/qa/decisions_needed.md
 ```
 

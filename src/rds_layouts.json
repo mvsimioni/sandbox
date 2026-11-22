@@ -1,0 +1,213 @@
+{
+  "schema": 1,
+  "description": "Per-layout templates for the Room Data Sheet (RDS) parser. Data only: label text variants and value-region rules. Coordinates are PDF points, origin top left, as returned by PyMuPDF.",
+  "normalise": {
+    "": "ti",
+    "": "tt",
+    "": "tf",
+    "ﬀ": "ff",
+    "ﬁ": "fi",
+    "ﬂ": "fl",
+    "ﬃ": "ffi",
+    "ﬄ": "ffl",
+    " ": " "
+  },
+  "defaults": {
+    "x_max": 566.0,
+    "label_x_max": 150.0,
+    "fuzzy_min": 0.84,
+    "section_rule_min_span": 330.0,
+    "footer_y": 784.0,
+    "row_tol": 4.0
+  },
+  "families": [
+    {
+      "id": "DRF1",
+      "name": "dRofus-generated RDS, A4 portrait (598 x 842 pt), Lato body text",
+      "page_size": [598.0, 842.0],
+      "size_tol": 6.0,
+      "header": {
+        "fields": [
+          {"key": "header_tag", "label_text": "(header tag, top right)", "region": [480.0, 0.0, 575.0, 33.0]},
+          {"key": "room_name", "label_text": "(header room name)", "region": [150.0, 34.0, 400.0, 64.0]},
+          {"key": "room_code", "label_text": "(header room code)", "region": [400.0, 34.0, 575.0, 64.0]}
+        ]
+      },
+      "footer": {
+        "fields": [
+          {"key": "print_date", "labels": ["Print Date:"], "region": [380.0, 790.0, 575.0, 842.0]}
+        ]
+      },
+      "layouts": ["DRF1-A", "DRF1-B", "DRF1-C", "DRF1-D"]
+    }
+  ],
+  "layouts": [
+    {
+      "id": "DRF1-A",
+      "family": "DRF1",
+      "title": "Room summary page (identity, ACMV, lighting, security, medical gas, M&E service points)",
+      "page_type": "room_summary",
+      "starts_room": true,
+      "match": {"anchors": ["Revision", "Issue Date", "Area", "Hours of Operation", "Occupancy", "ACMV", "Lighting", "Security"], "min_fraction": 0.6},
+      "fields": [
+        {"key": "revision", "labels": ["Revision"], "rule": "row_band", "expected": true},
+        {"key": "issue_date", "labels": ["Issue Date"], "rule": "row_band", "expected": true},
+        {"key": "area", "labels": ["Area"], "rule": "row_band", "expected": true},
+        {"key": "no_of_rooms", "labels": ["No of Rooms"], "rule": "row_band", "expected": true},
+        {"key": "hours_of_operation", "labels": ["Hours of Operation"], "rule": "row_band", "expected": true},
+        {"key": "occupancy", "labels": ["Occupancy"], "rule": "row_band", "expected": true},
+        {"key": "remarks", "labels": ["Remarks"], "rule": "row_band", "expected": true},
+        {"key": "description_functional_performance_specification",
+         "labels": [["Description /", "Functional Performance", "Specification"], "Description / Functional Performance Specification"],
+         "rule": "row_band", "expected": true},
+        {"key": "future_proofing", "labels": ["Future Proofing"], "rule": "row_band", "expected": true},
+        {"key": "shielding", "labels": ["Shielding"], "rule": "row_band", "expected": true},
+        {"key": "acoustics", "labels": ["Acoustics"], "rule": "row_band", "expected": true},
+        {"key": "loading_capacity_floor", "labels": ["Loading Capacity Floor"], "rule": "row_band", "expected": true},
+        {"key": "loading_capacity_ceiling", "labels": ["Loading Capacity Ceiling"], "rule": "row_band", "expected": true}
+      ],
+      "sections": [
+        {
+          "key": "acmv", "labels": ["ACMV"], "expected": true,
+          "cols": [[150.0, 360.0], [360.0, 566.0]],
+          "fields": [
+            {"key": "acmv_hours_of_op", "labels": ["ACMV Hours of Op."], "col": 0, "rule": "inline", "expected": true},
+            {"key": "room_temperature", "labels": ["Room Temperature"], "col": 0, "rule": "inline", "expected": true},
+            {"key": "room_pressure", "labels": ["Room Pressure"], "col": 0, "rule": "inline", "expected": true},
+            {"key": "room_humidity", "labels": ["Room Humidity"], "col": 0, "rule": "inline", "expected": true},
+            {"key": "room_air_recirculation", "labels": ["Room Air Re-Circulation"], "col": 1, "rule": "inline", "expected": true},
+            {"key": "mode_of_control", "labels": ["Mode of Control"], "col": 1, "rule": "inline", "expected": true},
+            {"key": "exhaust_requirements", "labels": ["Exhaust Requirements"], "col": 1, "rule": "inline", "expected": true},
+            {"key": "hepa_filtered", "labels": ["HEPA Filtered"], "col": 1, "rule": "inline", "expected": true}
+          ]
+        },
+        {
+          "key": "lighting", "labels": ["Lighting"], "expected": true,
+          "cols": [[150.0, 360.0], [360.0, 566.0]],
+          "fields": [
+            {"key": "lighting_colour_temp", "labels": ["Lighting Colour Temp."], "col": 0, "rule": "inline", "expected": true},
+            {"key": "specialty_lighting", "labels": ["Specialty Lighting"], "col": 0, "rule": "inline", "expected": true},
+            {"key": "sensor", "labels": ["Sensor"], "col": 0, "rule": "inline", "expected": true},
+            {"key": "lux_level", "labels": ["Lux Level"], "col": 1, "rule": "inline", "expected": true},
+            {"key": "dimmable_lighting", "labels": ["Dimmable Lighting"], "col": 1, "rule": "inline", "expected": true}
+          ]
+        },
+        {
+          "key": "security", "labels": ["Security"], "expected": true,
+          "cols": [[150.0, 360.0], [360.0, 566.0]],
+          "fields": [
+            {"key": "camera_surveillance", "labels": ["Camera Surveillance"], "col": 0, "rule": "inline", "expected": true},
+            {"key": "duress_alarm", "labels": ["Duress Alarm"], "col": 0, "rule": "inline", "expected": true},
+            {"key": "other_left", "labels": ["Other"], "col": 0, "rule": "inline", "expected": true},
+            {"key": "access_control", "labels": ["Access Control"], "col": 1, "rule": "inline", "expected": true},
+            {"key": "intercom", "labels": ["Intercom"], "col": 1, "rule": "inline", "expected": true},
+            {"key": "other_right", "labels": ["Other"], "col": 1, "rule": "inline", "expected": true}
+          ]
+        },
+        {
+          "key": "medical_gas", "labels": ["Medical Gas"], "expected": true,
+          "cols": [[150.0, 360.0], [360.0, 566.0]],
+          "fields": [
+            {"key": "remarks_medical_gas", "labels": ["Remarks"], "col": 1, "rule": "inline", "expected": true}
+          ],
+          "grids": [
+            {"key": "medical_gas_point", "labels": [["Medical", "Gas Point"]], "col": 0,
+             "headers": ["O2", "CO2", "VAC", "MA", "SA", "AGSS", "OTHR"], "expected": true}
+          ]
+        },
+        {
+          "key": "medical_electrical_grouping", "labels": ["Medical Electrical Grouping"], "expected": true,
+          "cols": [[150.0, 360.0], [360.0, 566.0]],
+          "fields": [
+            {"key": "med_locations_group_1", "labels": ["Med. Locations Group 1"], "col": 0, "rule": "inline", "expected": true},
+            {"key": "med_locations_group_2", "labels": ["Med. Locations Group 2"], "col": 1, "rule": "inline", "expected": true},
+            {"key": "other", "labels": ["Other"], "col": 1, "rule": "inline", "expected": true}
+          ]
+        },
+        {
+          "key": "me_service_points", "labels": ["M&E Service Points"], "expected": true,
+          "cols": [[150.0, 360.0], [360.0, 566.0]],
+          "fields": [
+            {"key": "remarks_power_nurse_call", "labels": ["Remarks"], "col": 0, "rule": "inline", "expected": true},
+            {"key": "remarks_water", "labels": ["Remarks"], "col": 1, "rule": "inline", "expected": true}
+          ],
+          "grids": [
+            {"key": "power_point", "labels": [["Power", "Point"]], "col": 0, "headers": ["UPS", "N", "E"], "expected": true},
+            {"key": "nurse_call_data_tel_master_clock", "labels": [["Nurse Call /", "Data/Tel"]], "col": 0,
+             "headers": ["DATA", "TEL", "AV", "NURSE", "MASTER", "OTHER"], "expected": true},
+            {"key": "water_type", "labels": [["Water", "Type"]], "col": 1, "headers": ["COLD", "HOT", "DW", "RO", "OTHER"], "expected": true},
+            {"key": "water_points", "labels": [["Water", "Points"]], "col": 1,
+             "headers": ["BASIN", "SINK", "EYE", "SHOWER", "EMERGENCY", "OTHER"], "expected": true}
+          ]
+        },
+        {
+          "key": "me_service_points_future_proofing", "labels": [["M&E Service Points", "Future Proofing"]], "expected": true,
+          "cols": [[150.0, 360.0], [360.0, 566.0]],
+          "fields": [
+            {"key": "remarks_power", "labels": ["Remarks"], "col": 0, "rule": "inline", "expected": true},
+            {"key": "remarks_data_tel", "labels": ["Remarks"], "col": 1, "rule": "inline", "expected": true}
+          ],
+          "grids": [
+            {"key": "power_point", "labels": [["Power", "Point"]], "col": 0, "headers": ["UPS", "N", "E"], "expected": true},
+            {"key": "data_tel_point", "labels": [["Data/", "Tel Point"]], "col": 1,
+             "headers": ["DATA", "TEL", "AV", "WIFI", "OTHER"], "expected": true}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "DRF1-B",
+      "family": "DRF1",
+      "title": "Legend, finishes, doors, windows and standard component groups",
+      "page_type": "finishes_openings",
+      "starts_room": false,
+      "match": {"anchors": ["Legend", "Finishes", "Doors", "Windows, Glazing and Louvres"], "min_fraction": 0.5},
+      "fields": [
+        {"key": "legend", "labels": ["Legend"], "rule": "row_band", "expected": false, "ignore": true}
+      ],
+      "tables": [
+        {"key": "finishes", "title": ["Finishes"], "expected": true, "row_key_col": 0,
+         "columns": [["Type"], ["Description"]]},
+        {"key": "doors", "title": ["Doors"], "expected": true,
+         "columns": [["Code"], ["Name"], ["Qty"], ["Clear Width"], ["Clear Height"], ["Auto / Manual"], ["Door Protection"], ["Lead Shielding"], ["Interlocking"], ["Hermetically Sealed"]]},
+        {"key": "windows", "title": ["Windows, Glazing and Louvres"], "expected": true,
+         "columns": [["Code"], ["Name"], ["Qty"], ["Auto / Manual"], ["Clear Width"], ["Clear Height"], ["Lead Shielding"], ["Integral Blinds"]]},
+        {"key": "standard_component_groups", "title": ["Standard Component Groups"], "expected": false, "columns_ref": "component"},
+        {"key": "medical_equipment", "title": ["Medical Equipment"], "expected": false, "columns_ref": "component"}
+      ]
+    },
+    {
+      "id": "DRF1-C",
+      "family": "DRF1",
+      "title": "Component schedules (FF&E, engineering services, IT, security systems and overflow of medical equipment)",
+      "page_type": "component_schedules",
+      "starts_room": false,
+      "match": {"anchors": ["Fittngs, Furniture and Equipment (FF&E) Items", "Engineering Services", "IT", "Security Systems", "Medical Equipment", "Standard Component Groups"], "min_fraction": 0.16},
+      "tables": [
+        {"key": "standard_component_groups", "title": ["Standard Component Groups"], "expected": false, "columns_ref": "component"},
+        {"key": "medical_equipment", "title": ["Medical Equipment"], "expected": false, "columns_ref": "component"},
+        {"key": "ffe_items", "title": ["Fittings, Furniture and Equipment (FF&E) Items", "Fittngs, Furniture and Equipment (FF&E) Items"], "expected": false, "columns_ref": "component"},
+        {"key": "engineering_services", "title": ["Engineering Services"], "expected": false, "columns_ref": "component"},
+        {"key": "it", "title": ["IT"], "expected": false, "columns_ref": "component"},
+        {"key": "security_systems", "title": ["Security Systems"], "expected": false, "columns_ref": "component"}
+      ]
+    },
+    {
+      "id": "DRF1-D",
+      "family": "DRF1",
+      "title": "Quantity summary of engineering services (two panes side by side)",
+      "page_type": "quantity_summary",
+      "starts_room": false,
+      "match": {"anchors": ["Quantity Summary - Engineering Services in Room"], "min_fraction": 1.0},
+      "tables": [
+        {"key": "quantity_summary", "title": ["Quantity Summary - Engineering Services in Room"], "expected": true,
+         "panes": [[36.0, 299.0], [299.0, 566.0]],
+         "columns": [["Code"], ["Description"], ["Total Room Qty"]]}
+      ]
+    }
+  ],
+  "column_sets": {
+    "component": [["OmniClass"], ["Code"], ["Description"], ["Qty"], ["Group"], ["Class"], ["Drawn"], ["Comment"]]
+  },
+  "placeholder_codes": ["^[A-Z]*NIL\\d*$"]
+}

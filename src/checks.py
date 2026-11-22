@@ -2,8 +2,11 @@
 
 ``python -m src.checks phase0`` runs the Phase 0 registry, writes
 ``out/qa/check_phase0.md`` (one table row per check with its evidence) and
-exits 0 only when every non-SKIP check passes.  Phases 1 to 5 are not yet
-implemented and exit 2.
+exits 0 only when every non-SKIP check passes.  ``phase1`` checks the stage
+1A conversion (``state/convert_ledger.jsonl`` and the ``checks.json`` files
+the converter writes next to each sidecar); ``--scope converted`` limits it
+to the files converted so far.  Phases 2 to 5 are not yet implemented and
+exit 2.
 
 Each check is a small function ``(ctx) -> (status, evidence)`` where status is
 ``PASS``, ``FAIL`` or ``SKIP`` and evidence is a list of short lines.  Checks
@@ -23,6 +26,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
+
+import yaml
 
 try:  # package import (python -m src.checks, tests)
     from src import common, decisions
@@ -55,12 +60,20 @@ SELFTEST_TIMEOUT_S = 300
 MIN_LISTING_GAP_MIN = 15
 """The spec's minimum gap between the two listings; the config may only widen it."""
 BLOCKED_STATUS = "blocked_connector_limit"
+RESOLVED_STATUSES: Tuple[str, ...] = ("uploaded", "not needed")
+"""``status`` values of a blocked_inputs.csv row that no longer waits for the engineer."""
 ASSEMBLED_TRANSPORT = "upload-assembled"
 """Ledger transport of a working copy stitched together from uploaded parts of one Drive file."""
 TEMPLATE_PROGRESS_KEY = "template_workflow"
 """Progress item set by ``python -m src.template_workflow finish``."""
 _LIMIT_REASON_RE = re.compile(r"connector|limit|10485760|10\s*mib|too\s+large|size", re.IGNORECASE)
 """Reason wording that claims a file was blocked by the connector transport limit."""
+CONVERT_LEDGER = "convert_ledger.jsonl"
+CONVERT_DONE_STATUSES: Tuple[str, ...] = ("converted", "duplicate")
+GRADES: Tuple[str, ...] = ("A", "B", "C", "pending")
+SCOPES: Tuple[str, ...] = ("all", "converted")
+DEFAULT_RECALL = 0.995
+MAX_MISSES_SHOWN = 8
 
 
 class Check(NamedTuple):
@@ -90,7 +103,10 @@ LEDGER_FILES: Tuple[str, ...] = ("pull_ledger.jsonl", "upload_ledger.jsonl")
 class Context:
     """Paths and cached artefacts shared by the checks of one run."""
 
-    def __init__(self, root: Optional[Path] = None) -> None:
+    def __init__(self, root: Optional[Path] = None, scope: str = "all") -> None:
+        if scope not in SCOPES:
+            raise ValueError(f"scope must be one of {SCOPES}, not {scope!r}")
+        self.scope: str = scope
         self.root: Path = (root or common.project_root()).resolve()
         self.paths: Dict[str, Path] = common.resolve_paths()
         self.state: Path = self.paths.get("state", self.root / "state")
@@ -186,6 +202,70 @@ class Context:
         """Rows of ``out/qa/blocked_inputs.csv`` (BOM tolerated) or ``None`` when the file is missing."""
         path = self.qa / "blocked_inputs.csv"
         return self._memo("blocked", lambda: _read_human_csv(path) if path.is_file() else None)
+
+    def source_rows(self) -> List[Dict[str, Any]]:
+        """Fetched files in scope for conversion: latest ledger row per rel_path, zips left out."""
+        def load() -> List[Dict[str, Any]]:
+            latest: Dict[str, Dict[str, Any]] = {}
+            order: List[str] = []
+            for row in self.ledger_rows():
+                rel = str(row.get("rel_path") or "")
+                if not rel or not row.get("sha256") or common.is_zip(rel):
+                    continue
+                if rel not in latest:
+                    order.append(rel)
+                latest[rel] = row
+            return [latest[rel] for rel in order]
+        return self._memo("source_rows", load)
+
+    def convert_rows(self) -> Dict[str, Dict[str, Any]]:
+        """Latest row of ``state/convert_ledger.jsonl`` per ``sha256|rel_path``."""
+        def load() -> Dict[str, Dict[str, Any]]:
+            latest: Dict[str, Dict[str, Any]] = {}
+            for row in common.read_jsonl(self.state / CONVERT_LEDGER):
+                if isinstance(row, dict) and row.get("sha256") and row.get("rel_path"):
+                    latest[f"{row['sha256']}|{row['rel_path']}"] = row
+            return latest
+        return self._memo("convert_rows", load)
+
+    def scoped_rows(self) -> List[Dict[str, Any]]:
+        """Source rows to judge: all of them, or only those with a convert-ledger row (``--scope converted``)."""
+        rows = self.source_rows()
+        if self.scope == "converted":
+            convert = self.convert_rows()
+            rows = [r for r in rows if f"{r['sha256']}|{r['rel_path']}" in convert]
+        return rows
+
+    def converted_rows(self) -> List[Dict[str, Any]]:
+        """Convert-ledger rows with status ``converted`` for the scoped source rows."""
+        convert = self.convert_rows()
+        out: List[Dict[str, Any]] = []
+        for row in self.scoped_rows():
+            record = convert.get(f"{row['sha256']}|{row['rel_path']}")
+            if record and record.get("status") == "converted":
+                out.append(record)
+        return out
+
+    def file_checks(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """The ``checks.json`` written for a converted row, or ``None`` when missing or unreadable."""
+        checks_path = row.get("checks_path")
+        if not checks_path:
+            return None
+        path = Path(str(checks_path))
+        path = path if path.is_absolute() else self.root / path
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def recall_threshold(self) -> float:
+        """``tolerances.numeric_recall`` from the configuration (default 0.995)."""
+        try:
+            value = (self.config().get("tolerances") or {}).get("numeric_recall")
+            return float(value) if value is not None else DEFAULT_RECALL
+        except Exception:  # noqa: BLE001 - a broken config falls back to the brief's value
+            return DEFAULT_RECALL
 
     def progress_item(self, key: str) -> Optional[Dict[str, Any]]:
         """One item of ``state/progress.json`` read without taking the lock (checks only read)."""
@@ -516,6 +596,7 @@ def check_blocked_inputs(ctx: Context) -> CheckOutcome:
     listed = {_norm_path(r.get("rel_path", "")): r for r in rows}
     evidence = [f"{len(rows)} blocked input(s), {len(plan_blocked)} plan row(s) {BLOCKED_STATUS}"]
     problems = _blocked_row_problems(listed, plan, plan_blocked)
+    problems += _resolved_status_problems(ctx, listed, plan)
     not_listed = sorted(plan_blocked - set(listed))
     if not_listed:
         problems.insert(0, f"blocked in plan but not listed: {_sample(not_listed)}")
@@ -523,6 +604,36 @@ def check_blocked_inputs(ctx: Context) -> CheckOutcome:
     if outside:
         evidence.append(f"listed for reasons outside the plan (not reconciled): {_sample(outside)}")
     return (FAIL if problems else PASS), evidence + problems
+
+
+def _resolved_status_problems(ctx: Context, listed: Dict[str, Dict[str, str]],
+                              plan: Dict[str, Dict[str, str]]) -> List[str]:
+    """Rows marked ``uploaded`` or ``not needed`` must be backed by the upload ledger or a recorded skip."""
+    upload_ids = {str(r.get("drive_id", "")) for r in common.read_jsonl(ctx.state / "upload_ledger.jsonl")
+                  if isinstance(r, dict)}
+    upload_paths = {_norm_path(str(r.get("rel_path", ""))) for r in common.read_jsonl(ctx.state / "upload_ledger.jsonl")
+                    if isinstance(r, dict)}
+    skipped: set = set()
+    skip_file = ctx.state / "pull_batches" / "basis_skipped.csv"
+    if skip_file.is_file():
+        skipped = {_norm_path(r.get("rel_path", "")) for r in common.read_csv_dicts(skip_file)}
+    bad_up: List[str] = []
+    bad_nn: List[str] = []
+    for rel_path, row in listed.items():
+        status = str(row.get("status", "")).strip().lower()
+        if status == "uploaded":
+            drive_id = str(row.get("drive_id", "")).strip()
+            if rel_path not in upload_paths and not (drive_id and drive_id in upload_ids):
+                bad_up.append(rel_path)
+        elif status == "not needed":
+            if rel_path not in skipped and plan.get(rel_path, {}).get("status") != "skipped_zip":
+                bad_nn.append(rel_path)
+    out: List[str] = []
+    if bad_up:
+        out.append(f"marked uploaded but not in the upload ledger: {_sample(bad_up)}")
+    if bad_nn:
+        out.append(f"marked not needed but not in basis_skipped.csv or a skipped_zip plan row: {_sample(bad_nn)}")
+    return out
 
 
 def _claims_transport_limit(row: Dict[str, str]) -> bool:
@@ -548,6 +659,10 @@ def _blocked_row_problems(listed: Dict[str, Dict[str, str]], plan: Dict[str, Dic
             if plan_bytes and str(row.get("bytes", "")).strip() != plan_bytes:
                 wrong_bytes.append(f"{rel_path} ({row.get('bytes', '')!s} vs plan {plan_bytes})")
         elif rel_path in plan:
+            if str(row.get("status", "")).strip().lower() in RESOLVED_STATUSES:
+                continue  # uploaded or not needed: the plan may show it fetched or pending
+            if plan[rel_path].get("status") == "pending" and not _claims_transport_limit(row):
+                continue  # not pulled for another recorded reason (outside the plan's remit)
             wrong_status.append(f"{rel_path} (plan status {plan[rel_path].get('status', '')!s})")
         elif _claims_transport_limit(row):
             stale.append(rel_path)
@@ -598,7 +713,144 @@ def check_template_outputs(ctx: Context) -> CheckOutcome:
                              f"{item.get('status') or 'not set'}; python -m src.template_workflow finish sets it)"]
 
 
+# --------------------------------------------------------------------------- #
+# Phase 1 checks (stage 1A conversion)
+# --------------------------------------------------------------------------- #
+def _front_matter(md_path: Path) -> Optional[Dict[str, Any]]:
+    """The YAML front matter of a Markdown file, or ``None`` when absent or unreadable."""
+    try:
+        text = md_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
+    if not match:
+        return None
+    try:
+        data = yaml.safe_load(match.group(1))
+    except yaml.YAMLError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def check_p1_markdown_or_reason(ctx: Context) -> CheckOutcome:
+    """P1-01: every in-scope file has a Markdown file or a recorded reason in the convert ledger."""
+    rows = ctx.scoped_rows()
+    if not rows:
+        return SKIP, ["no fetched files in scope" + (" (convert ledger empty)" if ctx.scope == "converted" else "")]
+    convert = ctx.convert_rows()
+    missing: List[str] = []
+    broken: List[str] = []
+    with_reason = 0
+    for row in rows:
+        record = convert.get(f"{row['sha256']}|{row['rel_path']}")
+        if record is None:
+            missing.append(str(row["rel_path"]))
+        elif record.get("status") in CONVERT_DONE_STATUSES:
+            md_path = record.get("md_path")
+            if not md_path or not (ctx.root / str(md_path)).is_file():
+                broken.append(str(row["rel_path"]))
+        elif record.get("error") or record.get("grade_reason"):
+            with_reason += 1
+        else:
+            missing.append(f"{row['rel_path']} (status {record.get('status')} without a reason)")
+    evidence = [f"{len(rows)} file(s) in scope ({ctx.scope}); {len(rows) - len(missing) - len(broken) - with_reason} "
+                f"with Markdown, {with_reason} with a recorded reason"]
+    if missing:
+        evidence.append(f"no convert record: {_sample(missing)}")
+    if broken:
+        evidence.append(f"recorded as converted but Markdown missing: {_sample(broken)}")
+    return (FAIL if missing or broken else PASS), evidence
+
+
+def _per_file_check(ctx: Context, judge: Callable[[Dict[str, Any]], Tuple[bool, str]], label: str) -> CheckOutcome:
+    """Run ``judge(checks.json)`` for every converted file; FAIL lists the files that do not pass."""
+    rows = ctx.converted_rows()
+    if not rows:
+        return SKIP, ["no converted files in scope"]
+    failures: List[str] = []
+    unreadable: List[str] = []
+    for row in rows:
+        checks = ctx.file_checks(row)
+        if checks is None:
+            unreadable.append(str(row.get("rel_path")))
+            continue
+        ok, detail = judge(checks)
+        if not ok:
+            failures.append(f"{row.get('rel_path')}: {detail}")
+    evidence = [f"{len(rows)} converted file(s) checked for {label}"]
+    if unreadable:
+        evidence.append(f"checks.json missing or unreadable: {_sample(unreadable)}")
+    if failures:
+        evidence.append(f"{len(failures)} failing: " + " | ".join(failures[:5]) +
+                        (f" (+{len(failures) - 5} more)" if len(failures) > 5 else ""))
+    return (FAIL if failures or unreadable else PASS), evidence
+
+
+def check_p1_numeric_recall(ctx: Context) -> CheckOutcome:
+    """P1-02: numeric recall >= the configured threshold per file (misses listed)."""
+    threshold = ctx.recall_threshold()
+
+    def judge(checks: Dict[str, Any]) -> Tuple[bool, str]:
+        recall = float(checks.get("numeric_recall", 0.0))
+        misses = [str(m) for m in checks.get("misses", [])][:MAX_MISSES_SHOWN]
+        return recall >= threshold, f"recall {recall:.4f} < {threshold}; misses {', '.join(misses) or 'n/a'}"
+    status, evidence = _per_file_check(ctx, judge, f"numeric recall >= {threshold}")
+    return status, evidence
+
+
+def check_p1_table_counts(ctx: Context) -> CheckOutcome:
+    """P1-03: sidecar table count equals the Markdown table count per file."""
+    def judge(checks: Dict[str, Any]) -> Tuple[bool, str]:
+        tables = checks.get("tables") or {}
+        return bool(tables.get("match")), f"sidecar {tables.get('sidecar')} vs Markdown {tables.get('markdown')}"
+    return _per_file_check(ctx, judge, "table counts")
+
+
+def check_p1_annotation_counts(ctx: Context) -> CheckOutcome:
+    """P1-04: sidecar annotation count equals the Comments register rows per file."""
+    def judge(checks: Dict[str, Any]) -> Tuple[bool, str]:
+        annots = checks.get("annotations") or {}
+        return bool(annots.get("match")), f"sidecar {annots.get('sidecar')} vs register {annots.get('register')}"
+    return _per_file_check(ctx, judge, "annotation counts")
+
+
+def check_p1_grades(ctx: Context) -> CheckOutcome:
+    """P1-05: every converted or duplicate file carries a grade (A, B, C or pending) in ledger and front matter."""
+    convert = ctx.convert_rows()
+    records = [convert[f"{r['sha256']}|{r['rel_path']}"] for r in ctx.scoped_rows()
+               if f"{r['sha256']}|{r['rel_path']}" in convert and
+               convert[f"{r['sha256']}|{r['rel_path']}"].get("status") in CONVERT_DONE_STATUSES]
+    if not records:
+        return SKIP, ["no converted files in scope"]
+    bad: List[str] = []
+    tally: Dict[str, int] = {}
+    for record in records:
+        grade = record.get("grade")
+        if grade not in GRADES:
+            bad.append(f"{record.get('rel_path')}: ledger grade {grade!r}")
+            continue
+        tally[str(grade)] = tally.get(str(grade), 0) + 1
+        front = _front_matter(ctx.root / str(record.get("md_path") or ""))
+        if front is None:
+            bad.append(f"{record.get('rel_path')}: no front matter")
+        elif front.get("grade") != grade:
+            bad.append(f"{record.get('rel_path')}: front matter grade {front.get('grade')!r} != ledger {grade!r}")
+        elif not str(front.get("grade_reason") or "").strip():
+            bad.append(f"{record.get('rel_path')}: empty grade_reason")
+    evidence = [f"{len(records)} file(s): " + ", ".join(f"{g} {n}" for g, n in sorted(tally.items()))]
+    if bad:
+        evidence.append(f"problems: {_sample(bad)}")
+    return (FAIL if bad else PASS), evidence
+
+
 PHASE_CHECKS: Dict[int, List[Check]] = {
+    1: [
+        Check("P1-01", "Every in-scope file has Markdown or a recorded reason", check_p1_markdown_or_reason),
+        Check("P1-02", "Numeric recall >= threshold per file", check_p1_numeric_recall),
+        Check("P1-03", "Table counts match (sidecar vs Markdown)", check_p1_table_counts),
+        Check("P1-04", "Annotation counts match (sidecar vs Comments register)", check_p1_annotation_counts),
+        Check("P1-05", "Grades recorded in ledger and front matter", check_p1_grades),
+    ],
     0: [
         Check("P0-01", "Bootstrap files exist", check_bootstrap_files),
         Check("P0-02", "Config loads with four Drive folder ids", check_config_folders),
@@ -660,6 +912,7 @@ def render_report(phase: int, results: Sequence[CheckResult], ctx: Context) -> s
         "",
         f"- Run at: {common.utc_now_iso()}",
         f"- Project root: {ctx.root}",
+        f"- Scope: {ctx.scope}",
         f"- Result: **{verdict}** ({tally[PASS]} PASS, {tally[FAIL]} FAIL, {tally[SKIP]} SKIP)",
         "",
         "| Check | Title | Status | Evidence |",
@@ -687,12 +940,12 @@ def print_results(results: Sequence[CheckResult]) -> None:
 
 
 def run_and_report(phase: int, ctx: Optional[Context] = None, out_path: Optional[Path] = None,
-                   quiet: bool = False) -> int:
+                   quiet: bool = False, scope: str = "all") -> int:
     """Run a phase, write its report and return the exit code (0 pass, 1 fail, 2 not implemented)."""
     if phase not in PHASE_CHECKS:
         print(f"phase {phase}: not implemented", file=sys.stderr)
         return 2
-    ctx = ctx or Context()
+    ctx = ctx or Context(scope=scope)
     results = run_phase(phase, ctx)
     target = out_path or report_path(phase, ctx)
     common.atomic_write_text(target, render_report(phase, results, ctx))
@@ -712,6 +965,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="phase to check, or 'list' to show the registered checks")
     parser.add_argument("--report", type=Path, default=None, help="report path (default: out/qa/check_phase<N>.md)")
     parser.add_argument("--quiet", action="store_true", help="write the report without console output")
+    parser.add_argument("--scope", choices=SCOPES, default="all",
+                        help="phase1: 'converted' judges only files already in the convert ledger (default all)")
     return parser
 
 
@@ -730,7 +985,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _cmd_list()
     phase = int(args.phase[len("phase"):])
     try:
-        return run_and_report(phase, out_path=args.report, quiet=args.quiet)
+        return run_and_report(phase, out_path=args.report, quiet=args.quiet, scope=args.scope)
     except Exception as exc:  # noqa: BLE001 - surface any failure as a non-zero exit
         print(f"error: {exc}", file=sys.stderr)
         return 1

@@ -1,0 +1,20 @@
+# Minimal synthetic configuration for tests of src.convert, src.md_writer and src.recall_check (never the real values).
+project: {name: synthetic convert test project, language: en-GB}
+drive:
+  folders:
+    dd_signoff: {id: fx_dd_signoff, role: source}
+    template:   {id: fx_template, role: samples}
+    basis:      {id: fx_basis, role: basis}
+    markdown:   {id: fx_markdown, role: upload-target}
+  transport: connector
+  listing_interval_minutes: 15
+paths:
+  source: data/source
+  markdown: out/markdown
+  sidecar: out/sidecar
+  registers: out/registers
+  qa: out/qa
+  state: state
+  logs: logs
+tolerances:
+  numeric_recall: 0.995

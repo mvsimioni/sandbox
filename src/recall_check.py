@@ -218,7 +218,7 @@ def _xlsx_values(sidecar_dir: Path) -> List[str]:
     return values
 
 
-def _email_body(sidecar_dir: Path) -> str:
+def email_body(sidecar_dir: Path) -> str:
     """The body text of an e-mail from ``body.md`` (between the Body and Attachments headings)."""
     path = sidecar_dir / sidecar_misc.BODY_NAME
     if not path.is_file():
@@ -240,7 +240,7 @@ def expected_tokens(kind: str, sidecar_dir: Path) -> Set[str]:
     if kind == "xlsx":
         return normalised_set(t for value in _xlsx_values(sidecar_dir) for t in sidecar_xlsx.numeric_tokens(value))
     if kind == "email":
-        return normalised_set(sidecar_misc.numeric_tokens(_email_body(sidecar_dir)))
+        return normalised_set(sidecar_misc.numeric_tokens(email_body(sidecar_dir)))
     return set()
 
 

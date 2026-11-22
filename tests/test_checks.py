@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Tuple
 import pytest
 
 from src import checks, decisions
-from src.common import append_jsonl, atomic_write_json, write_csv_dicts
+from src.common import append_jsonl, atomic_write_json, read_csv_dicts as common_read, write_csv_dicts
 from src.state import Progress
 
 FIXTURES = Path(__file__).parent / "fixtures" / "checks"
@@ -159,7 +159,7 @@ def test_registry_has_twelve_phase0_checks() -> None:
 
 
 def test_other_phases_are_stubs(tree: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    for phase in range(1, 6):
+    for phase in range(2, 6):
         assert checks.main([f"phase{phase}"]) == 2
     assert "not implemented" in capsys.readouterr().err
     assert checks.main(["list"]) == 0
@@ -641,3 +641,124 @@ def test_p0_04_and_p0_06_read_the_upload_ledger_like_the_manifest(tree: Path) ->
     result = results_by_id()["P0-04"]
     assert result.status == checks.FAIL
     assert any("size_match" in line for line in result.evidence)
+
+
+def _assembled_tree(tree: Path, size_match: bool = False, transport: str = "upload-assembled") -> None:
+    """Replace the background PDF's fetch record by an assembled working copy plus two uploaded parts."""
+    entry = LISTING_FILES[3]
+    rows = list(_manifest_rows(("f1", "f2", "f4")))
+    write_csv_dicts(tree / "out" / "registers" / "manifest.csv", rows, list(rows[0].keys()))
+    upload = tree / "state" / "upload_ledger.jsonl"
+    upload.unlink(missing_ok=True)
+    for part in (1, 2):
+        append_jsonl(upload, {"rel_path": f"Basis/Arch Combined Tender (uploaded parts)/part{part}.pdf",
+                              "drive_id": "f4 (parent file, 99000000 B)", "transport": "upload", "size_match": None})
+    append_jsonl(upload, {**_ledger_row(entry, size_match=size_match), "transport": transport})
+
+
+def test_p0_04_assembled_working_copy_is_an_explained_exception(tree: Path) -> None:
+    _assembled_tree(tree)
+    result = results_by_id()["P0-04"]
+    assert result.status == checks.PASS, result.evidence
+    note = next(line for line in result.evidence if "explained exception" in line)
+    assert "Basis/Arch Combined Tender .pdf" in note
+    assert "assembled from 2 uploaded parts; page content to be confirmed against the Drive original when a full " \
+        "transport exists" in note
+    assert not any("pulled without size_match" in line for line in result.evidence)
+
+
+def test_p0_04_other_size_mismatches_still_fail_beside_an_assembled_row(tree: Path) -> None:
+    _assembled_tree(tree)
+    ledger = tree / "state" / "pull_ledger.jsonl"
+    ledger.unlink()
+    append_jsonl(ledger, _ledger_row(LISTING_FILES[0], size_match=False))  # a connector row that does not match
+    append_jsonl(ledger, _ledger_row(LISTING_FILES[1]))
+    result = results_by_id()["P0-04"]
+    assert result.status == checks.FAIL
+    assert any("size_match" in line and LISTING_FILES[0]["rel_path"] in line for line in result.evidence)
+    assert any("explained exception" in line for line in result.evidence)  # still listed, not hidden
+
+
+def test_p0_04_plain_upload_with_size_mismatch_is_not_excused(tree: Path) -> None:
+    _assembled_tree(tree, transport="upload")  # only the assembled transport is an exception
+    assert results_by_id()["P0-04"].status == checks.FAIL
+
+
+def test_p0_06_counts_duplicate_rows_and_upload_ledger_paths(tree: Path) -> None:
+    """Coverage is by rel_path over both ledgers: a duplicate needs its own census row."""
+    dup = {**_ledger_row(LISTING_FILES[1]), "drive_id": "up1", "transport": "upload",
+           "rel_path": "Basis/uploaded copy of RDS.pdf"}
+    upload = tree / "state" / "upload_ledger.jsonl"
+    upload.unlink(missing_ok=True)
+    append_jsonl(upload, dup)
+    result = results_by_id()["P0-06"]
+    assert result.status == checks.FAIL and any("uploaded copy of RDS" in line for line in result.evidence)
+    census = tree / "out" / "registers" / "file_census.csv"
+    cols = ["rel_path", "sha256", "kind", "pages", "text_pages", "vector_pages", "raster_pages", "mixed_pages",
+            "total_annotations", "seconds", "error", "note"]
+    rows = [{c: "" for c in cols} for _ in range(2)]
+    rows[0].update(rel_path=LISTING_FILES[1]["rel_path"], sha256=SHA, kind="pdf", pages="2")
+    rows[1].update(rel_path=dup["rel_path"], sha256=SHA, kind="pdf", pages="2",
+                   note="duplicate of " + LISTING_FILES[1]["rel_path"])
+    write_csv_dicts(census, rows, cols)
+    assert results_by_id()["P0-06"].status == checks.PASS
+
+
+def test_p0_10_resolved_rows_are_consistent_with_the_plan(tree: Path) -> None:
+    """Uploaded and not-needed rows may sit on a plan row that is fetched or pending; stale limit claims may not."""
+    path = tree / "out" / "qa" / "blocked_inputs.csv"
+    cols = list(checks.BLOCKED_INPUT_COLUMNS) + ["status"]
+    blocked = {"rel_path": LISTING_FILES[3]["rel_path"], "bytes": "99000000", "reason": "over connector 10 MB limit",
+               "needed_for": "x", "status": "pending"}
+    fetched = {"rel_path": LISTING_FILES[0]["rel_path"], "bytes": "1000", "reason": "over connector 10 MB limit",
+               "needed_for": "x", "status": "uploaded"}
+    write_csv_dicts(path, [blocked, fetched], cols)
+    append_jsonl(tree / "state" / "upload_ledger.jsonl", {"drive_id": "u1", "rel_path": fetched["rel_path"]})
+    assert results_by_id()["P0-10"].status == checks.PASS
+    write_csv_dicts(path, [blocked, {**fetched, "status": "pending"}], cols)  # claims the limit, plan says fetched
+    result = results_by_id()["P0-10"]
+    assert result.status == checks.FAIL and any("plan status is not" in line for line in result.evidence)
+    write_csv_dicts(path, [{**fetched, "reason": "outside ACMV scope", "status": "not needed"}], cols)
+    result = results_by_id()["P0-10"]  # the blocked plan row is no longer listed
+    assert result.status == checks.FAIL and any("not listed" in line for line in result.evidence)
+
+
+def _p0_10_rows(tree: Path, extra: Dict[str, str]) -> None:
+    cols = list(checks.BLOCKED_INPUT_COLUMNS) + ["status", "drive_id"]
+    blocked = {"rel_path": LISTING_FILES[3]["rel_path"], "bytes": "99000000", "reason": "over connector 10 MB limit",
+               "needed_for": "x", "status": "pending", "drive_id": ""}
+    write_csv_dicts(tree / "out" / "qa" / "blocked_inputs.csv", [blocked, {**blocked, **extra}], cols)
+
+
+def test_p0_10_uploaded_row_needs_a_ledger_entry(tree: Path) -> None:
+    hand_edited = {"rel_path": LISTING_FILES[0]["rel_path"], "bytes": "1000", "status": "uploaded",
+                   "drive_id": "not-in-ledger"}
+    _p0_10_rows(tree, hand_edited)
+    result = results_by_id()["P0-10"]
+    assert result.status == checks.FAIL and any("not in the upload ledger" in line for line in result.evidence)
+    append_jsonl(tree / "state" / "upload_ledger.jsonl", {"drive_id": "not-in-ledger", "rel_path": "elsewhere.pdf"})
+    assert results_by_id()["P0-10"].status == checks.PASS  # matched by drive_id
+    (tree / "state" / "upload_ledger.jsonl").write_text("", encoding="utf-8")
+    append_jsonl(tree / "state" / "upload_ledger.jsonl",
+                 {"drive_id": "zzz", "rel_path": LISTING_FILES[0]["rel_path"]})
+    assert results_by_id()["P0-10"].status == checks.PASS  # matched by rel_path
+
+
+def test_p0_10_not_needed_row_needs_a_skip_record_or_zip(tree: Path) -> None:
+    rel = LISTING_FILES[0]["rel_path"]
+    _p0_10_rows(tree, {"rel_path": rel, "bytes": "1000", "status": "not needed", "reason": "outside ACMV scope"})
+    result = results_by_id()["P0-10"]
+    assert result.status == checks.FAIL and any("marked not needed" in line for line in result.evidence)
+    skip = tree / "state" / "pull_batches" / "basis_skipped.csv"
+    skip.parent.mkdir(parents=True, exist_ok=True)
+    write_csv_dicts(skip, [{"rel_path": rel, "bytes": "1000", "reason": "outside ACMV scope"}],
+                    ["rel_path", "bytes", "reason"])
+    assert results_by_id()["P0-10"].status == checks.PASS
+    skip.unlink()
+    plan = tree / "state" / "pull_plan.csv"
+    rows = common_read(plan)
+    for r in rows:
+        if r["rel_path"] == rel:
+            r["status"] = "skipped_zip"
+    write_csv_dicts(plan, rows, list(rows[0]))
+    assert results_by_id()["P0-10"].status == checks.PASS

@@ -86,8 +86,8 @@ def test_run_writes_both_registers_with_exact_columns(workspace: Dict[str, Any])
     pages, files = _pages(workspace), _files(workspace)
     assert list(pages[0].keys()) == list(census.PAGE_COLUMNS)
     assert list(files[0].keys()) == list(census.FILE_COLUMNS)
-    assert len(files) == 2  # the duplicate shares a sha256 and the xlsx is ignored
-    assert len(pages) == 4 + 3
+    assert len(files) == 3  # pdf, pptx and the hash-identical duplicate (own row); the xlsx is ignored
+    assert len(pages) == 4 + 3  # work is by hash: the duplicate has no page rows of its own
     assert (workspace["logs"] / "census.log").read_text().count("done ") == 2
 
 
@@ -157,9 +157,9 @@ def test_second_run_adds_nothing(workspace: Dict[str, Any]) -> None:
 
 def test_limit_processes_one_file_then_resumes(workspace: Dict[str, Any]) -> None:
     assert _run(workspace, "--limit", "1") == 0
-    assert len(_files(workspace)) == 1
+    assert len(_files(workspace)) == 2  # the pdf and its duplicate; the pptx is still pending
     assert _run(workspace) == 0
-    assert len(_files(workspace)) == 2
+    assert len(_files(workspace)) == 3
     assert len(_pages(workspace)) == 7
 
 
@@ -171,7 +171,7 @@ def test_orphan_page_rows_are_repaired(workspace: Dict[str, Any]) -> None:
     assert _run(workspace) == 0
     pages = _pages(workspace)
     assert len(pages) == 7 and len([r for r in pages if r["kind"] == "pptx"]) == 3  # not duplicated
-    assert len(_files(workspace)) == 2
+    assert len(_files(workspace)) == 3
 
 
 def test_missing_file_is_recorded_as_error_and_run_continues(workspace: Dict[str, Any]) -> None:
@@ -180,7 +180,7 @@ def test_missing_file_is_recorded_as_error_and_run_continues(workspace: Dict[str
                                  "local_path": "data/source/Basis/missing.pdf", "sha256": "f" * 64}) + "\n")
     assert _run(workspace) == 1
     files = {r["rel_path"]: r for r in _files(workspace)}
-    assert len(files) == 3
+    assert len(files) == 4
     assert files["Basis/missing.pdf"]["pages"] == "0" and files["Basis/missing.pdf"]["error"]
     assert Progress(workspace["state"] / "progress.json").status("census:Basis/missing.pdf") == "error"
 
@@ -202,10 +202,10 @@ def test_summary(workspace: Dict[str, Any], capsys: pytest.CaptureFixture[str]) 
     assert list(next(iter(rows.values())).keys()) == list(census.SUMMARY_COLUMNS)
     dd, template, total = rows["DD Sign-OFF"], rows["Template"], rows["TOTAL"]
     assert (dd["files"], dd["pages"], dd["text"], dd["vector_drawing"], dd["raster_or_scan"], dd["mixed"]) == \
-        ("1", "4", "1", "1", "1", "1")
+        ("2", "4", "1", "1", "1", "1")
     assert (template["files"], template["pages"], template["text"], template["raster_or_scan"], template["mixed"]) == \
         ("1", "3", "1", "1", "1")
-    assert (total["files"], total["pages"], total["total_annotations"], total["errors"]) == ("2", "7", "6", "0")
+    assert (total["files"], total["pages"], total["total_annotations"], total["errors"]) == ("3", "7", "6", "0")
     out = capsys.readouterr().out
     assert "DD Sign-OFF" in out and "TOTAL" in out
 
@@ -349,16 +349,16 @@ def test_retry_errors_recensuses_failed_files(workspace: Dict[str, Any], fixture
                                  "local_path": "data/source/Basis/late.pdf", "sha256": "e" * 64}) + "\n")
     assert _run(workspace) == 1
     rows = {r["rel_path"]: r for r in _files(workspace)}
-    assert rows["Basis/late.pdf"]["error"].startswith("FileNotFoundError") and len(rows) == 3
+    assert rows["Basis/late.pdf"]["error"].startswith("FileNotFoundError") and len(rows) == 4
     late.parent.mkdir(parents=True, exist_ok=True)
     late.write_bytes(fixtures["pdf"].read_bytes())
-    assert _run(workspace) == 0 and len(_files(workspace)) == 3  # still sticky without the switch
+    assert _run(workspace) == 0 and len(_files(workspace)) == 4  # still sticky without the switch
     assert _run(workspace, "--retry-errors") == 0
     rows = {r["rel_path"]: r for r in _files(workspace)}
-    assert len(rows) == 3 and rows["Basis/late.pdf"]["error"] == "" and rows["Basis/late.pdf"]["pages"] == "4"
+    assert len(rows) == 4 and rows["Basis/late.pdf"]["error"] == "" and rows["Basis/late.pdf"]["pages"] == "4"
     assert len(_pages(workspace)) == 7 + 4
     assert "retry: dropped 1 error rows" in (workspace["logs"] / "census.log").read_text()
-    assert _run(workspace, "--retry-errors") == 0 and len(_files(workspace)) == 3  # nothing left to retry
+    assert _run(workspace, "--retry-errors") == 0 and len(_files(workspace)) == 4  # nothing left to retry
 
 
 def test_unresponsive_worker_is_killed_and_the_slot_reused(workspace: Dict[str, Any],
@@ -416,3 +416,53 @@ def test_unattributed_comment_parts_count_towards_the_file_total(tmp_path: Path,
     assert "unattributed_comments=2" in rows[0]["notes"]
     assert rows[1]["annotation_count"] == 1 and "unattributed" not in rows[2]["notes"]
     assert sum(r["annotation_count"] for r in rows) == total
+
+
+# --------------------------------------------------------------------------- #
+# Upload ledger and hash-identical duplicates (coverage by file, work by hash)
+# --------------------------------------------------------------------------- #
+def test_upload_ledger_files_are_censused_and_duplicates_get_their_own_row(workspace: Dict[str, Any]) -> None:
+    root, state = workspace["root"], workspace["state"]
+    uploaded = root / "data" / "source" / "Basis" / "App D" / "Appendix D.pdf"
+    uploaded.parent.mkdir(parents=True)
+    uploaded.write_bytes((root / "data" / "source" / PDF_REL).read_bytes())  # same bytes as the pull-ledger pdf
+    with (state / "upload_ledger.jsonl").open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps({"drive_id": "u1", "rel_path": "Basis/App D/Appendix D.pdf",
+                                 "local_path": "data/source/Basis/App D/Appendix D.pdf",
+                                 "sha256": workspace["pdf_sha"], "transport": "upload"}) + "\n")
+    assert _run(workspace) == 0
+    files = {r["rel_path"]: r for r in _files(workspace)}
+    assert set(files) == {PDF_REL, PPTX_REL, "DD Sign-OFF/29 - Lab/Submitted/copy.pdf", "Basis/App D/Appendix D.pdf"}
+    for rel in ("DD Sign-OFF/29 - Lab/Submitted/copy.pdf", "Basis/App D/Appendix D.pdf"):
+        assert files[rel]["note"] == f"duplicate of {PDF_REL}"
+        assert (files[rel]["kind"], files[rel]["pages"], files[rel]["sha256"]) == ("pdf", "4", workspace["pdf_sha"])
+    assert files[PDF_REL]["note"] == ""
+    assert len(_pages(workspace)) == 7  # measured once per hash
+    assert _pages(workspace)[0]["rel_path"] == PDF_REL
+    before = (workspace["registers"] / "file_census.csv").read_bytes()
+    assert _run(workspace) == 0
+    assert (workspace["registers"] / "file_census.csv").read_bytes() == before  # idempotent
+    progress = Progress(state / "progress.json")
+    assert progress.status("census:Basis/App D/Appendix D.pdf") == "done"
+    assert progress.get("census:Basis/App D/Appendix D.pdf")["duplicate_of"] == PDF_REL
+
+
+def test_upload_only_file_is_measured_and_an_older_register_is_migrated(workspace: Dict[str, Any]) -> None:
+    """A file only in the upload ledger is the primary of its hash; a register without the note column is upgraded."""
+    assert _run(workspace) == 0
+    file_csv = workspace["registers"] / "file_census.csv"
+    old_columns = [c for c in census.FILE_COLUMNS if c != "note"]
+    census.write_csv_dicts(file_csv, [{k: v for k, v in r.items() if k != "note"} for r in _files(workspace)
+                                      if r["note"] == ""], old_columns)  # as written before the column existed
+    assert _run(workspace) == 0
+    rows = _files(workspace)
+    assert list(rows[0].keys()) == list(census.FILE_COLUMNS)
+    assert sorted(r["note"] for r in rows) == ["", "", f"duplicate of {PDF_REL}"]
+    assert len(_pages(workspace)) == 7
+
+
+def test_summary_counts_pages_and_annotations_once_per_hash(workspace: Dict[str, Any]) -> None:
+    assert _run(workspace) == 0
+    files, pages = _files(workspace), _pages(workspace)
+    rows = {r["root"]: r for r in census.build_summary(files, pages)}
+    assert rows["TOTAL"]["files"] == 3 and rows["TOTAL"]["pages"] == 7 and rows["TOTAL"]["total_annotations"] == 6

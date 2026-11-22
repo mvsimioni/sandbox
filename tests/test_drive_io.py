@@ -434,3 +434,31 @@ def test_rel_path_safety_rules() -> None:
     assert drive_io.rel_path_is_safe("DD Sign-OFF/30 - Pharmacy/Submitted/Plan – Ebene 2 (révisé).pdf")
     for bad in ("", "/etc/passwd", "Basis/../x", "./x", "Basis//x.pdf", "Basis/./x.pdf", "..", "a/.."):
         assert not drive_io.rel_path_is_safe(bad), bad
+
+
+# --------------------------------------------------------------------------- #
+# Upload ledger counts as fetched in the pull plan
+# --------------------------------------------------------------------------- #
+def test_pull_plan_treats_upload_ledger_files_as_fetched(project: Path) -> None:
+    """A file over the connector limit that the engineer uploaded is fetched (transport upload), not blocked."""
+    assert run("list") == 0
+    assert run("pull") == 0
+    assert plan_by_id(project)["fid_big"]["status"] == "blocked_connector_limit"
+    big = plan_by_id(project)["fid_big"]
+    # by Drive id, even though the working copy's bytes differ from Drive's (an assembled copy)
+    common.append_jsonl(project / "state" / "upload_ledger.jsonl",
+                        {"rel_path": big["rel_path"], "drive_id": "fid_big", "transport": "upload-assembled",
+                         "bytes": 1, "size_match": False})
+    assert run("pull") == 0
+    assert plan_by_id(project)["fid_big"]["status"] == "fetched"
+    # by rel_path alone (a parent id recorded as free text, as for the uploaded parts)
+    (project / "state" / "upload_ledger.jsonl").unlink()
+    common.append_jsonl(project / "state" / "upload_ledger.jsonl",
+                        {"rel_path": big["rel_path"], "drive_id": "fid_big (parent file, 9 B)", "transport": "upload"})
+    assert run("pull") == 0
+    assert plan_by_id(project)["fid_big"]["status"] == "fetched"
+    assert plan_by_id(project)["fid_zip"]["status"] == "skipped_zip"  # zips stay skipped
+    assert plan_by_id(project)["fid_tpl"]["status"] == "pending"  # the upload ledger does not touch other rows
+    before = (project / "state" / "pull_plan.csv").read_text()
+    assert run("pull") == 0 and (project / "state" / "pull_plan.csv").read_text() == before
+    assert json.loads((project / "state" / "source_lock.json").read_text())["locked"] is True

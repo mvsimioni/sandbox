@@ -134,15 +134,16 @@ def test_paths_mode_rejects_non_census_extension_without_writing(tmp_path: Path)
 # --------------------------------------------------------------------------- #
 # Duplicates, changed files, resumability
 # --------------------------------------------------------------------------- #
-def test_duplicate_drive_ids_and_identical_hashes_are_censused_once(tmp_path: Path, adv_fixtures: Dict[str, Path]) -> None:
+def test_duplicate_drive_ids_and_identical_hashes_are_measured_once(tmp_path: Path, adv_fixtures: Dict[str, Path]) -> None:
     first = _ledger_entry(tmp_path, "Basis/one.pdf", adv_fixtures["text_a"], "dup")
     second = dict(first)  # the very same ledger line appended twice (a re-run of the pull)
     third = _ledger_entry(tmp_path, "Template/copy of one.pdf", adv_fixtures["text_a"], "dup")  # same id, other path
     _write_ledger(tmp_path, [first, second, third])
     assert _run(tmp_path) == 0
     files = _files(tmp_path)
-    assert len(files) == 1 and files[0]["rel_path"] == "Basis/one.pdf"
-    assert len(_pages(tmp_path)) == 2
+    assert [f["rel_path"] for f in files] == ["Basis/one.pdf", "Template/copy of one.pdf"]  # the repeated line adds nothing
+    assert files[1]["note"] == "duplicate of Basis/one.pdf" and files[1]["pages"] == files[0]["pages"] == "2"
+    assert len(_pages(tmp_path)) == 2  # measured once
 
 
 def test_changed_file_with_same_rel_path_gets_a_second_census(tmp_path: Path, adv_fixtures: Dict[str, Path]) -> None:

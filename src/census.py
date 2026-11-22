@@ -1187,13 +1187,17 @@ def _root_of(rel_path: str) -> str:
 
 
 def build_summary(file_rows: List[Dict[str, str]], page_rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
-    """Per-root counts of files, errors, pages and pages per class, plus a TOTAL row."""
+    """Per-root counts of files (duplicates included), errors, pages and pages per class, plus a TOTAL row.
+
+    Pages and annotations are counted once per hash; a duplicate file adds to ``files`` only.
+    """
     by_root: Dict[str, Dict[str, int]] = defaultdict(lambda: {k: 0 for k in SUMMARY_COLUMNS[1:]})
     for row in file_rows:
         bucket = by_root[_root_of(row["rel_path"])]
         bucket["files"] += 1
         bucket["errors"] += 1 if row.get("error") else 0
-        bucket["total_annotations"] += int(row.get("total_annotations") or 0)
+        if not is_duplicate_row(row):  # a duplicate's counts are copies; pages and annotations are by hash
+            bucket["total_annotations"] += int(row.get("total_annotations") or 0)
     for row in page_rows:
         bucket = by_root[_root_of(row["rel_path"])]
         bucket["pages"] += 1
