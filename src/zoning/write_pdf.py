@@ -303,3 +303,260 @@ def verify_zoning_pdf(out_pdf: Path, src_pdf: Path, page_index: int, expect_tags
                      and res["zone_layers_named_after_tag"] and res["layers_expected_present"]
                      and ROOMS_LAYER in res["layers_off_by_default"] and res["rotate"] == res["rotate_source"])
     return res
+
+
+# --------------------------------------------------------------------------- #
+# Multi-page writer (all storeys in one PDF)
+# --------------------------------------------------------------------------- #
+INDEX_PAGE_SIZE = (842.0, 1191.0)    # A3 portrait, pt
+
+
+def _zone_contents_multi(z: zn.Zone, st: dict, key: str, label: str) -> str:
+    """/Contents of a zone annotation on a storey page: departments, storey served, plant level, area, room count, sources."""
+    lines = [
+        "AHU zone %s" % z.tag if z.kind == "AHU" else "%s zone (rooms classed %s, no AHU named)" % (z.kind, z.tag),
+        "Departments: %s" % z.departments,
+        "Storey served: %s (%s)" % (key, label),
+        "Plant level: %s" % (z.plant_level or "not stated"),
+        "Area: %.1f m2 (sum of %d assigned rooms); zone polygons drawn %.1f m2 (page-view measure)" % (st["area_m2"], st["n_rooms"], st["poly_m2"]),
+        "Room count: %d" % st["n_rooms"],
+        "Lowest room confidence: %.2f" % st.get("min_conf", 0.0),
+        "Sources: %s" % " | ".join(z.refs),
+    ]
+    return "\n".join(lines)
+
+
+def _add_poly_annot(page, doc, poly: Polygon, name: str, subject: str, contents: str, oc: int, fill_hex: str) -> int:
+    pts = list(poly.exterior.coords)[:-1]
+    annot = page.add_polygon_annot(_unrot_pts(pts, page))
+    _style_annot(doc, annot, name, subject, contents, oc, fill_hex, _darker(fill_hex), FILL_OPACITY, FILL_OPACITY)
+    return annot.xref
+
+
+def write_multi_zoning_pdf(src_pdf: Path, specs: Sequence[dict], out_pdf: Path, title: str,
+                           legend_cols: int = 3, col_w: float = 640.0) -> dict:
+    """Write one PDF: an index page, then one page per storey, each a copy of its source page (content stream untouched).
+
+    ``specs``: per storey ``key``, ``label``, ``drawing``, ``page_index`` (0-based page of ``src_pdf``), ``zones`` (``zones.Zone``; ``draw_polygons_pv`` are
+    drawn, ``tag`` is the annotation subject, ``key`` names the layer's AHU), ``zone_stats`` (key -> area_m2, poly_m2, n_rooms), ``rooms`` (dicts with
+    ``room_id``, ``polygon``, ``contents``), ``legend_title``, ``sheet_note``.  Optional-content groups are document-wide: one per AHU (named after its
+    tag, the same on every page), ``Legend`` and ``Rooms (measured)`` (off by default).  An AHU has one colour on every page (``Zone.fill_hex``).
+    """
+    import pymupdf
+
+    src = pymupdf.open(str(src_pdf))
+    doc = pymupdf.open()
+    page_map = []        # (output page index, source page index, key)
+    for sp in specs:
+        doc.insert_pdf(src, from_page=sp["page_index"], to_page=sp["page_index"])
+    # insert_pdf copies page content; check by the verifier (stream and pixels) rather than assume
+    ocgs: Dict[str, int] = {}
+    layers: List[dict] = []
+
+    def ocg_for(name: str, on: bool = True) -> int:
+        if name not in ocgs:
+            ocgs[name] = doc.add_ocg(name, on=on)
+            layers.append({"name": name, "on": on, "xref": ocgs[name]})
+        return ocgs[name]
+
+    legend_oc = ocg_for(LEGEND_LAYER)
+    rooms_oc = ocg_for(ROOMS_LAYER, on=False)
+    expected_tags: Dict[int, List[str]] = {}
+    manifest_pages = []
+    index_rows: List[Tuple[str, str, str, int, float]] = []
+    colours: Dict[str, str] = {}
+    for n, sp in enumerate(specs):
+        page = doc[n]
+        page_map.append((n + 1, sp["page_index"], sp["key"]))          # +1: the index page is inserted first below
+        zones: Sequence[zn.Zone] = sp["zones"]
+        stats = sp["zone_stats"]
+        pm = {"key": sp["key"], "zones": 0, "rooms": 0, "legend_box_pv": None}
+        for z in zones:
+            if colours.setdefault(z.tag, z.fill_hex) != z.fill_hex:
+                raise ValueError("AHU %s has two colours across pages" % z.tag)
+            st = stats.get(z.key, {"area_m2": 0.0, "poly_m2": 0.0, "n_rooms": 0})
+            oc = ocg_for(z.tag)
+            for k, poly in enumerate(z.drawn()):
+                _add_poly_annot(page, doc, poly, "zone-%s-%s-%d" % (sp["key"], z.key, k), z.tag, _zone_contents_multi(z, st, sp["key"], sp["label"]), oc, z.fill_hex)
+                pm["zones"] += 1
+            index_rows.append((sp["key"], z.tag, z.kind, st["n_rooms"], st["area_m2"]))
+        expected_tags[n + 1] = [z.tag for z in zones]
+        # legend
+        entries = list(zones)
+        rows = math.ceil(len(entries) / legend_cols) if entries else 0
+        ncol = min(legend_cols, max(1, len(entries)))
+        row_h, pad = 24.0, 14.0
+        box_w, box_h = ncol * col_w + 2 * pad, rows * row_h + 2 * pad + 36 + 30
+        W, H = page.rect.width, page.rect.height
+        found = find_blank_box(page, (box_w, box_h), (700.0, 110.0, max(W - 300, 1500.0), min(H * 0.5, 900.0)))
+        if found is None:        # page too small for the search window: top-left corner, clipped to the page
+            found = ((20.0, 20.0, min(20.0 + box_w, W - 20.0), min(20.0 + box_h, H - 20.0)), float("nan"))
+        (bx0, by0, bx1, by1), ink = found
+        pm["legend_box_pv"] = [bx0, by0, bx1, by1]
+        pm["legend_box_ink_fraction"] = ink
+        back = page.add_rect_annot(_unrot_rect((bx0, by0, bx1, by1), page))
+        _style_annot(doc, back, "legend-back-%s" % sp["key"], "Legend", "%s\n%s" % (sp["legend_title"], sp["sheet_note"]), legend_oc, "#FFFFFF", (0.3, 0.3, 0.3), 1.0, 1.0)
+        tt = page.add_freetext_annot(_unrot_rect((bx0 + pad, by0 + pad / 2, bx1 - pad, by0 + pad / 2 + 26), page), sp["legend_title"][:150],
+                                     fontsize=14, fontname="hebo", text_color=(0, 0, 0), rotate=90)
+        _style_annot(doc, tt, "legend-title-%s" % sp["key"], "Legend title", sp["legend_title"], legend_oc, None, (0, 0, 0), 1.0, None)
+        un = sp.get("unclassified", {})
+        note = "%d of %d rooms not classified (no information, %.0f m2): not filled. Sheet %s." % (un.get("unclassified_rooms", 0), un.get("n_rooms", 0), un.get("unclassified_area_m2", 0.0), sp["drawing"])
+        nt = page.add_freetext_annot(_unrot_rect((bx0 + pad, by0 + pad / 2 + 28, bx1 - pad, by0 + pad / 2 + 52), page), note, fontsize=11, fontname="helv",
+                                     text_color=(0, 0, 0), rotate=90)
+        _style_annot(doc, nt, "legend-note-%s" % sp["key"], "Legend note", note, legend_oc, None, (0, 0, 0), 1.0, None)
+        for i, z in enumerate(entries):
+            col, row = divmod(i, rows)
+            x = bx0 + pad + col * col_w
+            y = by0 + 66 + pad + row * row_h
+            st = stats.get(z.key, {"area_m2": 0.0, "poly_m2": 0.0, "n_rooms": 0})
+            sw = page.add_polygon_annot(_unrot_pts([(x, y + 2), (x + 30, y + 2), (x + 30, y + row_h - 4), (x, y + row_h - 4)], page))
+            _style_annot(doc, sw, "legend-swatch-%s-%d" % (sp["key"], i), z.tag, "Legend swatch for %s" % z.tag, legend_oc, z.fill_hex, _darker(z.fill_hex), FILL_OPACITY, FILL_OPACITY)
+            label = "%s | %s | %.0f m2 (%d rooms)" % (z.tag, z.departments if len(z.departments) < 34 else z.departments[:31] + "...", st["area_m2"], st["n_rooms"])
+            ft = page.add_freetext_annot(_unrot_rect((x + 36, y, x + col_w - 6, y + row_h), page), label, fontsize=10.5, fontname="helv", text_color=(0, 0, 0), rotate=90)
+            _style_annot(doc, ft, "legend-text-%s-%d" % (sp["key"], i), z.tag, label, legend_oc, None, (0, 0, 0), 1.0, None)
+        # room outlines
+        for r in sp["rooms"]:
+            poly: Polygon = r["polygon"]
+            if poly.is_empty:
+                continue
+            pts = list(poly.exterior.coords)[:-1]
+            if len(pts) < 3:
+                continue
+            a = page.add_polygon_annot(_unrot_pts(pts, page))
+            a.set_colors(stroke=(0.0, 0.25, 0.7), fill=None)
+            a.set_opacity(1.0)
+            a.set_info(title=AUTHOR, subject="Room outline (measured)", content=r["contents"])
+            a.set_flags(4)
+            a.set_border(width=0.5)
+            a.update()
+            a.set_oc(rooms_oc)
+            doc.xref_set_key(a.xref, "CA", "1.00")
+            doc.xref_set_key(a.xref, "NM", "(%s)" % ("room-" + r["room_id"]))
+            pm["rooms"] += 1
+        manifest_pages.append(pm)
+    # ---- index pages (first): AHUs by storey ------------------------------------------------------------
+    def index_lines(first_pdf_page: Dict[str, int]):
+        L = [(title, 16, "hebo", 0, 20), ("Index of zones by storey. Every zone is a filled Polygon annotation (opacity 0.35) on a layer named after its AHU or class.", 8, "helv", 0, 14),
+             ("Storey pages are the source sheets unchanged. Room outlines: layer 'Rooms (measured)', off by default.", 8, "helv", 0, 22)]
+        for sp in specs:
+            rows = [r for r in index_rows if r[0] == sp["key"]]
+            un = sp.get("unclassified", {})
+            L.append(("%s  %s  (%s)  PDF page %d" % (sp["key"], sp["label"], sp["drawing"], first_pdf_page[sp["key"]]), 10, "hebo", 0, 13))
+            if not rows:
+                L.append(("no zones (no room classified)", 8, "helv", 16, 12))
+            for _, tag, kind, nr, area in rows:
+                L.append(("%-46s %-6s rooms %4d   %9.1f m2" % (tag, kind, nr, area), 8, "cour", 16, 12))
+            L.append(("no information (not filled): %d rooms, %.1f m2" % (un.get("unclassified_rooms", 0), un.get("unclassified_area_m2", 0.0)), 8, "helv", 16, 20))
+        return L
+
+    def paginate(L):
+        pages, cur, y = [], [], 50.0
+        for ln in L:
+            if y + ln[4] > INDEX_PAGE_SIZE[1] - 40:
+                pages.append(cur); cur, y = [], 50.0
+            cur.append((y, ln)); y += ln[4]
+        pages.append(cur)
+        return pages
+
+    n_index = len(paginate(index_lines({sp["key"]: 1 for sp in specs})))
+    pages_idx = paginate(index_lines({sp["key"]: n_index + i + 1 for i, sp in enumerate(specs)}))
+    for k, content in enumerate(pages_idx):
+        ip = doc.new_page(pno=k, width=INDEX_PAGE_SIZE[0], height=INDEX_PAGE_SIZE[1])
+        for y, (text, size, font, indent, _) in content:
+            ip.insert_text((40 + indent, y), text, fontsize=size, fontname=font)
+    page_map = [(o + (n_index - 1), s, k) for (o, s, k) in page_map]
+    out_pdf = Path(out_pdf)
+    out_pdf.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(str(out_pdf), garbage=0, deflate=True)
+    doc.close()
+    return {"pages": manifest_pages, "layers": layers, "page_map": page_map, "colours": colours,
+            "expected_layers": [l["name"] for l in layers],
+            "expected_tags": {str(o + (n_index - 1)): v for o, v in expected_tags.items()}, "n_index_pages": n_index}
+
+
+def verify_multi_zoning_pdf(out_pdf: Path, src_pdf: Path, page_map: Sequence[Tuple[int, int, str]], expect_layers: Sequence[str],
+                            expect_tags: Dict[str, Sequence[str]]) -> dict:
+    """The single-page contract of :func:`verify_zoning_pdf` for every storey page.
+
+    Per page: content stream equal to the source page's; render with annotations hidden pixel-identical; rotation kept; every zone a Polygon annotation with
+    /Subj, fill (/IC), opacity 0.35 in /CA and /FillOpacity and an /OC naming the layer of its subject; legend annotations on the Legend layer with a swatch
+    and text for every zone tag; room outlines on the off-by-default ``Rooms (measured)`` layer.  Across pages: one fill colour per AHU tag.
+    """
+    import pymupdf
+
+    src = pymupdf.open(str(src_pdf))
+    out = pymupdf.open(str(out_pdf))
+    res: dict = {"n_pages": len(out), "pages": [], "problems": []}
+    ocg_names = {xref: v["name"] for xref, v in out.get_ocgs().items()}
+    res["layers"] = sorted(ocg_names.values())
+    off = set((out.get_layer() or {}).get("off", []) or [])
+    res["layers_off_by_default"] = sorted(ocg_names[x] for x in off if x in ocg_names)
+    colours: Dict[str, set] = {}
+
+    def num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    all_ok = True
+    for (oi, si, key) in page_map:
+        sp, op = src[si], out[oi]
+        pr: dict = {"storey": key, "out_page": oi + 1, "source_page": si + 1}
+        pr["content_stream_identical"] = sp.read_contents() == op.read_contents()
+        pr["rotation_kept"] = sp.rotation == op.rotation
+        a = sp.get_pixmap(matrix=pymupdf.Matrix(1, 1), annots=False)
+        b = op.get_pixmap(matrix=pymupdf.Matrix(1, 1), annots=False)
+        pr["pixels_identical_annots_hidden"] = (a.width == b.width and a.height == b.height and a.samples == b.samples)
+        zones, legends, rooms, problems = [], [], [], []
+        for an in op.annots():
+            xref = an.xref
+            nm = out.xref_get_key(xref, "NM")[1]
+            oc_ref = out.xref_get_key(xref, "OC")[1]
+            oc = int(oc_ref.split()[0]) if oc_ref and oc_ref != "null" else 0
+            ic = out.xref_get_key(xref, "IC")[1]
+            rec = {"xref": xref, "type": an.type[1], "name": nm, "subject": an.info.get("subject", ""), "oc": ocg_names.get(oc, ""), "fill": ic,
+                   "ca": out.xref_get_key(xref, "CA")[1], "fill_opacity": out.xref_get_key(xref, "FillOpacity")[1]}
+            if nm.startswith("zone-"):
+                zones.append(rec)
+                colours.setdefault(rec["subject"], set()).add(ic)
+            elif nm.startswith("legend-"):
+                legends.append(rec)
+            elif nm.startswith("room-"):
+                rooms.append(rec)
+            else:
+                problems.append("p%d unexpected annotation %s (%s)" % (oi + 1, xref, nm))
+        for r in zones:
+            if r["type"] != "Polygon" or not r["subject"] or r["fill"] in ("", "null") or num(r["ca"]) != FILL_OPACITY or num(r["fill_opacity"]) != FILL_OPACITY or not r["oc"] or r["oc"] != r["subject"]:
+                problems.append("p%d zone annotation incomplete: %s" % (oi + 1, r))
+        for r in legends:
+            if not r["subject"] or r["oc"] != LEGEND_LAYER:
+                problems.append("p%d legend annotation incomplete or off the Legend layer: %s" % (oi + 1, r))
+            if r["name"].startswith("legend-swatch") and (r["fill"] in ("", "null") or num(r["fill_opacity"]) != FILL_OPACITY or num(r["ca"]) != FILL_OPACITY):
+                problems.append("p%d legend swatch incomplete: %s" % (oi + 1, r))
+            elif num(r["ca"]) is None:
+                problems.append("p%d legend object without /CA: %s" % (oi + 1, r))
+            elif r["name"].startswith("legend-back") and num(r["fill_opacity"]) is None:
+                problems.append("p%d legend backing without /FillOpacity: %s" % (oi + 1, r))
+        for r in rooms:
+            if not r["subject"] or r["oc"] != ROOMS_LAYER or num(r["ca"]) is None:
+                problems.append("p%d room annotation incomplete: %s" % (oi + 1, r))
+        zt = {r["subject"] for r in zones}
+        lt = {r["subject"] for r in legends if r["name"].startswith("legend-text")}
+        ls = {r["subject"] for r in legends if r["name"].startswith("legend-swatch")}
+        pr["n_zone_annotations"], pr["n_legend_annotations"], pr["n_room_annotations"] = len(zones), len(legends), len(rooms)
+        pr["zone_tags_missing_in_legend"] = sorted(zt - lt)
+        pr["legend_tags_without_zone"] = sorted((lt | ls) - zt)
+        pr["expected_tags_missing_in_zones"] = sorted(set(expect_tags.get(str(oi), [])) - zt)
+        pr["problems"] = problems
+        pr["ok"] = bool(pr["content_stream_identical"] and pr["pixels_identical_annots_hidden"] and pr["rotation_kept"] and not problems and not pr["zone_tags_missing_in_legend"]
+                        and not pr["legend_tags_without_zone"] and not pr["expected_tags_missing_in_zones"])
+        all_ok &= pr["ok"]
+        res["pages"].append(pr)
+    res["colour_conflicts"] = {t: sorted(v) for t, v in colours.items() if len(v) > 1}
+    res["layers_expected_present"] = all(l in res["layers"] for l in expect_layers)
+    res["rooms_layer_off"] = ROOMS_LAYER in res["layers_off_by_default"]
+    res["legend_layer_on"] = LEGEND_LAYER not in res["layers_off_by_default"]
+    res["problems"] = [p for pr in res["pages"] for p in pr["problems"]]
+    res["ok"] = bool(all_ok and not res["colour_conflicts"] and res["layers_expected_present"] and res["rooms_layer_off"] and res["legend_layer_on"])
+    return res

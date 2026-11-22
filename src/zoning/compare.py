@@ -54,7 +54,7 @@ def load_appd_polygons(appd_page, calib_appd: cal.Calibration, calib_bg: cal.Cal
         if a.type[1] != "Polygon":
             continue
         cap = parse_caption(a.info.get("content", ""))
-        if cap is None or not a.vertices:
+        if cap is None or cap <= 0 or not a.vertices:      # a 0 sq m caption (an unfinished measurement) is no area to compare with
             continue
         pts = np.array([tuple(pymupdf.Point(p) * rot) for p in a.vertices], float)
         P_appd = Polygon(pts).buffer(0)
