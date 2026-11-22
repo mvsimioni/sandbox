@@ -615,3 +615,33 @@ def test_open_leaf_drawn_decides_the_closed_end_of_a_single_door():
     cl, diag = rv.door_closers(arcs, lines, leaf)
     assert len(arcs) == 1 and diag[0]["tip_rule"] == "open leaf drawn" and diag[0]["closed"]
     assert np.allclose(cl[0], [120.0, 30.0, 120.0, 50.0], atol=0.2)
+
+
+def test_tag_box_touching_two_neighbouring_polygons_classifies_both():
+    """The equipment register gives a tag to one polygon (two adjacent toilets share TEAF-COM-01); the second polygon's space row lists it at 0.0 pt."""
+    P = lambda i: cmp.AppdPolygon(i, i, 4.0, box(0, 0, 1, 1), box(0, 0, 1, 1), 4.0, 0.0)
+    spaces = [{"annotation_index": str(i), "equipment_tags_within_60pt": "TEAF-B-04-04COM-01 [ann 43, 0.0 pt]; AHU-B-04-04CORE-01 [ann 48, 13.5 pt]", "mode_label": "MV", "space_names_text_layer": "Toilet"}
+              for i in (15, 16)]
+    eq = [{"space_annotation_index": "16", "tag_normalised": "TEAF-B-04-04COM-01", "space_relation": "nearest", "space_box_distance_pt": "0.0"}]
+    out = zn.classify_appd_spaces([P(15), P(16)], spaces, eq)
+    assert [o["tag"] for o in out] == ["TEAF-B-04-04COM-01"] * 2 and all(o["kind"] == "MV" for o in out)
+    assert out[0]["confidence"] == 0.9 and out[1]["confidence"] == 0.9
+
+
+def test_app_d_zones_do_not_stack_on_each_other_either():
+    a = _zone("APPD-A", [box(0, 0, 100, 100)], source="Appendix D")
+    b = _zone("APPD-B", [box(50, 0, 150, 100)], source="Appendix D")
+    zn.clip_to_precedence([a, b], K2)
+    assert sum(p.area for p in a.drawn()) == pytest.approx(10000) and sum(p.area for p in b.drawn()) == pytest.approx(5000)
+    assert b.overlap_removed_m2 == pytest.approx(5000 * K2)
+    # the RFI sample zones keep their own overlaps (the sample's geometry is not edited)
+    r1 = _zone("R1", [box(0, 0, 100, 100)]); r2 = _zone("R2", [box(50, 0, 150, 100)])
+    zn.clip_to_precedence([r1, r2], K2)
+    assert sum(p.area for p in r2.drawn()) == pytest.approx(10000)
+
+
+def test_polygons_of_one_app_d_zone_that_overlap_are_clipped_too():
+    z = _zone("APPD-A", [box(0, 0, 100, 100), box(60, 0, 160, 100)], source="Appendix D")
+    zn.clip_to_precedence([z], K2)
+    assert sum(p.area for p in z.drawn()) == pytest.approx(16000)
+    assert z.overlap_removed_m2 == pytest.approx(4000 * K2)

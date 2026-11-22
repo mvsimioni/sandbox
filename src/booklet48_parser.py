@@ -52,7 +52,7 @@ PAGE_CLASSES = ("sensor schedule", "criteria", "zoning keyplan", "standby summar
                 "pressure regime", "room data table", "other")
 
 CRITERIA_FIELDS = [
-    "department", "source_file", "booklet_page", "pdf_page", "table_part", "zone",
+    "department", "dept_no", "department_label", "source_file", "booklet_page", "pdf_page", "table_part", "zone",
     "room_type_as_printed", "room_type_norm",
     "pressure_regime_as_printed", "pressure_pa", "pressure_pa_min", "pressure_pa_max", "pressure_direction",
     "min_oa_ach", "min_total_ach", "single_pass", "air_class", "filter",
@@ -62,21 +62,21 @@ CRITERIA_FIELDS = [
     "reviewer_markup", "reviewer_comments",
 ]
 NOTES_FIELDS = ["file", "page", "note_number", "text", "booklet_page", "pdf_page", "bbox",
-                "department", "note_kind", "author", "date"]
+                "department", "dept_no", "department_label", "note_kind", "author", "date"]
 # note_kind: table note (numbered NOTE block under a criteria table) | room data table note |
 #            pressure regime note | pandemic mode note (un-numbered NOTE block of a pressure regime page) |
 #            reviewer annotation (a PDF comment on a criteria, room data or pressure regime page) |
 #            reviewer markup (a PDF Line / Square / Polygon annotation with no text, e.g. a strike-through)
-STANDBY_FIELDS = ["department", "source_file", "booklet_page", "pdf_page", "level_wing_heading",
+STANDBY_FIELDS = ["department", "dept_no", "department_label", "source_file", "booklet_page", "pdf_page", "level_wing_heading",
                   "tag_as_written", "tag_normalised", "area", "configuration", "note_refs", "bbox", "confidence"]
 STANDBY_NOTES_FIELDS = NOTES_FIELDS      # note_kind there: table note | reviewer annotation
-ROOM_DATA_FIELDS = ["department", "source_file", "booklet_page", "pdf_page", "row",
+ROOM_DATA_FIELDS = ["department", "dept_no", "department_label", "source_file", "booklet_page", "pdf_page", "row",
                     "d_template_room_code", "d_room_name", "d_unique_room_identifier", "item_description",
                     "qty03_v12", "type_of_tms", "d_template_room_name", "other_columns",
                     "columns_as_printed", "bbox", "confidence"]
-ZONING_FIELDS = ["department", "source_file", "booklet_page", "pdf_page", "keyplan_title",
+ZONING_FIELDS = ["department", "dept_no", "department_label", "source_file", "booklet_page", "pdf_page", "keyplan_title",
                  "label_kind", "text", "block_text", "bbox", "has_colour_legend", "legend_source", "legend_bbox"]
-PRESSURE_FIELDS = ["department", "source_file", "booklet_page", "pdf_page", "page_heading",
+PRESSURE_FIELDS = ["department", "dept_no", "department_label", "source_file", "booklet_page", "pdf_page", "page_heading",
                    "label_kind", "text", "bbox", "annotation_author", "annotation_date"]
 # label_kind values: text_label | pressure_value (drawing text) | reviewer_annotation (a PDF comment, not drawing text) |
 #                    reviewer_markup (a PDF Line / Square / Polygon annotation with no text)
@@ -1693,6 +1693,40 @@ def department_from_name(path: Path) -> str:
     return re.sub(r"[_\s]+", " ", base).strip()
 
 
+# --------------------------------------------------------------------------- #
+# Department mapping (src/booklet_departments.json)
+# --------------------------------------------------------------------------- #
+DEPARTMENTS_PATH = Path(__file__).with_name("booklet_departments.json")
+
+
+def load_departments(path: Optional[Path] = None) -> Dict[str, Dict[str, Any]]:
+    """File name -> ``{booklet, dept_no, dept_title, department_label}`` (or ``{booklet: False, reason}`` for a file that is
+    not a booklet).  An unreadable or missing mapping gives an empty dict, so a file with no entry is read by its name."""
+    try:
+        data = json.loads((path or DEPARTMENTS_PATH).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    files = data.get("files") if isinstance(data, dict) else None
+    return {k: v for k, v in files.items() if isinstance(v, dict)} if isinstance(files, dict) else {}
+
+
+def department_info(path: Path, mapping: Optional[Dict[str, Dict[str, Any]]] = None) -> Tuple[str, str]:
+    """``(dept_no, department_label)`` of a file from the mapping; both blank when the file has no entry
+    (a synthetic or unlisted file), so a row is never given a department number by guesswork."""
+    entry = (load_departments() if mapping is None else mapping).get(Path(path).name)
+    if not entry or entry.get("booklet") is False:
+        return "", ""
+    return str(entry.get("dept_no", "")), str(entry.get("department_label", ""))
+
+
+def stamp_department(result: Dict[str, Any], dept_no: str, label: str) -> None:
+    """Write ``dept_no`` and ``department_label`` into every register row of a parsed file."""
+    result["dept_no"], result["department_label"] = dept_no, label
+    for key in ("criteria", "notes", "standby_notes", "standby", "zoning", "pressure", "room_data"):
+        for row in result[key]:
+            row["dept_no"], row["department_label"] = dept_no, label
+
+
 def display_path(path: Path, root: Path) -> str:
     try:
         return str(path.resolve().relative_to(root))
@@ -1927,6 +1961,7 @@ def parse_pdf(path: Path, root: Path) -> Dict[str, Any]:
                     e["detail"] = (e["detail"] + "; " if e["detail"] else "") + "section %s" % e["section"]
     finally:
         doc.close()
+    stamp_department(result, *department_info(path))
     return result
 
 
@@ -1976,6 +2011,9 @@ BOOKLET_NAME_RE = re.compile(r"Booklet|Mechanical[_ ]Ventilation|Section[_ ]\d",
 def is_booklet_name(path: Path) -> bool:
     """The folder also holds other documents ('5. Equipment Schedules (Corr 5).pdf', a register .xlsx); a default run reads
     only the files named as booklets or as a mechanical ventilation strategy.  A file named with ``--paths`` is always read."""
+    entry = load_departments().get(Path(path).name)
+    if entry is not None:                      # src/booklet_departments.json decides for every file of the booklet folder
+        return entry.get("booklet") is not False
     return bool(BOOKLET_NAME_RE.search(path.stem))
 
 
@@ -1996,7 +2034,8 @@ def collect_inputs(paths: Optional[Sequence[str]], root: Path) -> List[Path]:
         if not p.is_absolute():
             p = (Path.cwd() / p) if (Path.cwd() / p).exists() else (root / p)
         if p.is_dir():
-            found.extend(sorted(p.glob("*.pdf")))
+            listed = load_departments()
+            found.extend(q for q in sorted(p.glob("*.pdf")) if listed.get(q.name, {}).get("booklet") is not False)   # a file the mapping marks as not a booklet is skipped
         elif p.is_file():
             found.append(p)
         else:

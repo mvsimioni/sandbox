@@ -153,8 +153,8 @@ def classify_appd_spaces(appd_polys: Sequence, space_rows: Sequence[dict], equip
     """Classify each App D polygon as an AHU, FCU or MV zone from the equipment tags *in* it.
 
     A tag belongs to a polygon only when ``appd_equipment.csv`` places it there (``space_relation`` ``inside``, or ``nearest`` with the
-    FreeText box touching the polygon, ``space_box_distance_pt`` 0); a tag that lies outside the polygon, however close, does not
-    classify it.  Without the equipment register the tags of ``appd_spaces.csv`` at 0.0 pt (box touching the polygon) are used.
+    FreeText box touching the polygon, ``space_box_distance_pt`` 0), or when ``appd_spaces.csv`` lists it at 0.0 pt (its box touches the
+    polygon); a tag that lies outside the polygon, however close, does not classify it.
     An AHU tag outranks an FCU tag, which outranks fans (EAF, OAF, TEAF).  Fans only give an MV zone.  A polygon with no tag in it
     whose mode label is ``MV`` is an MV zone without a tag (confidence 0.5); any other polygon without a tag is not classified
     (``no information``), e.g. an ``AC (24HR)`` space with no equipment tag in it.  Confidence 1.0 for a tag inside the polygon,
@@ -168,18 +168,22 @@ def classify_appd_spaces(appd_polys: Sequence, space_rows: Sequence[dict], equip
     rank = {"AHU": 0, "PAHU": 0, "FCU": 1}
     for ap in appd_polys:
         row = by_idx.get(ap.annotation_index)
-        cands: List[Tuple[float, str]] = []     # (confidence rank: 0 inside, 1 box touches), tag
-        if equipment_rows:
-            for e in eq_by_space.get(ap.annotation_index, []):
-                rel = e.get("space_relation", "")
-                if rel == "inside":
-                    cands.append((0.0, e["tag_normalised"]))
-                elif rel == "nearest" and float(e.get("space_box_distance_pt") or 1e9) == 0.0:
-                    cands.append((1.0, e["tag_normalised"]))
-        elif row:
+        cands: List[Tuple[float, str]] = []     # (0 inside, 1 box touches), tag
+        for e in eq_by_space.get(ap.annotation_index, []):
+            rel = e.get("space_relation", "")
+            if rel == "inside":
+                cands.append((0.0, e["tag_normalised"]))
+            elif rel == "nearest" and float(e.get("space_box_distance_pt") or 1e9) == 0.0:
+                cands.append((1.0, e["tag_normalised"]))
+        if row:
+            # the space row lists every tag within 60 pt with the distance of its FreeText box to the polygon: 0.0 pt means the box touches it
+            # (the equipment register gives a tag to one polygon only, but a tag box can touch two neighbouring polygons)
+            have = {t for _, t in cands}
             for m in _INSIDE_RE.finditer(row.get("equipment_tags_within_60pt", "")):
-                if float(m.group(3)) == 0.0:
-                    cands.append((0.0, m.group(1)))
+                if float(m.group(3)) == 0.0 and m.group(1) not in have:
+                    # without the equipment register the 0.0 pt entry is all there is (1.0); beside the register it is a tag the
+                    # register gave to a neighbouring polygon (0.9)
+                    cands.append((0.0 if not equipment_rows else 1.0, m.group(1)))
         cands.sort(key=lambda c: (rank.get(c[1].split("-")[0], 2), c[0], c[1]))
         mode = row.get("mode_label", "") if row else ""
         names = row.get("space_names_text_layer", "") if row else ""
@@ -294,20 +298,25 @@ def assign_rooms(rooms: Sequence[dict], zones: Sequence[Zone], majority: float =
 
 def clip_to_precedence(zones: Sequence[Zone], k2_m2_per_pt2: float) -> Dict[str, dict]:
     """Set ``draw_polygons_pv`` so no two fills stack: a zone of an earlier document is drawn whole, a zone of a later-ranked
-    source loses the part another zone already covers.  RFI-ME-0233 sample zones (5 Nov 2026) outrank Appendix D (1 Aug 2025).
+    source loses the part another zone already covers.  RFI-ME-0233 sample zones (5 Nov 2026) outrank Appendix D (1 Aug 2025); App D zones
+    lose what an App D zone before them (in list order) covers.  The RFI sample zones are drawn as the sample has them, including the
+    overlaps among them (the sample's own geometry).
     Returns, per zone key, the area removed (m2).  A polygon is split where clipping leaves a hole (an annotation has one ring)."""
     rfi = [p for z in zones if z.source.startswith("RFI") for p in z.polygons_pv]
     cover = shapely.union_all(rfi) if rfi else None
     removed: Dict[str, dict] = {}
     for z in zones:
-        if z.source.startswith("RFI") or cover is None:
-            z.draw_polygons_pv = [q for p in z.polygons_pv for q in simple_parts(p)]
+        if z.source.startswith("RFI"):
+            z.draw_polygons_pv = [q for p in z.polygons_pv for q in simple_parts(p)]      # the sample's own geometry, unchanged
             continue
+        if cover is None:
+            cover = Polygon()
         draw: List[Polygon] = []
         gone = 0.0
         for p in z.polygons_pv:
             rest = p.difference(cover)
             gone += p.area - rest.area
+            cover = shapely.union_all([cover, p])        # polygons of one zone that overlap each other are clipped too
             geoms = list(rest.geoms) if rest.geom_type in ("MultiPolygon", "GeometryCollection") else [rest]
             for g in geoms:
                 if g.geom_type == "Polygon" and g.area > 1e-6:

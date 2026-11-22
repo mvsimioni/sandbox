@@ -2,9 +2,11 @@
 
 Pipeline: wall strokes (chosen by :mod:`linework`) -> door openings closed at the door-swing arcs ->
 small leaks snapped shut -> noding (``shapely.union_all``) -> ``shapely.polygonize`` -> each region
-takes the room tags that lie inside it (``room_tags_plans.csv``).  The region is the wall-face polygon
-(the first drawn line met from inside the room); the centre-line polygon is derived by offsetting the
-face by half the measured wall thickness, so both boundary conventions can be tested against the App D captions.
+takes the room tags that lie inside it (``room_tags_plans.csv``).  The region is the wall-face polygon: the first heavy wall
+stroke met from inside the room (the line centre of the stroke), or the inner edge of a black filled wall band where a partition
+is drawn as a dark band between two fine outlines; the swing sectors of closed doors belong to the room they open into.  The
+centre-line polygon is derived by offsetting the face by half the measured wall thickness, so both boundary conventions can be
+tested against the App D captions.
 """
 
 from __future__ import annotations

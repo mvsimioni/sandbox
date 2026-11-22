@@ -1,0 +1,132 @@
+{
+  "_about": "Department mapping for every file in data/source/Short Version DD Booklet/. dept_title is the Drive folder name (state/drive_listing/dept_v2/_folders.json). department_label is the clean name written to the registers (column department_label). booklet=false marks files the booklet parser skips.",
+  "files": {
+    "IP_FAST_Section_4.8_Mechanical_Ventilation_Strategy.pdf": {
+      "booklet": true,
+      "dept_no": "01",
+      "dept_title": "01 - IP FAST",
+      "department_label": "IP FAST"
+    },
+    "IP_SURGICAL_Section_4.8_Mechanical_Ventilation_Strategy.pdf": {
+      "booklet": true,
+      "dept_no": "02",
+      "dept_title": "02 - IP SURGICAL",
+      "department_label": "IP Surgical"
+    },
+    "Dialysis_Section_4.8_Mechanical_Ventilation_Strategy.pdf": {
+      "booklet": true,
+      "dept_no": "03",
+      "dept_title": "03 - IP DIALYSIS",
+      "department_label": "IP Dialysis"
+    },
+    "ICU_HDU_Section_4.8_Mechanical_Ventilation_Strategy.pdf": {
+      "booklet": true,
+      "dept_no": "04",
+      "dept_title": "04 - Intensive Care & Isolation",
+      "department_label": "ICU and HDU"
+    },
+    "ISO_AH_Section_4.8_Mechanical_Ventilation_Strategy.pdf": {
+      "booklet": true,
+      "dept_no": "05",
+      "dept_title": "05 - Isolation Wards",
+      "department_label": "Isolation Wards"
+    },
+    "Healthy_Aging_Geriatrics_Section_4.8_Mechanical_Ventilation_Strategy.pdf": {
+      "booklet": true,
+      "dept_no": "06",
+      "dept_title": "06 - IP OP Healthy Ageing",
+      "department_label": "Healthy Ageing and Geriatrics"
+    },
+    "Palliative_Section_4.8_Mechanical_Ventilation_Strategy.pdf": {
+      "booklet": true,
+      "dept_no": "07",
+      "dept_title": "07 - IP OP Palliative Hospice",
+      "department_label": "Palliative Hospice"
+    },
+    "Psych_Med_Section_4.8_Mechanical_Ventilation_Strategy.pdf": {
+      "booklet": true,
+      "dept_no": "08",
+      "dept_title": "08 - IP OP Psych Med",
+      "department_label": "Psychiatric Medicine"
+    },
+    "Paeds_Section_4.8_Mechanical_Ventilation_Strategy.pdf": {
+      "booklet": true,
+      "dept_no": "09",
+      "dept_title": "09 - IP OP Paediatrics",
+      "department_label": "Paediatrics"
+    },
+    "Rehab_Med_Combined_Mechanical_Ventilation_Strategy.pdf": {
+      "booklet": true,
+      "dept_no": "10",
+      "dept_title": "10 - IP OP Rehab Med",
+      "department_label": "Rehabilitation Medicine"
+    },
+    "Emergency_Section_4.1.8_Mechanical_Ventilation_Strategy.pdf": {
+      "booklet": true,
+      "dept_no": "11",
+      "dept_title": "11 - Emergency Dept",
+      "department_label": "Emergency"
+    },
+    "IGH_DD Booklet_MDU_OCP.pdf": {
+      "booklet": true,
+      "dept_no": "12",
+      "dept_title": "12 - Outpatient - Medical Day Unit",
+      "department_label": "Medical Day Unit"
+    },
+    "IGH_DD Booklet_I-CARE_BATCH 1_R.pdf": {
+      "booklet": true,
+      "dept_no": "13",
+      "dept_title": "13 - Outpatient - I-Care",
+      "department_label": "I-Care"
+    },
+    "IGH_DD Booklet_ORTHO_BATCH 1.pdf": {
+      "booklet": true,
+      "dept_no": "14",
+      "dept_title": "14 - Outpatient - Surgical, Ortho",
+      "department_label": "Surgical Ortho"
+    },
+    "IGH_DD Booklet_Surgical GS_OCP_DPE comments.pdf": {
+      "booklet": true,
+      "dept_no": "15",
+      "dept_title": "15 - Outpatient - Surgical, General Surgery",
+      "department_label": "General Surgery"
+    },
+    "IGH_DD Booklet_Surgical OPCC_BATCH 1.pdf": {
+      "booklet": true,
+      "dept_no": "16",
+      "dept_title": "16 - Outpatient - Surgical, One-Stop",
+      "department_label": "Surgical One-Stop (OPCC)"
+    },
+    "20250819_IGH_DD Booklet_DI_Signed_All_AH.pdf": {
+      "booklet": true,
+      "dept_no": "26",
+      "dept_title": "26 - Diagnostic Imaging",
+      "department_label": "Diagnostic Imaging"
+    },
+    "IGH_DD Booklet_Pharmacy_BATCH 2_New signed.pdf": {
+      "booklet": true,
+      "dept_no": "30",
+      "dept_title": "30 - Pharmacy",
+      "department_label": "Pharmacy"
+    },
+    "20250804_IGH_DD Booklet_Data Centre R2_Markup.pdf": {
+      "booklet": true,
+      "dept_no": "42",
+      "dept_title": "42 - Data Centre",
+      "department_label": "Data Centre",
+      "note": "raster file: no text layer; criteria come from out/registers/criteria_raster_datacentre.csv"
+    },
+    "AHU Cross Verification - MOT NSC Register.xlsx": {
+      "booklet": false,
+      "reason": "not a booklet"
+    },
+    "AH Stacking Diagram.pdf": {
+      "booklet": false,
+      "reason": "not a booklet"
+    },
+    "5. Equipment Schedules (Corr 5).pdf": {
+      "booklet": false,
+      "reason": "not a booklet"
+    }
+  }
+}

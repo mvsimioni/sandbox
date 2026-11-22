@@ -249,16 +249,20 @@ def stage_zones(ctx: dict) -> dict:
             s_ = stats[a["zone_key"]]
             s_["area_m2"] += a["area_m2"]
             s_["n_rooms"] += 1
-    # fills that would stack in the drawing (should be none after the precedence clip)
-    drawn = [(z.tag, p) for z in zones for p in z.drawn()]
-    stack_m2 = 0.0
+    # fills that stack in the drawing: among the RFI sample zones (the sample's own geometry, kept as it is) and anywhere else (should be none)
+    drawn = [(z, p) for z in zones for p in z.drawn()]
+    stack_rfi = stack_other = 0.0
     tree = STRtree([p for _, p in drawn])
-    for i, (t, p) in enumerate(drawn):
+    for i, (z, p) in enumerate(drawn):
         for j in tree.query(p, predicate="intersects"):
             if j > i:
-                stack_m2 += p.intersection(drawn[j][1]).area * k2
+                a_ = p.intersection(drawn[j][1]).area * k2
+                if z.source.startswith("RFI") and drawn[j][0].source.startswith("RFI"):
+                    stack_rfi += a_
+                else:
+                    stack_other += a_
     return {"zones": zones, "assigned": assigned, "zone_stats": stats, "appd_classes": classes, "tag_map": tag_map, "zrooms": zrooms,
-            "thresholds": {"majority_share": majority, "confidence_min": conf_min}, "precedence_removed_m2": removed, "stacked_fill_m2": stack_m2}
+            "thresholds": {"majority_share": majority, "confidence_min": conf_min}, "precedence_removed_m2": removed, "stacked_fill_m2": stack_other, "rfi_rfi_overlap_m2": stack_rfi}
 
 
 def stage_pdf(ctx: dict) -> dict:

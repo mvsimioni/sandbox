@@ -1499,3 +1499,42 @@ def test_zone_is_blank_and_pa_is_signed_on_a_standard_table(tmp_path: Path) -> N
     by = {r["room_type_as_printed"]: r for r in res["criteria"]}
     assert by["Isolation Room"]["pressure_pa"] == "-15" and by["Plant Room"]["pressure_pa"] == "10"
     assert by["Iso Anteroom"]["pressure_pa"] == "-15"                         # a split sign is still negative
+
+
+def test_department_mapping_covers_the_booklet_folder_and_skips_non_booklets() -> None:
+    folder = Path(__file__).resolve().parent.parent / "data" / "source" / b.BOOKLET_DIR_NAME
+    mapping = b.load_departments()
+    if folder.is_dir():
+        assert {p.name for p in folder.iterdir() if p.is_file()} == set(mapping)        # every file of the folder has an entry
+    booklets = {n: e for n, e in mapping.items() if e["booklet"]}
+    assert len(booklets) == 19
+    assert sorted(e["dept_no"] for e in booklets.values()) == sorted(
+        "01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 26 30 42".split())          # one department number per booklet
+    assert all(e["dept_title"].startswith(e["dept_no"] + " - ") and e["department_label"] for e in booklets.values())
+    assert b.department_info(Path("IGH_DD Booklet_MDU_OCP.pdf")) == ("12", "Medical Day Unit")
+    assert b.department_info(Path("20250804_IGH_DD Booklet_Data Centre R2_Markup.pdf")) == ("42", "Data Centre")
+    assert b.department_info(Path("synthetic_booklet.pdf")) == ("", "")               # an unlisted file gets no number
+    for name in ("AHU Cross Verification - MOT NSC Register.xlsx", "AH Stacking Diagram.pdf", "5. Equipment Schedules (Corr 5).pdf"):
+        assert mapping[name]["booklet"] is False and not b.is_booklet_name(Path(name))
+        assert b.department_info(Path(name)) == ("", "")
+
+
+def test_registers_carry_dept_no_and_department_label_beside_department(tmp_path: Path) -> None:
+    assert [f for f in b.CRITERIA_FIELDS[:3]] == ["department", "dept_no", "department_label"]
+    for fields in (b.NOTES_FIELDS, b.STANDBY_FIELDS, b.ROOM_DATA_FIELDS, b.ZONING_FIELDS, b.PRESSURE_FIELDS):
+        assert "dept_no" in fields and "department_label" in fields and "department" in fields
+    doc = pymupdf.open()
+    build_criteria_page(doc, pa_rows=True)
+    src = _save(doc, tmp_path)
+    named = src.with_name("IGH_DD Booklet_MDU_OCP.pdf")                                 # a listed name: the mapping applies
+    shutil.copy(src, named)
+    res = _parse(named, tmp_path)
+    assert res["criteria"] and res["department"] == "IGH MDU OCP"
+    assert {(r["dept_no"], r["department_label"]) for r in res["criteria"]} == {("12", "Medical Day Unit")}
+    unlisted = _parse(src, tmp_path)
+    assert {(r["dept_no"], r["department_label"]) for r in unlisted["criteria"]} == {("", "")}
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    shutil.copy(src, folder / "AH Stacking Diagram.pdf")                                 # marked as not a booklet: skipped
+    shutil.copy(src, folder / "Unlisted_Section_4.8_Mechanical_Ventilation_Strategy.pdf")
+    assert [p.name for p in b.collect_inputs([str(folder)], tmp_path)] == ["Unlisted_Section_4.8_Mechanical_Ventilation_Strategy.pdf"]

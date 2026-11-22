@@ -86,7 +86,7 @@ def zone_contents(z: zn.Zone, area_m2: float, polygon_area_m2: float, n_rooms: i
         "Area: %.1f m2 (sum of %d assigned rooms, covering share at least the configured majority); zone polygon drawn %.1f m2" % (area_m2, n_rooms, polygon_area_m2),
         "Room count: %d" % n_rooms,
         "Transfer to this sheet: grid-calibrated, residual %.1f mm" % z.transfer_residual_mm if z.source.startswith("RFI") else "Geometry: App D polygon transferred through the grid calibration, residual %.1f mm" % z.transfer_residual_mm,
-        ("Not drawn here: %.1f m2 of the App D polygon lie inside RFI-ME-0233 zones (the later document governs)" % (z.overlap_removed_m2) if getattr(z, "overlap_removed_m2", 0.0) > 0 else ""),
+        ("Not drawn here: %.1f m2 of the App D polygons lie inside RFI-ME-0233 zones or inside an App D polygon drawn before (the later document governs)" % (z.overlap_removed_m2) if getattr(z, "overlap_removed_m2", 0.0) > 0 else ""),
         "Tag basis: %s%s" % (z.tag_basis, ("; sample wrote %s" % z.sample_tag) if z.sample_tag and z.sample_tag != z.tag else ""),
         "Sources: %s" % " | ".join(z.refs),
     ]

@@ -149,14 +149,18 @@ def corrections_section(ctx: dict, prov: dict) -> List[str]:
         diag = [z for z in Z["zones"] if "DIAGRE" in z.tag]
         train = [z.tag for z in Z["zones"] if "TRAIN" in z.tag]
         w("3. *\"DIAGRE-01A/B has more assigned area than its polygon because of a 954 m2 plant-area region\"*: the cause was the largest multi-tag region, %s (%.0f m2, %d tags in one closed region, covering share 0.562 in the earlier run) assigned at a majority of 0.5; the 954 m2 region is a different room, assigned to EAF-B-04-04AHU-02A/B. "
-          "The tag of the training zone is %s. With the configured majority of %.2f that room is now `%s` (candidate %s at %.2f), so DIAGRE has %s." % (
+          "The two training zones are tagged %s (the notes wrote AHU-B-04-04TRAIN-02). With the configured majority of %.2f that room is now `%s` (candidate %s at %.2f), so DIAGRE has %s." % (
               big["room_id"], big["a_face"].area * (ctx["cal"]["cal_bg"].area_scale_mm2_per_pt2() / 1e6), len(big["tags_inside"]), ", ".join(train),
               Z["thresholds"]["majority_share"], a_big["class_label"], a_big["candidate"] or "none", a_big["candidate_share"],
               "; ".join("%s rooms %.0f m2 against polygon %.0f m2" % (z.tag, zs[z.key]["area_m2"], zs[z.key]["full_poly_m2"]) for z in diag)))
         mv = [z for z in Z["zones"] if z.source == "Appendix D" and z.kind == "MV"]
         ah = [z for z in Z["zones"] if z.source == "Appendix D" and z.kind == "AHU"]
-        w("4. *\"9 MV fan-set zones on App D page 5\"*: there are %d MV App D zones and %d AHU zones (%d App D layers); with the %d RFI zones and the Legend and `Rooms (measured)` layers the PDF has %d layers." % (
-            len(mv), len(ah), len(mv) + len(ah), sum(1 for z in Z["zones"] if z.source.startswith("RFI")), len(Z["zones"]) + 2))
+        mv_t = [z for z in mv if z.tag != "MV (no tag)"]
+        mv_u = [z for z in mv if z.tag == "MV (no tag)"]
+        w("4. *\"App D page 5 gives 9 MV fan-set zones\"*: the page has %d MV fan-set zones that carry a tag (%s) and %d AHU zones, 27 layers with the RFI zones, Legend and `Rooms (measured)` in the first PDF. "
+          "This run adds %d `MV (no tag)` zone made of the App D polygons whose mode label is MV and that have no tag in them (annotations %s), so the PDF has %d layers (%d RFI, %d App D: %d AHU, %d MV with a tag, %d MV without)." % (
+              len(mv_t), ", ".join(sorted(z.tag.split("-")[0] for z in mv_t)), len(ah), len(mv_u), ", ".join(str(m["annotation_index"]) for z in mv_u for m in z.members) or "none",
+              len(Z["zones"]) + 2, sum(1 for z in Z["zones"] if z.source.startswith("RFI")), len(mv) + len(ah), len(ah), len(mv_t), len(mv_u)))
         cl = {c["annotation_index"]: c for c in Z["appd_classes"]}
         chg = [1, 4, 5, 10, 27, 28]
         w("5. *\"App D common spaces are classified from their own equipment tags\"* was true for 34 of 40 polygons only: the nearest tag within 60 pt was taken even when it lay outside the polygon (annotations 1, 4, 5, 10 as AHU-B-04-04CORE-01 and 27, 28 as TEAF-B-04-04COM-03A/B, "
@@ -171,14 +175,21 @@ def corrections_section(ctx: dict, prov: dict) -> List[str]:
       "R065 (earlier run: A 57.98 m2 and B 58.42 m2, both cutting out the swing sectors of the double doors; caption 63.03 m2). Causes: (a) partition walls drawn as a black band between two fine outlines were merged into the room as furniture-like faces, "
       "so the boundary ran along the outer outline; (b) the two leaves of a double door close on one point, the chain of both arcs did not fit one circle, so neither door was closed and the sectors under the arcs stayed separate faces. "
       "Fixes: black wall-band fill is wall (the room ends at the band's inner edge, in both methods); a chain of arc pieces is cut where the path turns back (a cusp), so double doors give two arcs and two closers; the arcs of closed doors are not boundaries, so the swing sector belongs to the room. "
-      "This run: %s; %s." % (fmt(r110) if r110 else "R110 not found", fmt(r065) if r065 else "R065 not found"))
+      "This run: %s; %s. A and B stay within 2 %% of each other and R065 is within 0.1 %% of the verifier's own 59.34 m2. "
+      "The remaining +1.5 m2 of R110 against the verifier's 33.7 m2 is a boundary-convention offset, not a closure error: A and B put the boundary on the centre of the wall stroke and the verifier's raster stops at the ink edge, "
+      "an offset of about %.2f m on average along the %.1f m perimeter of the room (the heavy pens are 0.6 to 2.76 pt wide, 0.05 to 0.24 m at 1:250). R065 against its caption stays at %s %% (the caption traces the wall centre line more closely: centre-line area %s m2)." % (
+          fmt(r110) if r110 else "R110 not found", fmt(r065) if r065 else "R065 not found",
+          (float(r110["wall_face_area_m2"]) - 33.7) / float(r110["a_perimeter_m"]) if r110 else float("nan"), float(r110["a_perimeter_m"]) if r110 else float("nan"),
+          r065["error_vs_caption_pct"] if r065 else "n/a", r065["centreline_area_m2"] if r065 else "n/a"))
     if r133:
-        w("   R133 (earlier run A 5.176 m2, verifier 4.749 m2): this run %s." % fmt(r133))
+        w("   R133 (earlier run A 5.176 m2, verifier 4.749 m2): this run %s. Not reproduced as a defect: A and B agree and the closed door leaf and the strip beside it are part of the room in both; the 0.43 m2 difference to the verifier's flood is not explained (it is open, not closed)." % fmt(r133))
     n_out = sum(1 for r in rows if r["centroid_inside_polygon"] == "no")
     w("7. *\"centroid_x_mm / centroid_y_mm are the room centroids\"*: for 21 rooms (earlier run; up to 58.2 m away) the column held `representative_point()`. Now the columns hold the true centroid of the adopted polygon in every row; `centroid_inside_polygon` says whether it lies in the room (%d rooms: no), "
       "and `label_point_x_mm`, `label_point_y_mm`, `grid_location_label_point` give a point inside the polygon. `grid_location` is the grid location of the centroid.\n" % n_out)
     w("**Gaps**\n")
-    w("* *Pipeline not re-run.* Re-run in full from the working-tree code; code hash and git state in section 0. The earlier outputs came from an earlier state of the working tree, which differs from the committed HEAD in %s." % (", ".join("`%s`" % f for f in prov["git_modified_zoning_files"]) or "no zoning file"))
+    w("* *Pipeline not re-run; unclear which code version produced the outputs.* The pipeline was re-run in full (all seven stages) from the working-tree code after the fixes. The code is identified by the sha256 in section 0 (`%s`), git HEAD `%s`; "
+      "files that differ from HEAD at report time: %s. Commits were made by another process while this work was in progress, so HEAD may or may not contain the final code: the hash, not the commit, identifies it." % (
+          prov["code_sha256"][:16] + "...", prov["git_head"], ", ".join("`%s`" % f for f in prov["git_modified_zoning_files"]) or "none"))
     cen = prov["sources"]["background"]
     w("* *Hash of `Arch Combined Tender .pdf` not checkable.* It is in `file_census.csv` (row `Basis/Arch Combined Tender .pdf`, the trailing space before `.pdf` hid it from a search): census %s file sha256 %s. The file was assembled from five uploaded parts; page 8 is byte-identical in content to page 3 of part 2: %s. A comparison with the Drive original remains open (`check_phase0.md` P0-04)." % (
         "equals" if cen["matches_census"] else "DIFFERS from", cen["sha256"][:16] + "...", prov.get("background_page8_equals_uploaded_part02_page3")))
@@ -186,8 +197,8 @@ def corrections_section(ctx: dict, prov: dict) -> List[str]:
         nrev = sum(1 for a in Z["assigned"] if a["class_label"] == "review: partial cover")
         w("* *`zoning_confidence.majority_share` 0.80 in the config, 0.5 in the code.* The pipeline now reads the configured value (`zones.configured_thresholds`); `assign_rooms` keeps 0.5 as its own default for direct calls. Rooms between 0.5 and 0.8 cover: %d, listed as `review: partial cover`, not in any zone area." % nrev)
         removed = sum(v["removed_m2"] for v in Z["precedence_removed_m2"].values())
-        w("* *App D fill stacked on the RFI zones (198.8 m2 in the earlier PDF) and legend area was the assigned room area.* The App D polygons are drawn minus the RFI zones (%.1f m2 removed; the later document governs; recorded in each annotation's contents); fill overlap left: %.2f m2. "
-          "The legend now gives the drawn zone polygon area and the assigned room area with the room count." % (removed, Z["stacked_fill_m2"]))
+        w("* *App D fill stacked on the RFI zones (198.8 m2 in the earlier PDF) and legend area was the assigned room area.* The App D polygons are drawn minus the RFI zones and minus earlier App D zones (%.1f m2 removed; the later document governs; recorded in each annotation's contents); fills still stacked: %.2f m2 outside the RFI sample's own overlaps (%.2f m2 among the sample zones themselves, unchanged). "
+          "The legend now gives the drawn zone polygon area and the assigned room area with the room count." % (removed, Z["stacked_fill_m2"], Z["rfi_rfi_overlap_m2"]))
     w("* *Legend FreeText boxes and the backing square had no /CA or /FillOpacity.* Every legend, zone and room annotation now writes /CA explicitly (1 for the opaque legend box and text, 0.35 for zones and swatches) and the backing square also /FillOpacity 1; the PDF verification fails if one is missing.")
     w("* *Four of the 15 re-measured rooms could be checked only against a fine-pen variant or against method B* (R016, R076, R110, R221 in the verifier's numbering): not fixable here. Method B still shares A's strokes and closers, so a shared closure error is not visible in the A-B check (section 7); "
       "the independent evidence is the comparison with the printed App D captions and the verifier's own re-measurement.")
@@ -430,8 +441,8 @@ def write_qa_report(ctx: dict, out_md: Path, crops_dir: Path, page) -> dict:
           "Result: %s. %d polygons carry no tag: %s." % (len(ac), ", ".join("%s %d" % kv for kv in sorted(kinds.items())), len(notag),
                                                        "; ".join("annotation %d (%s, mode %s) as %s" % (c["annotation_index"], (c["names"] or "").split(" | ")[0], c["mode"] or "-", c["kind"] or "not classified") for c in notag)))
         rem = Z["precedence_removed_m2"]
-        w("Where an App D polygon lies inside an RFI-ME-0233 zone the later document governs and the App D fill is not drawn there (no stacked fills): %s. Fill overlap left in the drawing: %.2f m2.\n" % (
-            "; ".join("%s %.1f m2" % (k.replace("APPD:", "App D "), v["removed_m2"]) for k, v in rem.items() if v["removed_m2"] > 0.05) or "none", Z["stacked_fill_m2"]))
+        w("Where an App D polygon lies inside an RFI-ME-0233 zone the later document governs and the App D fill is not drawn there (no stacked fills): %s. Overlap that remains: %.2f m2 between RFI sample zones (the sample's own polygons overlap each other; they are drawn as the sample has them, and a room in an overlap goes to the zone covering the larger share) and %.2f m2 anywhere else.\n" % (
+            "; ".join("%s %.1f m2" % (k.replace("APPD:", "App D "), v["removed_m2"]) for k, v in rem.items() if v["removed_m2"] > 0.05) or "none", Z["rfi_rfi_overlap_m2"], Z["stacked_fill_m2"]))
         if pdfr:
             v = pdfr["verify"]
             w("PDF checks: page content stream identical to the source: %s; render with annotations hidden pixel-identical (%d x %d px): %s; %d zone, %d legend and %d room annotations; layers off by default: %s; every zone tag in the legend and the reverse: %s; overall: **%s**.\n" % (
