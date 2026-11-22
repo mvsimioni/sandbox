@@ -155,3 +155,6 @@ airflow_comparison:
   calc_below_reference: report_reduction          # not a failure
   calc_above_reference: flag_VERIFY
   attribute_reduction_to: [area_basis, criteria_ach_or_thermal, duct_leakage_10_vs_15, oa_rule]
+  # D-013: every equipment row carries Tender airflow (original, with source), Calculated, Reduction L/s, Reduction %, Remarks.
+  equipment_columns: [tender_airflow_L_s, tender_source, calculated_airflow_L_s, reduction_L_s, reduction_pct, remarks]
+  tender_source_order: [equipment_schedule_corr5, tender_airside_schematic]
