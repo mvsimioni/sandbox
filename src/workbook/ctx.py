@@ -78,6 +78,8 @@ DEFAULTS: Dict[str, Tuple] = {
     "BalTolLps": ("Flow balance closure tolerance, absolute", 10, "L/s", "S", "GEN-CONFIG", "config tolerances"),
     "SchedTolPct": ("Schematic update rule: increase threshold", 0.05, "fraction", "S", "GEN-CONFIG", "Section 11 item 16"),
     "SchedTolLps": ("Schematic update rule: increase threshold, absolute", 10, "L/s", "S", "GEN-CONFIG", "Section 11 item 16"),
+    "StartPressure": ("Iteration starting pressure of a free space", 0, "Pa", "S", "GEN-PRESSURE", "numerical start only"),
+    "PressureBracket": ("Search bracket of the uncontrolled-pressure bisection", 1000, "Pa", "S", "GEN-PRESSURE", ""),
     "TolPressure": ("Pressure-iteration residual tolerance", 0.5, "m³/h", "S", "GEN-PRESSURE",
                     "free-space balance residual that passes"),
 }
@@ -94,7 +96,7 @@ GROUPS = [
     ("Pressure method", ["AirtightLimit", "TighterLimit", "FlowN", "FlowNLow", "FlowNHigh", "DoorCd", "RefPressure",
                          "RatioFail", "RatioVerify", "ApplyFromPa", "SecPerHour", "MMperM", "CM2perM2", "GapSides",
                          "GapBottom", "GapHinged", "GapSliding", "GapBedWidth", "GapShaft", "NewtonEps", "OffsetEps",
-                         "TolPressure"]),
+                         "StartPressure", "PressureBracket", "TolPressure"]),
     ("Check tolerances", ["AreaTolPct", "AreaTolM2", "BalTolPct", "BalTolLps", "SchedTolPct", "SchedTolLps"]),
 ]
 

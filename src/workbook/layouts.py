@@ -176,7 +176,7 @@ def pl_keys(n_printed: int) -> List[str]:
     printed = ["id", "room", "a", "b", "kind", "seal", "gap", "gap_c", "gap_s", "leaf_w", "leaf_h", "fixed", "area",
                "pa", "pb", "dp", "q", "qf"]
     pad = [f"_pad{i}" for i in range(n_printed - len(printed))]
-    helpers = ["ia", "ib"] + [f"f{k}" for k in range(NPASS)] + [f"g{k}" for k in range(NPASS)]
+    helpers = ["ia", "ib", "kc"] + [f"f{k}" for k in range(NPASS)] + [f"g{k}" for k in range(NPASS)]
     return printed + pad + helpers
 
 
@@ -213,14 +213,13 @@ def build_layouts(ctx: Ctx) -> None:
     ctx.lay["CP2"] = Layout("Airflow Comparison", CP2_KEYS, FIRST + n + 6, len(ctx.ahus))
     ctx.lay["CP3"] = Layout("Airflow Comparison", CP3_KEYS, FIRST + n + len(ctx.ahus) + 12, len(ctx.references))
     ctx.lay["SO"] = Layout("Sources", ["id", "doc", "issue", "page", "loc", "text", "method", "conf"], 7, len(ctx.sources))
-    ctx.lay["FL"] = Layout("Flags", ["id", "type", "ref", "desc", "status", "owner", "src", "note"], 7, ctx.n_flags)
 
 
 AHU_KEYS = ["ahu", "type", "n", "area", "vol", "sa_room", "leak", "sa_ahu", "oa_sum", "crit", "frac", "oa_rule",
             "vou", "vps", "xs", "zd", "ev", "vot", "oa_ms", "ret", "exh", "relief",
             "sens", "lat", "rt", "rh", "oa_sens", "oa_lat", "fan", "coil_s", "coil_l", "coil", "rtons", "wm2",
             "oa_sens_ms", "oa_lat_ms", "coil_s_ms", "coil_l_ms", "coil_ms", "rtons_ms", "req_t", "sched", "sched_oa",
-            "sched_c", "sched_s", "cmark"]
+            "sched_c", "sched_s"]
 FCU_KEYS = ["k", "no", "name", "ahu", "why", "area", "sens_kw", "lat_kw", "supply", "oa", "oasrc", "oacond", "oa_t", "oa_h",
             "oa_sens", "oa_lat", "coil_s", "coil_l", "coil", "rtons", "flag"]
 FAN_KEYS = ["tag", "type", "serves", "req", "leak", "drawn", "sched", "margin", "code", "src", "remark", "status"]
