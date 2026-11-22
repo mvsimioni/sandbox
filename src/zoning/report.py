@@ -175,14 +175,16 @@ def corrections_section(ctx: dict, prov: dict) -> List[str]:
       "R065 (earlier run: A 57.98 m2 and B 58.42 m2, both cutting out the swing sectors of the double doors; caption 63.03 m2). Causes: (a) partition walls drawn as a black band between two fine outlines were merged into the room as furniture-like faces, "
       "so the boundary ran along the outer outline; (b) the two leaves of a double door close on one point, the chain of both arcs did not fit one circle, so neither door was closed and the sectors under the arcs stayed separate faces. "
       "Fixes: black wall-band fill is wall (the room ends at the band's inner edge, in both methods); a chain of arc pieces is cut where the path turns back (a cusp), so double doors give two arcs and two closers; the arcs of closed doors are not boundaries, so the swing sector belongs to the room. "
-      "This run: %s; %s. A and B stay within 2 %% of each other and R065 is within 0.1 %% of the verifier's own 59.34 m2. "
+      "This run: %s; %s. A and B differ by %.1f %% (R110) and %.1f %% (R065) and R065 is %.2f %% from the verifier's own 59.34 m2. "
       "The remaining +1.5 m2 of R110 against the verifier's 33.7 m2 is a boundary-convention offset, not a closure error: A and B put the boundary on the centre of the wall stroke and the verifier's raster stops at the ink edge, "
       "an offset of about %.2f m on average along the %.1f m perimeter of the room (the heavy pens are 0.6 to 2.76 pt wide, 0.05 to 0.24 m at 1:250). R065 against its caption stays at %s %% (the caption traces the wall centre line more closely: centre-line area %s m2)." % (
           fmt(r110) if r110 else "R110 not found", fmt(r065) if r065 else "R065 not found",
+          abs(float(r110["a_minus_b_pct"])) if r110 else float("nan"), abs(float(r065["a_minus_b_pct"])) if r065 else float("nan"),
+          100 * abs(float(r065["wall_face_area_m2"]) - 59.343) / 59.343 if r065 else float("nan"),
           (float(r110["wall_face_area_m2"]) - 33.7) / float(r110["a_perimeter_m"]) if r110 else float("nan"), float(r110["a_perimeter_m"]) if r110 else float("nan"),
           r065["error_vs_caption_pct"] if r065 else "n/a", r065["centreline_area_m2"] if r065 else "n/a"))
     if r133:
-        w("   R133 (earlier run A 5.176 m2, verifier 4.749 m2): this run %s. Not reproduced as a defect: A and B agree and the closed door leaf and the strip beside it are part of the room in both; the 0.43 m2 difference to the verifier's flood is not explained (it is open, not closed)." % fmt(r133))
+        w("   R133 (earlier run A 5.176 m2, verifier 4.749 m2): this run %s. Not reproduced as a defect: A and B agree and the closed door leaf and the strip beside it are part of the room in both; the 0.43 m2 difference to the verifier's flood is not explained and stays open." % fmt(r133))
     n_out = sum(1 for r in rows if r["centroid_inside_polygon"] == "no")
     w("7. *\"centroid_x_mm / centroid_y_mm are the room centroids\"*: for 21 rooms (earlier run; up to 58.2 m away) the column held `representative_point()`. Now the columns hold the true centroid of the adopted polygon in every row; `centroid_inside_polygon` says whether it lies in the room (%d rooms: no), "
       "and `label_point_x_mm`, `label_point_y_mm`, `grid_location_label_point` give a point inside the polygon. `grid_location` is the grid location of the centroid.\n" % n_out)
