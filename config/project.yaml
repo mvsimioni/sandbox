@@ -177,9 +177,9 @@ deliverable_language:
 
 # D-016 (Marcus, 22 Nov 2026): occupancy (number of people) from the RDS first, then booklet, then density default (flagged).
 occupancy:
-  source_order: [rds, booklet, density_default]
+  source_order: [rds, density_default]   # D-018: ASHRAE default only where the RDS occupancy field is empty
   rds_register: out/registers/rds_rooms.csv
-  reading_rule: "sum of upper bounds of patients + staff + visitors as printed; n/a or 0 -> 0; blank -> next source"
+  reading_rule: "sum of upper bounds of patients + staff + visitors as printed; n/a or 0 -> 0 (an RDS value, not empty); blank or no RDS for the room -> density_default"
   rule_status: ASSUMPTION
 
 # D-017 (Marcus, 22 Nov 2026): occupancy fallback (no RDS, no booklet) = area x default density by room use.
