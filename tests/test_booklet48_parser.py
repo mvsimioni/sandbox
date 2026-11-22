@@ -1902,3 +1902,73 @@ def test_short_booklet_second_layer_over_the_first_is_not_read_twice(tmp_path: P
     assert len(rows) == 8 and [r["room_type_as_printed"] for r in rows][:2] == ["Room 1", "Room 2"]
     assert {r["air_class"] for r in rows} == {"4"} and {r["min_oa_ach"] for r in rows} == {"2"}
     assert {r["zone"] for r in rows} == {"MICROBIOLOGY"}
+
+
+def build_cssd_page(doc: "pymupdf.Document") -> None:
+    """CSSD (4.8, A3): 'ROOM CONDITIONS' title, no 'DESIGN CRITERIA' strip; headings wrap mid-word ('Temperat' / 'ure, C',
+    'Afterhour' / 's mode,'); a room name and the filter 'MERV 15' wrap over two lines; footnotes carry no NOTE marker."""
+    cv = Canvas(doc)
+    cv.text(744, 20, "4 DEPARTMENT DRAWINGS", 28)
+    cv.text(67, 55, "ROOM CONDITIONS", 28)
+    cv.text(744, 62, "4.8 MECHANICAL VENTILATION STRATEGY", 20)
+    x = {"room": 213, "pressure": 420, "oa": 515, "total": 630, "single": 710, "aclass": 770, "filter": 830,
+         "rh": 905, "temp": 970, "after": 1040, "setback": 1110}
+    heads = (("room", "Room", 166), ("pressure", "Pressure", 150), ("pressure", "Regime,", 166), ("pressure", "Pa", 183),
+             ("oa", "Min. Outdoor ACH", 166), ("total", "Min. Total ACH", 166), ("single", "Single", 158),
+             ("single", "Pass", 175), ("aclass", "Air Class", 166), ("filter", "Filter", 166),
+             ("rh", "Relative", 158), ("rh", "Humidity", 175), ("temp", "Design", 150), ("temp", "Temperat", 166),
+             ("temp", "ure, C", 183), ("after", "Afterhour", 150), ("after", "s mode,", 166), ("after", "Y/N", 183),
+             ("setback", "Setback", 150), ("setback", "mode,", 166), ("setback", "Y/N", 183))
+    for key, line, y in heads:
+        cv.text(x[key], y, line, 14, centre=key != "room")
+    cv.text(x["after"] + 30, 183, "1,2", 9)
+    rows = [
+        (["Decontamination"], ["-5", "2", "12", "Y", "4", "HEPA", "≤60", "16-24", "N", "N"]),
+        (["Dirty Lift Lobby"], ["-2.5", "2", "12", "Y", "4", "HEPA", "≤60", "16-24", "N", "N"]),
+        (["Support Areas (Staff Facilities / Receiving / Other", "Store)"],
+         ["0", "2", "8", "NA", "2", "MERV|15", "≤65", "23-25", "N", "N"]),
+        (["DI Water / Waste Cleaner Room / Change Room"],
+         ["-ve", "10", "10", "YES", "4", "NA", "NA", "NA", "N", "N"]),
+    ]
+    y = 220
+    for names, vals in rows:
+        two = len(names) > 1
+        for i, name in enumerate(names):
+            cv.text(77, y - 2 + 20 * i, name, 16)
+        for key, val in zip(("pressure", "oa", "total", "single", "aclass", "filter", "rh", "temp", "after", "setback"), vals):
+            if "|" in val:         # the filter wraps over two lines, above and below the value line
+                top, bottom = val.split("|")
+                cv.text(x[key], y - 2, top, 16, centre=True)
+                cv.text(x[key], y + 18, bottom, 16, centre=True)
+            else:
+                cv.text(x[key], y + (8 if two else 0), val, 16, centre=True)
+        y += 70 if two else 45
+    cv.text(85, 640, "1 – REFER TO APPENDIX 4.D FOR DEPARTMENT SCHEDULE OF OPERATION.", 14)
+    cv.text(85, 657, "2 – AFTERHOURS MODE APPLIES TO DEPARTMENTS THAT DO NOT OPERATE CONTINUOUSLY.", 14)
+    _footer(cv, "88")
+
+
+def test_cssd_room_conditions_page_with_wrapped_headings(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    build_cssd_page(doc)
+    res = _parse(_save(doc, tmp_path, "20251212_IGH_DD_Booklet_CSSD_R1_DPA_AH.pdf"), tmp_path)
+    assert res["pages"][0]["class"] == "criteria"
+    rows = {r["room_type_as_printed"]: r for r in res["criteria"]}
+    assert list(rows) == ["Decontamination", "Dirty Lift Lobby",
+                          "Support Areas (Staff Facilities / Receiving / Other Store)",
+                          "DI Water / Waste Cleaner Room / Change Room"]
+    d = rows["Decontamination"]
+    assert (d["pressure_pa"], d["min_oa_ach"], d["min_total_ach"], d["single_pass"], d["air_class"], d["filter"],
+            d["rh_as_printed"], d["rh_max_pct"], d["temp_as_printed"], d["afterhours"], d["setback"]) == \
+        ("-5", "2", "12", "Y", "4", "HEPA", "≤60", "60", "16-24", "N", "N")
+    assert d["note_refs"] == "1;2" and d["confidence"] == "0.97"
+    assert rows["Dirty Lift Lobby"]["pressure_pa"] == "-2.5"            # a decimal pressure, not 2.5 or -2
+    sup = rows["Support Areas (Staff Facilities / Receiving / Other Store)"]
+    assert sup["filter"] == "MERV 15" and sup["single_pass"] == "NA" and sup["pressure_direction"] == "neutral"
+    di = rows["DI Water / Waste Cleaner Room / Change Room"]
+    assert (di["pressure_regime_as_printed"], di["pressure_pa"], di["pressure_direction"], di["single_pass"],
+            di["filter"], di["rh_as_printed"], di["temp_as_printed"], di["rh_max_pct"], di["temp_min_c"]) == \
+        ("-ve", "", "negative", "Y", "NA", "NA", "NA", "", "")
+    assert '"single_pass": "YES"' in di["raw_cells"] and di["confidence"] == "0.97"
+    assert [n["note_number"] for n in res["notes"]] == ["1", "2"]            # the footnotes are notes, not table rows
+    assert not res["failures"]

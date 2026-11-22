@@ -118,6 +118,10 @@ SHORT_HEADER_VOCAB = SPLIT_HEADER_VOCAB | AREA_HEADER_VOCAB | {
     "theatre", "afterhour", "s", "te", "mperatur", "mperature", "h", "umidity", "m", "ode,", "outd", "oor",
     "(purging)", ",c", "rooms", "re", "outdoo", "r", "e,"}
 SHORT_EXTRA_KEYS: List[Tuple[str, str]] = [("min_total_purging", r"purging")]
+# CSSD (4.8, A3): a clean text layer whose headings wrap mid-word ('Temperat' / 'ure, C', 'Afterhour' / 's mode,') and whose
+# Afterhours heading carries the footnote reference '1,2'; used only after the vocabularies above found nothing
+WRAP_HEADER_VOCAB = HEADER_VOCAB | {"temperat", "ure,", "afterhour", "s", "1,2"}
+FOOTNOTE_REF_RE = re.compile(r"\d(?:,\d)*")
 NO_CAPTION_PART = "(no caption printed)"
 ZONED_CAPTION_RE = re.compile(r"^Rooms?\s+Part\s*(\d+)(?:\s*[–—\-]\s*(.+))?$", re.I)
 # Zones of the Emergency criteria table.  The table prints no zone column: the zone is the leading words of the room
@@ -490,6 +494,9 @@ def classify_page(text: str, heading: str = "", section: str = "", extended: boo
             or (extended and (re.search(r"EQUIPMENT CONFIGURATION SUMMARY", flat, re.I)
                               or re.search(r"Equipment Tag\s+Area Served\s+Equipment Standby\s+Configuration", flat))):
         return "standby summary"
+    if extended and re.search(r"KEYPLAN", flat) and not re.search(r"AHU ZONING", flat) \
+            and len(re.findall(r"[+\-−–]?\d+(?:\.\d+)?\s*Pa\b", flat)) >= 3 and len(re.findall(r"\d+\s*ACH\b", flat)) >= 3:
+        return "pressure regime"        # CSSD p6: a keyplan headed by no title whose labels are 'N Pa' / 'N ACH' pressure and air-change values
     if re.search(r"KEYPLAN", flat) or re.search(r"AHU ZONING", flat):
         return "zoning keyplan"
     if re.search(r"PRESSURE REGIME", flat):
@@ -639,6 +646,8 @@ def parse_single_pass(cell: str) -> Tuple[str, bool]:
         return "N", True
     if t in ("nr", "n/r", "", "-"):         # 'N/R' (ICU HDU) is 'not required', as 'NR'
         return "NR", True
+    if t in ("na", "n/a"):                  # CSSD: 'NA', not applicable (as parse_yn)
+        return "NA", True
     return "", False
 
 
@@ -660,7 +669,7 @@ def parse_yn(cell: str) -> Tuple[str, bool]:
 def parse_rh(cell: str) -> Tuple[str, str, bool]:
     """Return ``(rh_max, rh_min, ok)`` from e.g. 'Max 60%', '40 - 60%', 'NR'."""
     t = clean(cell)
-    if t.upper() in ("", "NR", "N/R", "-", "N"):       # 'N': no humidity control (Emergency 4.1.8 toilets and dirty utilities)
+    if t.upper() in ("", "NR", "N/R", "-", "N", "NA", "N/A"):       # 'N': no humidity control (Emergency 4.1.8 toilets and dirty utilities)
         return "", "", True
     rng = re.fullmatch(r"(\d+(?:\.\d+)?)\s*%?\s*[–—\-]\s*(\d+(?:\.\d+)?)\s*%?", t)
     if rng:
@@ -679,7 +688,7 @@ def parse_rh(cell: str) -> Tuple[str, str, bool]:
 def parse_temp(cell: str) -> Tuple[str, str, bool]:
     """Return ``(min_c, max_c, ok)`` from '21 - 24', '27', '24+-1', 'NR'."""
     t = clean(cell)
-    if t.upper() in ("", "NR", "N/R", "-", "N"):       # 'N': no temperature control (Emergency 4.1.8 toilets and dirty utilities)
+    if t.upper() in ("", "NR", "N/R", "-", "N", "NA", "N/A"):       # 'N': no temperature control (Emergency 4.1.8 toilets and dirty utilities)
         return "", "", True
     rng = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(?:°?\s*C)?\s*[–—\-]\s*(\d+(?:\.\d+)?)\s*(?:°?\s*C)?", t)
     if rng:
@@ -729,6 +738,7 @@ class TableColumns:
                  header_refs: Dict[str, List[str]], centre_bounds: bool = False,
                  header_text: Optional[Dict[str, str]] = None):
         self.clusters = clusters
+        self.wrapped = False                      # True for the CSSD heading layout (``WRAP_HEADER_VOCAB``)
         self.header_bottom = header_bottom
         self.header_refs = header_refs
         self.header_text = header_text or {}      # heading of each column as printed (text-layer words, read in order)
@@ -808,13 +818,14 @@ def find_header(words: Sequence[Word], vocab: Optional[set] = None) -> Optional[
         header = [w for ln in all_lines[lo:hi + 1] for w in ln]
         texts = " ".join(w.text.lower() for w in header)
         short = vocab is SHORT_HEADER_VOCAB
-        split = vocab is SPLIT_HEADER_VOCAB or short                # headings wrapped mid-word: match on the text with the breaks closed
+        split = vocab is SPLIT_HEADER_VOCAB or vocab is WRAP_HEADER_VOCAB or short                # headings wrapped mid-word: match on the text with the breaks closed
         if "pressure" not in texts or "midity" not in texts:     # 'midity' also closes the wrapped 'Hu' / 'midity'
             continue
         # footnote superscripts in the header: digit-only words smaller than the header text
         sizes = [w.size for w in header if not re.fullmatch(r"\d", w.text) and w.size]
         text_size = max(sizes) if sizes else 0.0
-        refs = [w for w in header if re.fullmatch(r"\d", w.text) and w.size and text_size and w.size < text_size * 0.9]
+        ref_re = FOOTNOTE_REF_RE if vocab is WRAP_HEADER_VOCAB else re.compile(r"\d")
+        refs = [w for w in header if ref_re.fullmatch(w.text) and w.size and text_size and w.size < text_size * 0.9]
         body = [w for w in header if w not in refs and w.text not in (",",)]
         clusters = _cluster_x(body)
         mapping: Dict[str, Tuple[float, float]] = {}
@@ -834,8 +845,9 @@ def find_header(words: Sequence[Word], vocab: Optional[set] = None) -> Optional[
             if dist:
                 key = min(dist, key=dist.get)  # type: ignore[arg-type]
                 if dist[key] <= 15.0:
-                    refs_by_col[key].append(ref.text)
+                    refs_by_col[key].extend(ref.text.split(","))
         tc = TableColumns(mapping, max(w.y1 for w in header), dict(refs_by_col), header_text=texts)
+        tc.wrapped = vocab is WRAP_HEADER_VOCAB
         for key in tc.order:        # the heading of each column as printed: every header word that sits over it
             lo, hi = tc.bounds[key]
             texts[key] = join_words([w for w in body if lo <= w.cx < hi])
@@ -984,6 +996,8 @@ def parse_criteria_page(words: List[Word], page_h: float, page_w: float,
             cols = find_header(words, AREA_HEADER_VOCAB)    # 'AREA / ROOM' (I-CARE)
         if cols is None and short:
             cols = find_header(words, SHORT_HEADER_VOCAB)   # the A4 short DD booklets
+        if cols is None and not short:
+            cols = find_header(words, WRAP_HEADER_VOCAB)    # CSSD
     if cols is not None and not table_part and not zoned:
         # no 'Room conditions - Part N' caption: the title above the table names the mode ('I-Care - Operation Mode',
         # 'Basement 2 Pharmacy - Compounding Lab - Operation Mode', 'OP Level 1 Pharmacy'); none printed: a source gap
@@ -1033,6 +1047,11 @@ def parse_criteria_page(words: List[Word], page_h: float, page_w: float,
         dept_zones, taken = group_cells(words, rects or [], cols, cols.header_bottom, note_y)
         words = [w for w in words if id(w) not in taken]
     notes_top = find_notes_top(words, cols.header_bottom, page_h)
+    if notes_top >= page_h and cols.wrapped:
+        # CSSD: the footnotes ('1 - REFER TO APPENDIX 4.D ...') are numbered lines under the table with no NOTE marker
+        notes_top = next((min(w.y0 for w in ln) for ln in cluster_lines([w for w in words if w.y0 > cols.header_bottom
+                          and not is_gutter(w)]) if re.fullmatch(r"\d", ln[0].text) and len(ln) > 2
+                          and ln[1].text in ("–", "-", "—")), page_h)
     footer_top = page_h       # the footer stamp and page number are already out of ``words`` (see footer_furniture)
     body = [w for w in words if w.y0 >= cols.header_bottom - 0.5 and w.y0 < min(notes_top, footer_top) - 0.5
             and not is_gutter(w)]
