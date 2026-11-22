@@ -23,7 +23,7 @@ from .styles import CODE_ALLOWED
 ERROR_VALUES = {"#N/A", "#NAME?", "#VALUE!", "#REF!", "#DIV/0!", "#NUM!", "#NULL!", "Err:502", "Err:504", "Err:508", "Err:511",
                 "Err:522", "Err:523"}
 ALLOWED_FUNCS = {"SUM", "SUMIFS", "SUMIF", "SUMPRODUCT", "COUNTIF", "COUNTIFS", "COUNT", "COUNTA", "IF", "AND", "OR", "MAX", "MIN", "ABS", "SIGN",
-                 "SQRT", "ROUNDUP", "INDEX", "MATCH", "ISNUMBER", "ISERROR", "SEARCH", "ROW", "ROWS", "COLUMN", "_XLFN.MAXIFS"}
+                 "SQRT", "ROUND", "ROUNDUP", "INDEX", "MATCH", "ISNUMBER", "ISERROR", "SEARCH", "ROW", "ROWS", "COLUMN", "_XLFN.MAXIFS"}
 ALLOWED_LITERALS = {"0", "1", "2"}
 TOL_PCT = 0.5
 

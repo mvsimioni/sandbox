@@ -188,7 +188,7 @@ def write_pressure(ctx: Ctx) -> None:
         cf_text(ws, f"{PS.col(k)}{PS.first}:{PS.col(k)}{last}", f"{PS.col(k)}{PS.first}", "VERIFY", fill="FFFFF2CC")
         cf_text(ws, f"{PS.col(k)}{PS.first}:{PS.col(k)}{last}", f"{PS.col(k)}{PS.first}", "FLAG", fill="FFFFF2CC")
     band_rows(ws, f"A{PS.first}:{PS.col('note')}{last}")
-    group_cols(ws, PS, "p0", f"u{NBIS}")
+    group_cols(ws, PS, "p0", f"u{NBIS}", collapsed=True)   # Newton and bisection helper columns: expand to inspect, not printed
     # ---- link table
     _write_links(ctx, ws)
     _write_suites(ctx, ws)
@@ -242,7 +242,7 @@ def _write_links(ctx: Ctx, ws) -> None:
     if ctx.pl_links:
         list_validation(ws, f"{PL.col('seal')}{PL.first}:{PL.col('seal')}{PL.last}", "ListSeal")
         band_rows(ws, f"A{PL.first}:{PL.col('qf')}{PL.last}")
-    group_cols(ws, PL, "ia", f"g{NPASS - 1}")
+    group_cols(ws, PL, "ia", f"g{NPASS - 1}", collapsed=True)
 
 
 def _write_suites(ctx: Ctx, ws) -> None:

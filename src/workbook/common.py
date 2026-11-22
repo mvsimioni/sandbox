@@ -91,4 +91,9 @@ def title_block(ws, title: str, subtitle: str, ctx: Ctx) -> None:
 
 
 def group_cols(ws, lay: Layout, first_key: str, last_key: str, collapsed: bool = False) -> None:
-    ws.column_dimensions.group(lay.col(first_key), lay.col(last_key), outline_level=1, hidden=collapsed)
+    # one dimension per column (openpyxl's own group() drops the widths of all but the first column)
+    from openpyxl.utils import get_column_letter
+    for ix in range(lay.idx[first_key], lay.idx[last_key] + 1):
+        dim = ws.column_dimensions[get_column_letter(ix)]
+        dim.outline_level = 1
+        dim.hidden = collapsed

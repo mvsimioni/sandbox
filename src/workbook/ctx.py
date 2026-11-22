@@ -43,6 +43,8 @@ DEFAULTS: Dict[str, Tuple] = {
     "PercentBase": ("Occupancy density base (persons per 100 m²)", 100, "m²", "S", "GEN-ENGINE", "unit conversion"),
     "RoundTo": ("Rounding of final supply (ROUNDUP digits; −1 = 10 L/s)", -1, "digits", "S", "GEN-ENGINE",
                 "as the example"),
+    "AreaDecimals": ("Decimal places of the area used (areas are taken to 0.1 m²)", 1, "digits", "S", "GEN-CONFIG",
+                     "brief 8.3 accuracy: take areas to 0.1 m², calculate airflows unrounded"),
     "MMperM": ("Millimetres per metre", 1000, "mm", "S", "GEN-PRESSURE", "unit conversion"),
     "CM2perM2": ("Square centimetres per square metre", 10000, "cm²", "S", "GEN-PRESSURE", "unit conversion"),
     "OAShare": ("Outdoor-air rule: largest share of AHU supply a separated room may take", 0.05, "fraction", "S",
@@ -89,7 +91,7 @@ OPTIONAL_BLANK = {
 }
 GROUPS = [
     ("Load method", ["SafetyFactor", "SupplyTemp", "InfiltrationACH", "RoofSolarGain", "OutdoorDB", "OutdoorWB", "OutdoorH",
-                     "AirSensibleFactor", "AirDensity", "AirLatentFactor", "RoundTo", "ConvM3hPerLps", "PercentBase",
+                     "AirSensibleFactor", "AirDensity", "AirLatentFactor", "RoundTo", "AreaDecimals", "ConvM3hPerLps", "PercentBase",
                      "WperkW"]),
     ("AHU totalisation", ["DuctLeakage", "FanPressure", "FanEfficiency", "OAShare", "OADrop", "PAHUOffT", "PAHUOffH"]),
     ("Pressure method", ["AirtightLimit", "TighterLimit", "FlowN", "FlowNLow", "FlowNHigh", "DoorCd", "RefPressure",

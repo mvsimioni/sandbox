@@ -5,10 +5,11 @@ Colour is never the only signal: every coded cell has a named style and a code l
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+import re
+from typing import Any, Dict, List, Optional
 
 from openpyxl.styles import Alignment, Border, Font, NamedStyle, PatternFill, Side
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.worksheet.hyperlink import Hyperlink
 
 FONT = "Arial"
@@ -139,15 +140,47 @@ def link_to(cell, sheet: str, target: str) -> None:
     cell.hyperlink = Hyperlink(ref=cell.coordinate, location=f"'{sheet}'!{target}", display=str(cell.value))
 
 
+PRINT_MIN_SCALE = 0.75     # body text 10 pt must print at no less than 7.5 pt
+A3_PRINTABLE_IN = 16.54 - 1.0   # A3 landscape width less 0.5 in margins
+
+
+def _col_inches(ws, last_col: int) -> List[float]:
+    """Approximate printed width of columns 1..last_col in inches (7 px per width unit + 5 px padding, 96 dpi);
+    hidden (collapsed) columns print nothing."""
+    out = []
+    for i in range(1, last_col + 1):
+        dim = ws.column_dimensions.get(get_column_letter(i))
+        if dim is not None and dim.hidden:
+            out.append(0.0)
+            continue
+        w = dim.width if dim is not None and dim.width else 8.43
+        out.append((7.0 * w + 5.0) / 96.0)
+    return out
+
+
+def print_pages_wide(ws, last_col: int, repeat_to: int) -> int:
+    """Smallest number of A3 pages across that keeps the print scale at or above PRINT_MIN_SCALE."""
+    widths = _col_inches(ws, last_col)
+    total = sum(widths)
+    rep = sum(widths[:repeat_to])
+    if total * PRINT_MIN_SCALE <= A3_PRINTABLE_IN:
+        return 1
+    n = 2
+    while n < 40 and n * (A3_PRINTABLE_IN - PRINT_MIN_SCALE * rep) < PRINT_MIN_SCALE * (total - rep):
+        n += 1
+    return n
+
+
 def setup_sheet(ws, title: str, *, rev: str, date: str, project: str, print_rows: Optional[str] = None,
                 last_col: int = 10, last_row: int = 50, tab_colour: Optional[str] = None,
                 freeze: Optional[str] = None, zoom: int = 90) -> None:
-    """Gridlines off, A3 landscape, fit to width, repeated header rows, footer, print area."""
+    """Gridlines off, A3 landscape, repeated header rows, footer, print area. A sheet wider than one A3 page at 75 %
+    prints across as many pages as it needs, with its label columns repeated, so that no column is cut and the text
+    stays legible (brief 8.5)."""
     ws.sheet_view.showGridLines = False
     ws.sheet_view.zoomScale = zoom
     ws.page_setup.paperSize = 8
     ws.page_setup.orientation = "landscape"
-    ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 0
     ws.sheet_properties.pageSetUpPr.fitToPage = True
     ws.print_options.horizontalCentered = False
@@ -156,7 +189,21 @@ def setup_sheet(ws, title: str, *, rev: str, date: str, project: str, print_rows
     ws.page_margins.bottom = 0.75
     if print_rows:
         ws.print_title_rows = print_rows
-    ws.print_area = f"A1:{get_column_letter(max(last_col, 1))}{max(last_row, 1)}"
+    last_col = max(last_col, 1)
+    ws.print_area = f"A1:{get_column_letter(last_col)}{max(last_row, 1)}"
+    repeat_to = 0
+    if freeze:
+        m = re.match(r"([A-Z]+)\d+$", freeze)
+        if m:
+            fc = column_index_from_string(m.group(1))
+            repeat_to = fc if fc > 1 else 0
+            widths = _col_inches(ws, last_col)
+            if repeat_to and sum(widths[:repeat_to]) > 0.3 * A3_PRINTABLE_IN:
+                repeat_to = 1
+    pages = print_pages_wide(ws, last_col, repeat_to)
+    ws.page_setup.fitToWidth = pages
+    if pages > 1 and repeat_to:
+        ws.print_title_cols = f"A:{get_column_letter(repeat_to)}"
     ws.oddFooter.left.text = f"{project}"
     ws.oddFooter.left.size = 8
     ws.oddFooter.center.text = "&A"

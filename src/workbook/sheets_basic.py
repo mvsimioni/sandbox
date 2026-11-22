@@ -197,6 +197,8 @@ def write_basis(ctx: Ctx) -> None:
         col = get_column_letter(col0 + j)
         put(ws, f"{col}4", nm, "Header")
         ws.column_dimensions[col].width = 18
+        ws.column_dimensions[col].outline_level = 1   # validation lists: grouped and collapsed, outside the print area
+        ws.column_dimensions[col].hidden = True
         for i, it in enumerate(items):
             put(ws, f"{col}{5 + i}", it, "Text")
         ctx.define(nm, f"'Basis of Design'!${col}$5:${col}${4 + len(items)}")
@@ -526,19 +528,19 @@ def write_readme(ctx: Ctx) -> None:
     r += 1
     for t in ("Airflow in L/s (m³/h on Pressure); pressure in Pa; power in kW (W in the engine); area m²; volume m³; temperature °C; "
               "enthalpy kJ/kg. ACH air changes per hour. AHU air handling unit; PAHU primary AHU; FCU fan coil unit; VAV variable air volume; "
-              "OA outdoor air; SOA schedule of accommodation; DPA departmental planning."):
+              "OA outdoor air; SOA schedule of accommodation; DPA departmental planning.",):
         put(ws, f"B{r}", t, "TextWrap")
         ws.merge_cells(f"B{r}:H{r}")
         ws.row_dimensions[r].height = 42
     r += 2
     put(ws, f"B{r}", "Revision", "Section")
     r += 1
-    for col, h in zip("BCDEFG", ("Rev", "Description", "Date", "By", "Chk'd", "App'd")):
+    for col, h in zip("BCDEFG", ("Rev", "Date", "Description", "By", "Chk'd", "App'd")):
         put(ws, f"{col}{r}", h, "HeaderLeft")
     r += 1
     rev = d.get("project", {}).get("revision", {})
     for rv in d.get("revisions", [rev]):
-        for col, k in zip("BCDEFG", ("rev", "description", "date", "by", "checked", "approved")):
+        for col, k in zip("BCDEFG", ("rev", "date", "description", "by", "checked", "approved")):
             put(ws, f"{col}{r}", rv.get(k), "Text")
         r += 1
     setup_sheet(ws, "README", rev=ctx.rev, date=ctx.date, project=ctx.project, print_rows="1:2", last_col=8, last_row=r, tab_colour="FF1F4E79")

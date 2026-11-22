@@ -98,6 +98,8 @@ workbook:
   common_areas_file: AIGH_C2_D00_Common_Areas_Thermal_Load_Calc_RevA.xlsx
   master_summary: AHU_master_summary.xlsx
   print: {paper: A3, orientation: landscape}
+  # Revision block of every department workbook (README By, Chk'd, App'd; file author). Left blank until given: never invented.
+  people: {author: "", checked_by: "", approved_by: ""}
   banned_functions: [XLOOKUP, FILTER, UNIQUE, SORT, SEQUENCE]
 
 zoning:

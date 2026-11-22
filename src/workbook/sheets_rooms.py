@@ -100,8 +100,8 @@ def write_room_information(ctx: Ctx) -> None:
         soa, meas, sel = g("soa"), g("meas"), g("sel")
         agree = (f'=IF(OR({soa}="",{meas}=""),"",IF(OR(ABS({soa}-{meas})<=AreaTolM2,ABS({soa}-{meas})<=AreaTolPct*{soa}),'
                  f'"YES","NO"))')
-        area = (f'=IF({sel}="SOA",{soa},IF({sel}="MEASURED",{meas},IF({sel}="LARGER",MAX({soa},{meas}),'
-                f'IF({meas}="",{soa},IF({soa}="",{meas},IF({g("agree")}="YES",{soa},{meas}))))))')
+        area = (f'=ROUND(IF({sel}="SOA",{soa},IF({sel}="MEASURED",{meas},IF({sel}="LARGER",MAX({soa},{meas}),'
+                f'IF({meas}="",{soa},IF({soa}="",{meas},IF({g("agree")}="YES",{soa},{meas})))))),AreaDecimals)')
         for k, f, st, fmt in (("area", area, "Calc", "d1"),
                               ("diff", f'=IF(AND({soa}<>"",{meas}<>"",{soa}<>0),({soa}-{meas})/{soa},"")', "Calc", "pct1"),
                               ("agree", agree, "Calc", None),
@@ -423,4 +423,4 @@ def write_airflow(ctx: Ctx) -> None:
     group_cols(ws, L, "in1", f"lst{OA_ROUNDS}")
     group_cols(ws, L, "cmark0", "fcurank")
     group_cols(ws, L, "single", "single")
-    _setup(ws, ctx, L, L.idx["ok"], last, "4:6", f"{L.col('name')}{L.first}", "FF00B050")
+    _setup(ws, ctx, L, L.idx["fcurank"], last, "4:6", f"{L.col('name')}{L.first}", "FF00B050")

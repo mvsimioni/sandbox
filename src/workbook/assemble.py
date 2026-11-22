@@ -100,6 +100,17 @@ def _first(row: Dict[str, str], cols: Tuple[str, ...]) -> str:
     return ""
 
 
+def _people(root: Path) -> Dict[str, str]:
+    """Author, checker and approver from config/project.yaml (workbook.people); blank when not given, never invented."""
+    import yaml
+    try:
+        cfg = yaml.safe_load((root / "config" / "project.yaml").read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        cfg = {}
+    p = (cfg.get("workbook") or {}).get("people") or {}
+    return dict(by=str(p.get("author") or ""), checked=str(p.get("checked_by") or ""), approved=str(p.get("approved_by") or ""))
+
+
 def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path(".")) -> Dict[str, Any]:
     key = _dept_key(dept)
     soa = [r for r in _read(root / REG / "soa_rooms.csv") if r["dept_no"] == key and r.get("governing", "").lower() == "yes"]
@@ -112,6 +123,7 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
     zones = load_zone_assignments(root)
     sched_rooms = _read(root / REG / "schematic_rooms.csv")
     sched_equip = _read(root / REG / "schematic_equipment.csv")
+    people = _people(root)
     base = build_reva_input(root)  # the project default design basis, read from the Rev A workbook
 
     sources: List[Dict[str, Any]] = [s for s in base["sources"] if s["id"] in ("RA-RZ-TBL", "RA-BOD-C19", "RA-BOD-C28", "RA-BOD-C30", "RA-BOD-C31",
@@ -261,13 +273,15 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
     flags.append(dict(type="CONFIRM", ref="Envelope", text="Envelope rows not yet assigned (Section 8.4 pending): every room is treated as internal, with no glazing, wall or roof gain.", source="ASM-DEFAULT"))
     flags.append(dict(type="CONFIRM", ref="Room Information", text="Ceiling height, occupancy, lighting, small power, equipment and operation time are blank: no document read yet; occupancy fallback and space-type defaults need Marcus's approval.", source="ASM-DEFAULT"))
     flags.append(dict(type="VERIFY", ref="VAV", text="Terminal types (VAV, CAV, venturi) are not yet read from the air-side schematics and specifications; no room is given a terminal.", source="ASM-DEFAULT"))
+    if not all(people.values()):
+        flags.append(dict(type="CONFIRM", ref="README", text="Author, checker and approver of the revision block are not given in config/project.yaml (workbook.people); left blank.", source="ASM-DEFAULT"))
     storeys = sorted({r["storey"] for r in rooms})
     sp = list(base["space_types"]) + [dict(name=UNCLASSIFIED, room_t_c=base["space_types"][0]["room_t_c"], room_h_kjkg=base["space_types"][0]["room_h_kjkg"],
                                            code="A", source="ASM-DEFAULT")]
     data = dict(base)
     data.update(
         department=dict(number=key, name=re.sub(r"^\d+\s*-\s*", "", dept_name)),
-        project=dict(base["project"], revision=dict(rev="A", date=base["project"]["revision"]["date"], description="Generated from the registers", by="", checked="", approved="")),
+        project=dict(base["project"], revision=dict(rev="A", date=base["project"]["revision"]["date"], description="Generated from the registers", **people)),
         scope=f"Thermal load, airflow, outdoor air and pressure workbook for {dept_name}, assembled from the registers; unmatched rooms are listed on Flags.",
         storeys=storeys, storey_labels={s: _storey_label(s) for s in storeys}, space_types=sp, sources=sources, rooms=rooms,
         ahus=list(ahus.values()), flags=flags, references=[], documents=[d for d in base["documents"][:1]],

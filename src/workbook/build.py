@@ -138,7 +138,7 @@ def build_workbook(data: Union[Dict[str, Any], Path, str], out: Optional[Path] =
     SB.write_readme(ctx)
     SB.write_flags(ctx, rows)
     SB.write_basis_tail(ctx)
-    wb.properties.creator = "Beca Building Services"
+    wb.properties.creator = str((data.get("project", {}).get("revision") or {}).get("by") or "")
     wb.properties.title = f"{ctx.project}: {data['department'].get('name', '')} thermal load calculation"
     if out is not None:
         Path(out).parent.mkdir(parents=True, exist_ok=True)

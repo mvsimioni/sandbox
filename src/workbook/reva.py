@@ -170,7 +170,7 @@ def build_reva_input(root: Path = Path(".")) -> Dict[str, Any]:
     return {
         "schema_version": 1,
         "project": dict(name="AIGH redevelopment, Contract 2 (Inpatient), ACMV", code="AIGH_C2",
-                        revision=dict(rev="A", date="2026-10-01", description="Rev A example reproduced by the generator", by="Beca", checked="", approved="")),
+                        revision=dict(rev="A", date="2026-10-01", description="Rev A example reproduced by the generator", by="Beca Building Services", checked="", approved="")),
         "department": dict(number="L1-OPP", name="Level 1 Outpatient Pharmacy AHU (Rev A example)"),
         "scope": "Reproduction of the Rev A worked example (451.5 m2, 2,760 L/s room supply) by the workbook generator, with inputs read from the Rev A workbook.",
         "storeys": ["L01"], "storey_labels": {"L01": "Level 1"},
