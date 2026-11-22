@@ -148,3 +148,10 @@ circulation_default_criteria:
   temp_c: [23, 25]
   source: "modal of 45 corridor/circulation/lobby rows in out/registers/criteria.csv"
   status: ASSUMPTION
+
+# D-012 (Marcus, 22 Nov 2026): schedule and schematic airflows are oversized; comparison only.
+airflow_comparison:
+  schedule_and_schematic_role: information_only   # never a target or cap
+  calc_below_reference: report_reduction          # not a failure
+  calc_above_reference: flag_VERIFY
+  attribute_reduction_to: [area_basis, criteria_ach_or_thermal, duct_leakage_10_vs_15, oa_rule]
