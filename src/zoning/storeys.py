@@ -152,10 +152,57 @@ def stage_calibrate(ctx: dict) -> dict:
     return out
 
 
+def strip_dimension_strokes(ss: lw.StrokeSet) -> Tuple[lw.StrokeSet, dict]:
+    """Remove the dimension strings from a stroke set: dimension lines and extension stubs are not walls.
+
+    A dimension string is recognised by its oblique ticks: two 0.6 pt black segments of 1.8 to 3.4 pt at +-45 deg that leave one node in opposite
+    directions.  Removed: the tick segments, every fine-pen black segment (0.24, 0.36, 0.48 pt) longer than 6.5 pt with both ends on tick nodes
+    (the dimension line) and every fine-pen segment of at most 10 pt with one end on a tick node (extension stub).  Walls are heavy pens and are
+    never touched.  (Both the dimension line and its extension lines closed room polygons on the first run: B3 Hydrant Tank 2, L05 FLL.)
+    """
+    from scipy.spatial import cKDTree
+    seg = ss.seg
+    n = len(seg)
+    ln = np.hypot(seg[:, 2] - seg[:, 0], seg[:, 3] - seg[:, 1])
+    ang = np.degrees(np.arctan2(seg[:, 3] - seg[:, 1], seg[:, 2] - seg[:, 0]))
+    diag = ss.select((0.6,)) & (ln >= 1.8) & (ln <= 3.4) & (np.abs((np.abs(ang) % 90.0) - 45.0) < 4.0) & (~ss.curve)
+    pts, vec, own = [], [], []
+    for i in np.where(diag)[0]:
+        a, b = seg[i, :2], seg[i, 2:]
+        u = (b - a) / ln[i]
+        pts += [a, b]; vec += [u, -u]; own += [i, i]
+    empty = {"n_tick_nodes": 0, "n_tick_segments": 0, "n_dimension_lines": 0, "n_extension_stubs": 0, "n_removed": 0}
+    if not pts:
+        return ss, empty
+    pts, vec, own = np.asarray(pts), np.asarray(vec), np.asarray(own)
+    node_ends = set()
+    for i, j in cKDTree(pts).query_pairs(0.15):
+        if own[i] != own[j] and float(vec[i] @ vec[j]) < -0.95:
+            node_ends.update((i, j))
+    if not node_ends:
+        return ss, empty
+    node_ends = sorted(node_ends)
+    node_tree = cKDTree(pts[node_ends])
+    remove = np.zeros(n, bool)
+    tick_segs = sorted({int(own[k]) for k in node_ends})
+    remove[tick_segs] = True
+    ti = np.where(ss.select((0.24, 0.36, 0.48)) & (~ss.curve))[0]
+    on0 = node_tree.query(seg[ti, :2])[0] <= 0.2
+    on1 = node_tree.query(seg[ti, 2:])[0] <= 0.2
+    dim_line = ti[on0 & on1 & (ln[ti] > 6.5)]
+    stub = ti[(on0 ^ on1) & (ln[ti] <= 10.0)]
+    remove[dim_line] = True
+    remove[stub] = True
+    keep = ~remove
+    return (lw.StrokeSet(seg[keep], ss.style[keep], ss.styles, ss.curve[keep], ss.fills),
+            {"n_tick_nodes": len(node_ends) // 2, "n_tick_segments": len(tick_segs), "n_dimension_lines": int(len(dim_line)),
+             "n_extension_stubs": int(len(stub)), "n_removed": int(remove.sum())})
+
+
 def stage_vector(ctx: dict) -> dict:
     P = ctx["P"]
     bg = _open(P["root"], BG_PDF, ctx["info"]["page0"])
-    ss = lw.extract_strokes(bg)
+    ss, dim_diag = strip_dimension_strokes(lw.extract_strokes(bg))
     cb: cal.Calibration = ctx["calibrate"]["cal_bg"]
     k2 = cb.area_scale_mm2_per_pt2() / 1e6
     tags = ctx["tags"]
@@ -167,6 +214,7 @@ def stage_vector(ctx: dict) -> dict:
     vec.diagnostics["stroke_classes"] = classes
     vec.diagnostics["n_strokes_total"] = int(len(ss.seg))
     vec.diagnostics["plan_box_pv"] = plan_box
+    vec.diagnostics["dimension_strip"] = dim_diag
     return {"vec": vec}
 
 
