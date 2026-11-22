@@ -49,7 +49,7 @@ from . import zones as zn
 BG_PDF = "data/source/Basis/Arch Combined Tender .pdf"
 SAMPLE_PDF = "data/source/Template/AHU Zoning - RFI-ME-0233.pdf"
 APPD_PDF = "data/source/Basis/App D/Appendix D - ACMV For Common Areas_Combined.pdf"
-ALL_STOREYS = ["LB3", "B3", "B2", "B1", "L01", "L02", "L03", "L04", "L05", "L06"]
+ALL_STOREYS = ["LB3", "B3", "B2", "B1", "L01", "L02", "L03", "L04", "L05", "L06", "L07"]   # L07 added (D-010)
 SAMPLE_STOREY = "L04"            # the RFI-ME-0233 sample is the 4th storey only
 CONVENTION = "wall_face"         # boundary convention of the adopted polygon (the pilot adopted it on L04; one rule for all storeys)
 STAGES = ["calibrate", "vector", "raster", "compare", "assign", "pdf", "report"]
@@ -64,7 +64,7 @@ POLY_FIELDS = ["room_id", "storey", "room_tag", "room_number", "room_name", "mod
                "centroid_x_mm", "centroid_y_mm", "centroid_inside_polygon", "label_point_x_mm", "label_point_y_mm", "grid_location_label_point",
                "appd_caption_m2", "appd_annotation_index", "appd_overlap_room", "appd_overlap_polygon", "error_vs_caption_pct",
                "error_b_vs_caption_pct", "appd_class_tag", "appd_class_kind", "appd_class_confidence", "appd_class_basis",
-               "area_printed_m2", "region_kind", "region_area_m2", "a_first_closure_m2", "w_only_region_m2", "boundary_basis", "boundary_check", "mode_source", "flags", "source_file", "source_page", "tag_box_pv", "tag_method", "measurement_confidence", "method", "coord_frame"]
+               "area_printed_m2", "region_kind", "region_area_m2", "a_first_closure_m2", "w_only_region_m2", "boundary_basis", "boundary_check", "fine_pen_boundary_share", "mode_source", "flags", "source_file", "source_page", "tag_box_pv", "tag_method", "measurement_confidence", "method", "coord_frame"]
 ASSIGN_FIELDS = ["room_id", "storey", "room_tag", "room_name", "mode_label", "class", "class_kind", "confidence", "area_m2",
                  "department", "sources", "method", "notes"]
 FRAME_TEXT = ("polygon_pv_wkt: page view (raw*page.rotation_matrix), pt, origin top-left, y down; polygon_building_mm_wkt: building mm, origin grid 2 / A, "
@@ -511,6 +511,17 @@ def assemble_rooms(ctx: dict) -> List[dict]:
             continue
         like = [f for f, ok in zip(v.faces, rv._room_like(v.faces, k2)) if ok]
         ctxs[src] = (v, like, STRtree(like))
+    wall_tree = STRtree(rv.segments_to_lines(vec.wall_segments))
+    band_tree = STRtree(list(vec.wall_bands)) if vec.wall_bands else None
+
+    def fine_pen_share(poly: Polygon) -> float:
+        """Share of the polygon boundary that is not within 0.6 pt of a heavy wall stroke or a black wall band (so it rests on fine-pen lines only)."""
+        sp = shapely.points(rv._boundary_samples(poly))
+        near = np.zeros(len(sp), bool)
+        near[np.unique(wall_tree.query(sp, predicate="dwithin", distance=0.6)[0])] = True
+        if band_tree is not None:
+            near[np.unique(band_tree.query(sp, predicate="dwithin", distance=0.6)[0])] = True
+        return float(1.0 - near.mean())
     entries = region_entries(vr)
     cent = {e: (ctxs[e[0]][0].regions[e[1]].polygon.centroid.y, ctxs[e[0]][0].regions[e[1]].polygon.centroid.x) for e in entries}
     entries.sort(key=lambda e: (round(cent[e][0] / 60.0), cent[e][1]))
@@ -575,7 +586,7 @@ def assemble_rooms(ctx: dict) -> List[dict]:
         rooms.append({"room_id": "%s-R%03d" % (key, n), "tag": tg[0]["text"], "name": tg[0]["name"], "mode": tg[0]["mode"], "number": tg[0].get("number", ""),
                       "tag_row": tg[0], "tags_inside": [t["text"] for t in tg], "modes_inside": [t["mode"] for t in tg], "tag_rows": tg,
                       "a_face": face, "a_cl": a_cl, "b_face": b_face, "b_cl": b_cl, "a_first": first, "boundary_basis": basis, "boundary_check": check,
-                      "w_only_area_m2": w_area, "leaked": leaked, "pass": src,
+                      "w_only_area_m2": w_area, "leaked": leaked, "pass": src, "fine_pen_share": round(fine_pen_share(face), 3),
                       "b_face_area_m2": b_area, "flags": "; ".join(flags), "vec_index": i, "gap_pt": float(v.wall_gaps_pt[i])})
     return rooms
 
@@ -675,6 +686,7 @@ def stage_compare(ctx: dict) -> dict:
         r["w_only_region_m2"] = "" if room["w_only_area_m2"] is None else round(room["w_only_area_m2"], 3)
         r["boundary_basis"] = room["boundary_basis"]
         r["boundary_check"] = room["boundary_check"]
+        r["fine_pen_boundary_share"] = room["fine_pen_share"]
         r["source_file"] = BG_PDF
         r["source_page"] = info["page"]
         r["tag_box_pv"] = tag.get("box_pv", "")
@@ -693,6 +705,9 @@ def stage_compare(ctx: dict) -> dict:
             rev(rid, r["room_tag"], "no B region", r["flags"])
         if room["boundary_basis"].startswith("heavy"):
             rev(rid, r["room_tag"], "boundary re-derived from heavy walls", r["flags"])
+        if agree == "agree" and room["fine_pen_share"] >= 0.4 and float(r["a_area_m2"]) >= 10.0 and room["boundary_check"].startswith("fine-pen"):
+            rev(rid, r["room_tag"], "A and B agree but the boundary rests mostly on fine-pen lines",
+                "%.0f %% of the perimeter is not within 0.6 pt of a heavy wall; both methods treat fine-pen lines (finish, annotation, screen lines) as boundaries: check on the drawing" % (100 * room["fine_pen_share"]))
         if room["boundary_check"].startswith("UNRESOLVED"):
             rev(rid, r["room_tag"], "boundary unresolved: fine-pen line(s) close the polygon", room["boundary_check"])
         if len(room["tags_inside"]) > 1:
@@ -1074,7 +1089,7 @@ def regression_l04() -> dict:
     if not old:
         return {"ok": None, "note": "pilot copy missing"}
     comp_p = storey_paths("L04")["out"] / "compat" / "registers" / "room_polygons_L04.csv"
-    cm = _read_polys(comp_p)
+    cm = {k: r for k, r in _read_polys(comp_p).items() if r["polygon_pv_wkt"]}      # rows of tags without a polygon are not rooms in the pilot either
     if cm:
         only_old, only_new = sorted(set(old) - set(cm)), sorted(set(cm) - set(old))
         diffs = []
@@ -1089,13 +1104,17 @@ def regression_l04() -> dict:
         out["compat"] = {"ok": None, "note": "compat run missing (run stages with --compat-l04)"}
     new = _read_polys(P["registers"] / "room_polygons_L04.csv")
     if new:
-        npoly = {k: shapely.from_wkt(r["polygon_pv_wkt"]) for k, r in new.items() if r["polygon_pv_wkt"]}
+        pilot_wkt = {r["room_id"]: r["wall_face_wkt_mm"] for r in common.read_csv_dicts(P["zoning"] / "pilot" / "room_polygons_L04_wkt_pilot.csv")}
+        pilot_mm = {k: shapely.from_wkt(pilot_wkt[k]) for k in old if pilot_wkt.get(k)}
+        npoly = {k: shapely.from_wkt(r["polygon_building_mm_wkt"]) for k, r in new.items() if r["polygon_building_mm_wkt"]}
         ids = list(npoly)
         tree = STRtree([npoly[i] for i in ids])
         changed, unmeasured, matched, same = [], [], 0, 0
         used = set()
         for k, r in old.items():
-            po = shapely.from_wkt(r["polygon_pv_wkt"])
+            if k not in pilot_mm:
+                continue
+            po = pilot_mm[k]
             best, bi = 0.0, None
             for j in tree.query(po, predicate="intersects"):
                 q = npoly[ids[j]]
