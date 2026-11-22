@@ -711,8 +711,9 @@ def assign_governing(results: List[Dict[str, Any]]) -> None:
             pm = r["pm"]
             return (STAGE_RANK.get(pm["issue_folder"], 1), pm["issue_date"] or "00000000", 0 if pm["is_working"] else 1, 1 if r["format"] == "pdf" else 0)
         lst.sort(key=sk)
-        for r in lst:
+        for i, r in enumerate(lst):
             r["group"] = key
+            r["issue_order"] = i
         top = lst[-1]
         if len(lst) == 1:
             top["governing"], top["governing_basis"] = "yes", "only issue on disk"
@@ -798,6 +799,8 @@ def issue_differences(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if r.get("group"):
             groups[r["group"]].append(r)
     out: List[Dict[str, Any]] = []
+    for lst in groups.values():
+        lst.sort(key=lambda r: r.get("issue_order", 0))
     for key, lst in sorted(groups.items()):
         if len(lst) < 2:
             continue

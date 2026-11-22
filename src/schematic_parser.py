@@ -343,14 +343,21 @@ def _vertical_runs(sh: Sheet):
     return runs
 
 
-def room_outline(runs, t: RoomTable):
+def room_outline(runs, t: RoomTable, hsegs=None):
     """Left and right walls of the room box that holds the table (None if absent)."""
     top, bot = t.box[1], t.box[3]
     left = [r for r in runs if abs(r[0] - t.left) < 2 and r[1] <= top - 30 and r[2] >= bot - 3]
     if not left:
         return None
     ytop = max(r[1] for r in left)
-    if ytop < top - 220:
+    if ytop < top - 130 and hsegs is not None:
+        # the left wall is merged with the department frame: use the horizontal top line across the table
+        ys = [sg["y0"] for sg in hsegs if min(sg["x0"], sg["x1"]) <= t.left + 2 and max(sg["x0"], sg["x1"]) >= t.right - 2
+              and top - 130 <= sg["y0"] <= top - 30]
+        if not ys:
+            return None
+        ytop = max(ys)
+    elif ytop < top - 220:
         return None
     rights = sorted([r for r in runs if r[0] > t.right - 2 and r[1] <= ytop + 3 and r[2] >= bot - 3], key=lambda r: r[0])
     if not rights:
@@ -362,9 +369,10 @@ def attach_names(sh: Sheet, tables: List[RoomTable]) -> None:
     """Room name, typical count and branch-arrow lines above each table."""
     hl = [l for l in sh.lines if abs(l["dir"][0] - 1) < 0.01]
     runs = _vertical_runs(sh)
+    hsegs = [sg for sg in sh.segs if sg["col"] == BLACK and _ish(sg)]
     for t in tables:
         top = t.box[1]
-        t.outline = room_outline(runs, t)
+        t.outline = room_outline(runs, t, hsegs)
         if t.outline:
             x0, x1 = t.outline[0] - 2, t.outline[2] + 2
         else:
@@ -528,3 +536,399 @@ def title_for(titles: List[dict], box) -> Optional[dict]:
         if sc < bs:
             best, bs = t, sc
     return best
+
+
+# --------------------------------------------------------------------------- #
+# duct graph and associations
+# --------------------------------------------------------------------------- #
+def _dist_pt_box(px, py, b):
+    dx = max(b[0] - px, 0, px - b[2])
+    dy = max(b[1] - py, 0, py - b[3])
+    return math.hypot(dx, dy)
+
+
+def _dist_comp_box(c, b):
+    best = 1e9
+    for s in c["segs"]:
+        for (px, py) in ((s["x0"], s["y0"]), (s["x1"], s["y1"])):
+            best = min(best, _dist_pt_box(px, py, b))
+    return best
+
+
+def build_components(sh: Sheet, tol: float = 20.0) -> Dict[str, List[dict]]:
+    """Same-colour duct components; short risers that stop at a damper or VAV
+    symbol are linked to the header drawn above them (gap <= 110 pt)."""
+    out = {}
+    for svc in ("SA", "RA", "EA", "IEA", "SPILL", "OA"):
+        comps = service_components(sh, svc, tol)
+        def _is_big(c):
+            xs_ = [v for sg in c["segs"] for v in (sg["x0"], sg["x1"])]
+            return len(c["segs"]) >= 14 or (max(xs_) - min(xs_)) >= 150
+        big = [c for c in comps if _is_big(c)]
+        parent = list(range(len(comps)))
+        idx = {id(c): i for i, c in enumerate(comps)}
+
+        def find(a):
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+        for c in comps:
+            if _is_big(c):
+                continue
+            bx = c["bbox"]
+            if bx[3] - bx[1] > 160 or bx[2] - bx[0] > 120:
+                continue
+            xc = (bx[0] + bx[2]) / 2
+            best, bg = None, 1e9
+            for h in big:
+                if not (h["bbox"][0] - 3 <= xc <= h["bbox"][2] + 3):
+                    continue
+                for s in h["segs"]:
+                    if _ish(s):
+                        gap = bx[1] - s["y0"]
+                        if -3 <= gap <= 110 and gap < bg:
+                            best, bg = h, gap
+            if best is not None:
+                parent[find(idx[id(c)])] = find(idx[id(best)])
+        # collinear continuation across damper/VAV symbols: vertical pieces at the same x,
+        # one ending <= 60 pt above where the next begins
+        vends = []
+        for c in comps:
+            for sg in c["segs"]:
+                if _isv(sg):
+                    vends.append((round(sg["x0"], 1), min(sg["y0"], sg["y1"]), max(sg["y0"], sg["y1"]), idx[id(c)]))
+        vends.sort()
+        for i1 in range(len(vends)):
+            xa, ya0, ya1, ca = vends[i1]
+            for i2 in range(i1 + 1, len(vends)):
+                xb, yb0, yb1, cb = vends[i2]
+                if xb - xa > 4:
+                    break
+                if ca == cb or find(ca) == find(cb):
+                    continue
+                gap = max(ya0 - yb1, yb0 - ya1)
+                if -1 <= gap <= 60:
+                    parent[find(ca)] = find(cb)
+        merged = collections.defaultdict(list)
+        for c in comps:
+            merged[find(idx[id(c)])].extend(c["segs"])
+        res = []
+        for segs in merged.values():
+            xs = [v for s in segs for v in (s["x0"], s["x1"])]
+            ys = [v for s in segs for v in (s["y0"], s["y1"])]
+            res.append({"svc": svc, "segs": segs, "bbox": (min(xs), min(ys), max(xs), max(ys))})
+        out[svc] = res
+    return out
+
+
+def riser_component(comps: List[dict], x0: float, x1: float, ytop: float):
+    """Component of one service whose vertical stroke crosses the room-box top edge."""
+    best, bn = None, 0
+    for c in comps:
+        n = 0
+        for s in c["segs"]:
+            if _isv(s) and x0 - 3 <= s["x0"] <= x1 + 3 and min(s["y0"], s["y1"]) <= ytop + 6 and max(s["y0"], s["y1"]) >= ytop - 25:
+                n += 1
+        if n > bn:
+            best, bn = c, n
+    return best
+
+
+# --------------------------------------------------------------------------- #
+# value parsing
+# --------------------------------------------------------------------------- #
+AIRFLOW_LINE = re.compile(r"^\s*(SA|RA|EA|EX|OA|IEA)\s*[:\-]?\s*([\d,]+(?:\.\d+)?)?\s*(?:L\s*/\s*S|l/s|LPS)?\s*$", re.I)
+
+
+def parse_airflow(lines: List[dict]) -> dict:
+    """Split an AIRFLOW cell into supply / return / exhaust / OA with as-printed text."""
+    res = {"supply": None, "return": None, "exhaust": None, "oa_text": None, "as_printed": [], "boxes": {}, "other": []}
+    for l in lines:
+        t = l["text"].strip()
+        res["as_printed"].append(t)
+        m = AIRFLOW_LINE.match(t)
+        box = [l["x0"], l["y0"], l["x1"], l["y1"]]
+        if not m:
+            if re.match(r"^\s*OA\b", t, re.I) or re.search(r"\bACH\b", t, re.I):
+                res["oa_text"] = t
+                res["boxes"]["oa"] = box
+            else:
+                res["other"].append(t)
+            continue
+        key, val = m.group(1).upper(), m.group(2)
+        v = float(val.replace(",", "")) if val else None
+        if key == "SA":
+            res["supply"], res["boxes"]["supply"] = v, box
+        elif key == "RA":
+            res["return"], res["boxes"]["return"] = v, box
+        elif key in ("EA", "EX"):
+            res["exhaust"], res["boxes"]["exhaust"] = v, box
+        elif key == "OA":
+            res["oa_text"] = t
+            res["boxes"]["oa"] = box
+    return res
+
+
+def _num(v):
+    if v is None:
+        return ""
+    return int(v) if float(v).is_integer() else v
+
+
+def _join(lines):
+    return " ".join(l["text"].strip() for l in lines)
+
+
+def _mode_is_norm(name: str) -> bool:
+    n = (name or "").upper().replace(" ", "")
+    return n in ("NORM", "NORMAL", "NORM(R)", "")
+
+
+# --------------------------------------------------------------------------- #
+# title block and sheet-level facts
+# --------------------------------------------------------------------------- #
+def title_block(sh: Sheet) -> dict:
+    """Drawing number, revision, date, stage and title from the right-hand title block."""
+    tb = [l for l in sh.lines if l["x0"] > 3040 and abs(l["dir"][0] - 1) < 0.01]
+    out = {}
+
+    def below(label, dx=30, dy=40):
+        cands = [l for l in tb if _norm(l["text"]).upper() == label]
+        if not cands:
+            return None
+        lab = max(cands, key=lambda l: l["y0"])
+        vals = [l for l in tb if 0 < l["y0"] - lab["y0"] <= dy and abs(l["x0"] - lab["x0"]) <= dx and _norm(l["text"]).upper() != label
+                and l["size"] >= 11]
+        vals.sort(key=lambda l: l["y0"])
+        return vals[0] if vals else None
+    for key, label in (("drawing_no", "DRAWING NO."), ("rev", "REV."), ("date", "DATE"), ("stage", "STAGE"),
+                       ("scale", "SCALE"), ("job_no", "JOB NO.")):
+        v = below(label)
+        out[key] = _norm(v["text"]) if v else None
+        out[key + "_box"] = [round(v["x0"], 1), round(v["y0"], 1), round(v["x1"], 1), round(v["y1"], 1)] if v else None
+    # drawing title lines (size 16)
+    tl = sorted([l for l in tb if 15.5 <= l["size"] <= 16.5 and l["y0"] > 1850], key=lambda l: l["y0"])
+    tl = [l for l in tl if not re.fullmatch(r"\d+[A-Z]?", _norm(l["text"]))]
+    out["drawing_title"] = " ".join(_norm(l["text"]) for l in tl) if tl else None
+    stamps = [_norm(l["text"]) for l in sh.lines if re.search(r"CORRIGENDUM \d|WORKING DRAWING|CONTRACT DRAWING|TENDER", l["text"], re.I) and l["size"] >= 12]
+    out["stamps"] = sorted(set(stamps))
+    # revision table (right-hand column): date / rev / description rows
+    rows = []
+    desc = [l for l in tb if re.search(r"FOR (NSC )?TENDER|FOR WORKING|CORRIGENDUM|FOR CONSTRUCTION|FOR TENDER", l["text"], re.I) and l["size"] < 9 and l["y0"] < 700]
+    for d in sorted(desc, key=lambda l: l["y0"]):
+        cells = [l for l in tb if abs(_lc(l)[1] - _lc(d)[1]) < 3.5 and l is not d and l["size"] < 9]
+        cells.sort(key=lambda l: l["x0"])
+        rows.append([_norm(c["text"]) for c in cells] + [_norm(d["text"])])
+    out["revisions"] = rows
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# per-sheet model
+# --------------------------------------------------------------------------- #
+def _tag_stem(tag: str) -> str:
+    """Tag without type prefix and without the trailing A/B unit letter."""
+    t = re.sub(r"^[A-Z]+-", "", tag)
+    t = re.sub(r"(/[A-Z0-9]+)+$", "", t)
+    t = re.sub(r"(?<=\d)[A-Z]$", "", t)
+    return t
+
+
+def _stem(tag: str) -> str:
+    # 'AHU-B-02-01EDP3WAIT-01A' -> 'B-02-01EDP3WAIT-01'; 'RAF-...-05/A' -> '...-05'
+    t = re.sub(r"^[A-Z]+-", "", tag)
+    t = re.sub(r"/[A-Z0-9/]+$", "", t)
+    t = re.sub(r"(?<=\d)[A-Z]$", "", t)
+    return t
+
+
+def _connect_texts(sh: Sheet) -> List[dict]:
+    """Size-10 note lines that mention a tag or a connection (joined when they wrap)."""
+    hl = sorted([l for l in sh.lines if abs(l["dir"][0] - 1) < 0.01 and l["x1"] < 3040 and l["size"] < 11.5 and l["y0"] < 2260],
+                key=lambda l: (round(l["x0"] / 4), l["y0"]))
+    notes = []
+    key = re.compile(r"CONNECTED (TO|FROM)|MAKE-UP|OUTDOOR AIR FROM|PAHU|BIBO|SPILL AIR|REFER TO|OA MAKE", re.I)
+    taken = set()
+    for i, l in enumerate(sorted(hl, key=lambda l: (l["y0"], l["x0"]))):
+        pass
+    srt = sorted(hl, key=lambda l: (l["y0"], l["x0"]))
+    for i, l in enumerate(srt):
+        if i in taken or not key.search(l["text"]):
+            continue
+        parts = [l]
+        cur = l
+        for j in range(len(srt)):
+            n = srt[j]
+            if j in taken or n is cur or n in parts:
+                continue
+            if 0 < n["y0"] - cur["y0"] <= 16 and abs(n["x0"] - cur["x0"]) <= 40 and not re.match(r"^(VCD|VAV|NRD|FD|M|A|SA|RA|EA|OA)\s*$", n["text"].strip()) \
+                    and not re.search(r"L/s\s*$", cur["text"].strip(), re.I) and not re.match(r"^\s*(SA|RA|EA|OA|IEA)\b", n["text"]):
+                parts.append(n)
+                cur = n
+        txt = _norm(" ".join(p["text"] for p in parts))
+        box = [min(p["x0"] for p in parts), min(p["y0"] for p in parts), max(p["x1"] for p in parts), max(p["y1"] for p in parts)]
+        notes.append({"text": txt, "box": box})
+    # drop notes that are subsets of others
+    uniq = []
+    for n in notes:
+        if not any(n is not m and n["text"] in m["text"] and len(m["text"]) > len(n["text"]) for m in notes):
+            uniq.append(n)
+    return uniq
+
+
+def _free_flow_labels(sh: Sheet, tables: List[RoomTable]) -> List[dict]:
+    out = []
+    for l in sh.lines:
+        t = _norm(l["text"])
+        m = re.match(r"^(OA|IEA|SPILL AIR|SA|RA|EA)\s*-?\s*([\d,]*)\s*L\s*/\s*[sS]$", t)
+        if not m or abs(l["dir"][0] - 1) > 0.01 and abs(l["dir"][1]) < 0.9:
+            continue
+        cx, cy = _lc(l)
+        if any(tb.left - 1 <= cx <= tb.right + 1 and tb.box[1] - 1 <= cy <= tb.box[3] + 1 for tb in tables):
+            continue
+        if l["x0"] > 3040:
+            continue
+        out.append({"text": t, "kind": m.group(1), "value": float(m.group(2).replace(",", "")) if m.group(2) else None,
+                    "box": [l["x0"], l["y0"], l["x1"], l["y1"]], "vertical": abs(l["dir"][0]) < 0.5})
+    return out
+
+
+FAN_TYPES_RA = ("RAF",)
+FAN_TYPES_EA = ("TEAF", "EAF", "TEF", "OAF", "SAF")
+
+
+def parse_sheet(path: str, info: dict) -> dict:
+    """Parse one schematic PDF into rooms, equipment, connections and AHU groups."""
+    sh = Sheet(path)
+    res = {"info": info, "warnings": list(), "rooms": [], "equipment": [], "connections": [], "groups": [],
+           "pages": sh.pages, "sha256": sh.sha256, "path": path}
+    if sh.pages != 1:
+        res["warnings"].append("PDF has %d pages; only page 1 read" % sh.pages)
+    tb = title_block(sh)
+    res["title_block"] = tb
+    tables = find_room_tables(sh)
+    attach_names(sh, tables)
+    res["warnings"].extend(sh.table_warnings)
+    eq = extract_equipment(sh)
+    levels = extract_levels(sh)
+    titles = extract_titles(sh)
+    comps = build_components(sh)
+    notes = _connect_texts(sh)
+    free = _free_flow_labels(sh, tables)
+    res["titles"] = [t["text"] for t in titles]
+    res["n_tables"] = len(tables)
+    prov_file = info["rel_path"]
+
+    def prov(box, method, conf):
+        return {"file": prov_file, "page": 1, "box": [round(v, 1) for v in box] if box else None, "method": method, "confidence": conf}
+
+    # ---- equipment -----------------------------------------------------
+    for e in eq:
+        # level band: nearest level label below the tag (labels sit under their dashed line)
+        below = [l for l in levels if l["y0"] >= e["box"][1] - 2]
+        # prefer labels in the same drawing block: the closest one vertically
+        lvl = min(below, key=lambda l: (l["y0"] - e["box"][1]) + 0.05 * abs(l["x"] - _lc({"x0": e["box"][0], "x1": e["box"][2], "y0": e["box"][1], "y1": e["box"][3]})[0])) if below else None
+        e["level_band"] = lvl["text"] if lvl else None
+        m = re.match(r"^[A-Z]+-B-([A-Z0-9]{2})-([0-9A-Z]{2})", e["tag"])
+        e["tag_plant_code"], e["tag_served_code"] = (m.group(1), m.group(2)) if m else (None, None)
+    ahus = [e for e in eq if e["type"] == "AHU"]
+    res["equipment_raw"] = eq
+
+    # ---- rooms ---------------------------------------------------------
+    sa_by_comp: Dict[int, set] = {}
+    for ci, c in enumerate(comps["SA"]):
+        near = [a["tag"] for a in ahus if _dist_comp_box(c, a["box"]) <= 110]
+        if near:
+            sa_by_comp[id(c)] = set(near)
+    notes_iea = [n for n in notes if re.search(r"CONNECTED TO", n["text"], re.I)]
+    room_records = []
+    for t in tables:
+        top = t.box[1]
+        o = t.outline
+        if o:
+            ox0, ox1, oy = o[0], o[2], o[1]
+        else:
+            ox0, ox1, oy = t.left, t.right, top - 60
+        raw_name = " ".join(l["text"].strip() for l in sorted(t.name_lines, key=lambda l: (l["y0"], l["x0"])))
+        name_box = [min(l["x0"] for l in t.name_lines), min(l["y0"] for l in t.name_lines), max(l["x1"] for l in t.name_lines),
+                    max(l["y1"] for l in t.name_lines)] if t.name_lines else None
+        tit = title_for(titles, [ox0, oy, ox1, t.box[3]])
+        services, svc_comp = [], {}
+        for svc in ("SA", "RA", "EA", "IEA"):
+            c = riser_component(comps[svc], ox0, ox1, oy)
+            if c is not None:
+                services.append(svc)
+                svc_comp[svc] = c
+        rec = {"table": t, "name": raw_name, "name_box": name_box, "title": tit["text"] if tit else "", "title_box": tit["box"] if tit else None,
+               "outline": o, "services": services, "svc_comp": svc_comp, "ahu_tags": [], "fan_tags": [], "iea_target": "",
+               "assoc_method": "", "assoc_conf": ""}
+        if "SA" in svc_comp and id(svc_comp["SA"]) in sa_by_comp:
+            rec["ahu_tags"] = sorted(sa_by_comp[id(svc_comp["SA"])])
+            rec["assoc_method"] = "SA (cyan) riser crossing the room-box top, joined to the AHU outlet duct"
+            rec["assoc_conf"] = "high"
+        for svc, types in (("RA", FAN_TYPES_RA), ("EA", FAN_TYPES_EA)):
+            if svc in svc_comp:
+                fans = [e["tag"] for e in eq if e["type"] in types and _dist_comp_box(svc_comp[svc], e["box"]) <= 125]
+                rec["fan_tags"].extend(sorted(set(fans)))
+        if "IEA" in svc_comp:
+            best, bd = None, 1e9
+            for n in notes_iea:
+                d = _dist_comp_box(svc_comp["IEA"], n["box"])
+                if d < bd:
+                    best, bd = n, d
+            if best is not None and bd <= 260:
+                mm = re.search(r"\(?(BIBO-[A-Z0-9-]+)\)?", best["text"])
+                rec["iea_target"] = mm.group(1) if mm else ""
+                rec["iea_note"] = best["text"]
+        room_records.append(rec)
+
+    # ---- fall-back AHU association by fan stem / drawing block ----------
+    ahu_stems = collections.defaultdict(list)
+    for a in ahus:
+        ahu_stems[_stem(a["tag"])].append(a["tag"])
+    for rec in room_records:
+        if rec["ahu_tags"]:
+            continue
+        stems = {_stem(f) for f in rec["fan_tags"]}
+        tags = sorted({tg for s in stems for tg in ahu_stems.get(s, [])})
+        if tags:
+            rec["ahu_tags"] = tags
+            rec["assoc_method"] = "no SA riser; serving fan tag shares the AHU tag stem"
+            rec["assoc_conf"] = "medium"
+    res["room_records"] = room_records
+
+    # ---- groups: AHUs sharing one SA component ---------------------------
+    groups = []
+    seen = set()
+    for ci, c in enumerate(comps["SA"]):
+        tags = sa_by_comp.get(id(c))
+        if tags and frozenset(tags) not in seen:
+            seen.add(frozenset(tags))
+            groups.append(sorted(tags))
+    # merge groups that overlap
+    merged = []
+    for g in groups:
+        gs = set(g)
+        for m_ in merged:
+            if gs & m_:
+                m_ |= gs
+                break
+        else:
+            merged.append(gs)
+    # AHUs with no SA component seen
+    covered = set().union(*merged) if merged else set()
+    for a in ahus:
+        if a["tag"] not in covered:
+            merged.append({a["tag"]})
+            res["warnings"].append("AHU %s: no SA duct component found near the tag" % a["tag"])
+    res["ahu_groups"] = [sorted(g) for g in merged]
+    res["notes_text"] = notes
+    res["free_labels"] = free
+    res["comps"] = {k: len(v) for k, v in comps.items()}
+    res["sheet_obj"] = sh
+    res["tables"] = tables
+    res["levels"] = levels
+    res["comps_obj"] = comps
+    res["eq"] = eq
+    return res
