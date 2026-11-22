@@ -60,7 +60,7 @@ tolerances:
   known_answer_m3h: 0.2
 
 defaults_to_confirm:   # Section 11, every value CONFIRM
-  duct_leakage_pct: 10
+  duct_leakage_pct: 10   # CONFIRMED by Marcus 22 Nov 2026: 10 % default; the 15 % stated on the air-side schematics (IP-BH-05010 note 9/10) is a recorded difference, not adopted
   outdoor_air_rule: {max_share_of_ahu_supply_pct: 5, min_fraction_drop_pp: 5}
   schematic_update_rule: {increase_pct: 5, increase_lps: 10, reduce_without_approval: false}
   area_used: measured_when_outside_tolerance   # alternative: larger_of_two
