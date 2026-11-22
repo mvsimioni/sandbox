@@ -52,7 +52,7 @@ PAGE_CLASSES = ("sensor schedule", "criteria", "zoning keyplan", "standby summar
                 "pressure regime", "room data table", "other")
 
 CRITERIA_FIELDS = [
-    "department", "source_file", "booklet_page", "pdf_page", "table_part",
+    "department", "source_file", "booklet_page", "pdf_page", "table_part", "zone",
     "room_type_as_printed", "room_type_norm",
     "pressure_regime_as_printed", "pressure_pa", "pressure_pa_min", "pressure_pa_max", "pressure_direction",
     "min_oa_ach", "min_total_ach", "single_pass", "air_class", "filter",
@@ -83,7 +83,7 @@ PRESSURE_FIELDS = ["department", "source_file", "booklet_page", "pdf_page", "pag
 
 # header keyword -> criteria field
 HEADER_KEYS: List[Tuple[str, str]] = [
-    ("room", r"^room\b"),
+    ("room", r"^(?:area\s*/\s*)?room\b"),
     ("pressure", r"pressure"),
     ("min_oa", r"outdoor"),
     ("min_total", r"total"),
@@ -101,10 +101,42 @@ HEADER_VOCAB = {
     "mode", "y/n", "setback", ",", "regime,", "temperature,", "mode,", "pa,",
     "temperatu", "re,",      # ISO AH wraps the heading as 'Temperatu' / 're, C'
 }
+# Emergency (section 4.1.8) criteria tables: the heading 'Design Temperature, C' wraps mid-word ('Temperatur' / 'e, C')
+ZONED_HEADER_VOCAB = HEADER_VOCAB | {"rooms", "temperatur", "e,"}
+# ICU HDU (4.8): the table prints no caption and every heading wraps mid-word in its cell ('Pressure Re' / 'gime, Pa',
+# 'Min. Outdo' / 'or ACH', 'Relative Hu' / 'midity', 'Design Tem' / 'perature, C', 'Setback mo' / 'de, Y/N'); used only
+# when the standard header is not found, so no other file reads differently
+SPLIT_HEADER_VOCAB = HEADER_VOCAB | {"re", "gime,", "outdo", "or", "hu", "midity", "tem", "perature,", "mo", "de,"}
+# I-CARE (4.8): the first heading is 'AREA / ROOM' and the table sits under a 28 pt 'ACMV' heading with the operating mode
+# ('I-Care - Operation Mode') as its subtitle; used only when neither earlier header is found
+AREA_HEADER_VOCAB = HEADER_VOCAB | {"area", "/"}
+NO_CAPTION_PART = "(no caption printed)"
+ZONED_CAPTION_RE = re.compile(r"^Rooms?\s+Part\s*(\d+)(?:\s*[–—\-]\s*(.+))?$", re.I)
+# Zones of the Emergency criteria table.  The table prints no zone column: the zone is the leading words of the room
+# name ('P2 South NP Toilet' is in zone 'P2 South NP').  Longest prefix first; the pattern is matched against the
+# room name as printed, the label is the zone as written in the booklet (the pressure regime pages use the same names:
+# P3, FEVER / ISOL FEVER, RESUS, P2 North / South, EDTU, CAC, Staff Support).
+ZONE_PREFIXES: Tuple[Tuple[str, str], ...] = (
+    ("P2 South Neutral", r"P2\s+South\s+Neutra(?:l)?\b"),      # 'P2 South Neutra Staff Station / Linen' is printed with the 'l' missing
+    ("P2 South NP", r"P2\s+South\s+NP\b"),
+    ("P2 North", r"P2\s+North\b"),
+    ("P2", r"P2\b"),
+    ("P3", r"P3\b"),
+    ("CAC FEVER", r"CAC\s+FEVER\b"),
+    ("CAC", r"CAC\b"),
+    ("FEVER", r"FEVER\b"),
+    ("RESUS", r"RESUS\b"),
+    ("EDTU", r"EDTU\b"),
+    ("Staff Support", r"Staff\s+Support\b"),
+)
 TAG_RE = re.compile(r"^[A-Z]{2,6}(?:-[A-Z0-9]+){2,}$")
 FURNITURE_LINE_RE = re.compile(
     r"^(4\s+DEPARTMENT DRAWINGS|4\.8\s+MECHANICAL VENTILATION STRATEGY.*|`|"
     r"ALEXANDRA HOSPITAL REDEVELOPMENT PROJECT.*|BINDING GUTER.*)$", re.I)
+# keyplan labels of a duty / standby pair read 'AHU-B-02-01EDP3WAIT-01A/B' (Emergency); the standby table lists '-01A' and '-01B'
+PAIR_TAG_RE = re.compile(r"^[A-Z]{2,6}(?:-[A-Z0-9]+){2,}(?:/[A-Z0-9]+)?$")
+# a tag that serves two units is printed 'AHU-B-07-04ICU-01/02C' (ICU HDU): the standby reader takes the '/' suffix as part of it
+STANDBY_TAG_RE = re.compile(r"^[A-Z]{2,6}(?:-[A-Z0-9]+){2,}(?:/[A-Z0-9]+)*$")
 PRESSURE_VALUE_RE = re.compile(r"^[+\-−–]?\s*\d+(?:\.\d+)?\s*(?:Pa)?$", re.I)
 
 
@@ -265,6 +297,27 @@ def strip_furniture(words: List[Word], page_h: float, page_w: float) -> List[Wor
     return [w for w in words if id(w) not in gone]
 
 
+def printed_page_box(words: Sequence[Word], page_h: float, page_w: float) -> Optional[Tuple[float, float, float, float]]:
+    """Box of the printed page number (the digit word that ``printed_page_number`` returns), or ``None``."""
+    number = printed_page_number(words, page_h, page_w)
+    if not number:
+        return None
+    cands = [w for w in words if w.text == number and w.y0 > page_h * 0.93 and not _follows_month(w, words)]
+    return max(cands, key=lambda w: w.x0).box() if cands else None
+
+
+def page_number_absent(page: "pymupdf.Page", ref_box: Tuple[float, float, float, float]) -> bool:
+    """True when the place where this booklet prints its page number (``ref_box``, taken from a page that has one)
+    is empty on the rendered page: no ink at all, so the number is not printed (neither as text nor as a picture)."""
+    pad = 3.0
+    clip = pymupdf.Rect(ref_box[0] - pad, ref_box[1] - pad, ref_box[2] + pad, ref_box[3] + pad) & page.rect
+    if clip.is_empty:
+        return False
+    pix = page.get_pixmap(clip=clip, dpi=144, alpha=False, colorspace=pymupdf.csGRAY)
+    dark = sum(1 for v in pix.samples if v < 170)
+    return dark <= 2
+
+
 def printed_page_number(words: Sequence[Word], page_h: float, page_w: float) -> str:
     """Booklet page as printed: the digits-only word in the bottom-right corner."""
     cands = [w for w in words if w.y0 > page_h * 0.93 and re.fullmatch(r"\d{1,4}", w.text) and w.x0 > page_w * 0.6]
@@ -290,13 +343,26 @@ def large_heading(words: Sequence[Word], min_size: float = 26.0) -> str:
     return join_words([w for w in words if w.size >= min_size and not is_gutter(w)])
 
 
+def plan_heading_words(words: Sequence[Word]) -> List[Word]:
+    """The page heading of a plan page set in 24 pt at the top left ('PRESSURE REGIME - BAU (LEVEL 4)', ICU HDU), where
+    the other booklets set it in the 28 pt type of ``large_heading``.  The section strip (x >= 735) and the 24 pt binding
+    gutter note are not part of it."""
+    return [w for w in words if 20.0 <= w.size < 26.0 and w.x0 < 735 and w.y0 < 140 and not is_gutter(w)]
+
+
 def section_strip(words: Sequence[Word]) -> str:
     """Section title in the strip at the top right ('4.8 MECHANICAL VENTILATION STRATEGY | DESIGN CRITERIA',
     '4.1.10 AV STRATEGY'), 20 pt type; the 28 pt line above it is 'DEPARTMENT DRAWINGS'."""
-    return join_words([w for w in words if w.x0 >= 735 and w.y0 < 90 and 14 <= w.size < 26 and not is_gutter(w)])
+    return join_words([w for w in words if w.x0 >= 650 and w.y0 < 90 and 14 <= w.size < 26 and not is_gutter(w)])
 
 
-def classify_page(text: str, heading: str = "", section: str = "") -> str:
+# Files whose standby table prints no title ('Equipment Tag | Area Served | Equipment Standby Configuration' only) and is read as
+# a standby summary.  Healthy Aging p23 prints the same untitled table and stays unparsed, so that department's registers
+# are as released; add its file name here to read it.
+UNTITLED_STANDBY_FILES = ("IGH_DD Booklet_MDU_OCP.pdf",)
+
+
+def classify_page(text: str, heading: str = "", section: str = "", untitled_standby: bool = False) -> str:
     """Class a page from its heading text (whitespace-collapsed).
 
     ``heading`` is the big-type heading (see ``large_heading``).  A page whose heading reads
@@ -306,15 +372,22 @@ def classify_page(text: str, heading: str = "", section: str = "") -> str:
     AV overview that carries a storey KEYPLAN title is not read as an AHU zoning keyplan.
     """
     flat = re.sub(r"\s+", " ", clean(text))
-    if section and not re.search(r"MECHANICAL VENTILATION", section, re.I):
+    if section and not re.search(r"MECHANICAL VENTILATION", section, re.I) \
+            and not re.match(r"(PRESSURE REGIME|AHU ZONING)", heading):     # a plan headed so under a stale strip (DI: '4.1 DEPARTMENT LAYOUT PLAN')
         return "other"
     if re.search(r"D_Template\s*Room\s*Code", flat) and re.search(r"D_Unique\s*Room\s*Identifier", flat):
         return "room data table"
     if heading and re.search(r"PRESSURE REGIME", heading) and not re.search(r"DESIGN CRITERIA", flat):
         return "pressure regime"
+    if section and re.search(r"\|?\s*PRESSURE REGIME", section) and not re.search(r"DESIGN CRITERIA", flat):
+        return "pressure regime"            # the title is part of the section strip (MDU OCP: '... STRATEGY | PRESSURE REGIME')
     if re.search(r"DESIGN CRITERIA", flat) or re.search(r"Room conditions\s*[–\-]\s*Part", flat, re.I):
         return "criteria"
-    if re.search(r"EQUIPMENT STANDBY CONFIGURATION SUMMARY", flat, re.I):
+    if re.search(r"AREA\s*/\s*ROOM", flat) and re.search(r"Pressure\s*Regime", flat) \
+            and re.search(r"Afterhours", flat, re.I):        # I-CARE: the table has no 'DESIGN CRITERIA' strip or caption
+        return "criteria"
+    if re.search(r"EQUIPMENT STANDBY CONFIGURATION SUMMARY|EQUIPMENT CONFIGURATION SUMMARY", flat, re.I) \
+            or (untitled_standby and re.search(r"Equipment Tag\s+Area Served\s+Equipment Standby\s+Configuration", flat)):
         return "standby summary"
     if re.search(r"KEYPLAN", flat) or re.search(r"AHU ZONING", flat):
         return "zoning keyplan"
@@ -352,6 +425,9 @@ def parse_pressure(cell: str) -> Tuple[str, str, bool]:
     if t in ("", "-", "NR", "nr", "N/A"):
         return "", "", True
     direction = ""
+    sign_only = re.fullmatch(r"([+\-−–])\s*ve", low)       # '-ve' / '+ve': a direction with no figure (Emergency 4.1.8)
+    if sign_only:
+        return "", ("negative" if sign_only.group(1) != "+" else "positive"), True
     if "neg" in low:
         direction = "negative"
     elif "pos" in low:
@@ -446,17 +522,21 @@ def parse_count(cell: str) -> Tuple[str, bool]:
     t = clean(cell)
     if t in ("", "-", "NR", "nr", "N/A", "–"):
         return "", True
+    if re.fullmatch(r"SS\s*553", t, re.I):      # DI: the figure is 'as per SS 553' (the Singapore Standard); no number is printed
+        return "", True
     m = re.fullmatch(r"(\d+(?:\.\d+)?)", t)
     return (_num(float(m.group(1))), True) if m else ("", False)
 
 
 def parse_single_pass(cell: str) -> Tuple[str, bool]:
-    t = clean(cell).lower()
+    t = re.sub(r"\s*-\s*", "-", clean(cell).lower())
     if t in ("yes", "y"):
         return "Y", True
-    if t in ("no", "n"):
+    if t == "non-recirculating":      # Emergency 4.1.8 prints the word for air that is not recirculated: single pass
+        return "Y", True
+    if t in ("no", "n") or re.fullmatch(r"no \(c/w air purging\)", t):   # DI: 'No (c/w Air Purging)' is no single pass; the words stay in raw_cells
         return "N", True
-    if t in ("nr", "", "-"):
+    if t in ("nr", "n/r", "", "-"):         # 'N/R' (ICU HDU) is 'not required', as 'NR'
         return "NR", True
     return "", False
 
@@ -469,22 +549,26 @@ def parse_yn(cell: str) -> Tuple[str, bool]:
         return "N", True
     if t in ("nr", ""):
         return t.upper(), True
+    if t in ("na", "n/a"):                          # DI: 'NA', not applicable
+        return "NA", True
+    if re.fullmatch(r"24\s*hrs?\s*ac", t):       # I-CARE: the room is air-conditioned for 24 hours; not a Y/N flag, kept as printed
+        return "24 hrs AC", True
     return "", False
 
 
 def parse_rh(cell: str) -> Tuple[str, str, bool]:
     """Return ``(rh_max, rh_min, ok)`` from e.g. 'Max 60%', '40 - 60%', 'NR'."""
     t = clean(cell)
-    if t.upper() in ("", "NR", "-"):
+    if t.upper() in ("", "NR", "-", "N"):       # 'N': no humidity control (Emergency 4.1.8 toilets and dirty utilities)
         return "", "", True
     rng = re.fullmatch(r"(\d+(?:\.\d+)?)\s*%?\s*[–—\-]\s*(\d+(?:\.\d+)?)\s*%?", t)
     if rng:
         a, b = float(rng.group(1)), float(rng.group(2))
         return _num(max(a, b)), _num(min(a, b)), True
-    m = re.fullmatch(r"(max|min)\.?\s*(\d+(?:\.\d+)?)\s*%?", t, re.I)
+    m = re.fullmatch(r"(max|min|≤|<=|≥|>=)\.?\s*(\d+(?:\.\d+)?)\s*%?", t, re.I)
     if m:
         v = _num(float(m.group(2)))
-        return (v, "", True) if m.group(1).lower() == "max" else ("", v, True)
+        return (v, "", True) if m.group(1).lower() in ("max", "≤", "<=") else ("", v, True)
     m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*%", t)
     if m:
         return _num(float(m.group(1))), "", True
@@ -494,7 +578,7 @@ def parse_rh(cell: str) -> Tuple[str, str, bool]:
 def parse_temp(cell: str) -> Tuple[str, str, bool]:
     """Return ``(min_c, max_c, ok)`` from '21 - 24', '27', '24+-1', 'NR'."""
     t = clean(cell)
-    if t.upper() in ("", "NR", "-"):
+    if t.upper() in ("", "NR", "-", "N"):       # 'N': no temperature control (Emergency 4.1.8 toilets and dirty utilities)
         return "", "", True
     rng = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(?:°?\s*C)?\s*[–—\-]\s*(\d+(?:\.\d+)?)\s*(?:°?\s*C)?", t)
     if rng:
@@ -514,14 +598,39 @@ def parse_temp(cell: str) -> Tuple[str, str, bool]:
 # --------------------------------------------------------------------------- #
 # Criteria tables
 # --------------------------------------------------------------------------- #
+def zone_of(room: str) -> Tuple[str, str]:
+    """``(zone, prefix_as_printed)`` of an Emergency room name, or ``("", "")`` when it opens with no known zone."""
+    t = clean(room)
+    for zone, pat in ZONE_PREFIXES:
+        m = re.match(pat, t, re.I)
+        if m:
+            return zone, t[:m.end()]
+    return "", ""
+
+
+def zoned_caption(words: Sequence[Word]) -> Optional[Dict[str, Any]]:
+    """Caption of an Emergency 4.1.8 criteria page: 'Rooms Part 1', or 'Rooms Part 6 - PANDEMIC SURGE AFFECTED ROOMS'
+    (20 pt, left of the section strip).  This is the header signature of the zoned layout: the other booklets caption
+    the same table 'Room conditions - Part N', so the section strip alone (4.1.8 is also the strip of Paeds, Palliative,
+    Healthy Aging and part of Psych Med) does not tell the layouts apart.  Returns ``part`` ('Part 6'), ``mode`` (the
+    title after the dash, as printed) and ``caption``; ``None`` when the page is not captioned like that."""
+    cap = join_words([w for w in words if 18.0 <= w.size < 26.0 and w.x0 < 735 and w.y0 < 90 and not is_gutter(w)])
+    m = ZONED_CAPTION_RE.match(cap)
+    if not m:
+        return None
+    return {"part": "Part %s" % m.group(1), "mode": clean(m.group(2) or ""), "caption": cap}
+
+
 class TableColumns:
     """Column x-ranges derived from the header words."""
 
     def __init__(self, clusters: Dict[str, Tuple[float, float]], header_bottom: float,
-                 header_refs: Dict[str, List[str]], centre_bounds: bool = False):
+                 header_refs: Dict[str, List[str]], centre_bounds: bool = False,
+                 header_text: Optional[Dict[str, str]] = None):
         self.clusters = clusters
         self.header_bottom = header_bottom
         self.header_refs = header_refs
+        self.header_text = header_text or {}      # heading of each column as printed (text-layer words, read in order)
         order = sorted(clusters.items(), key=lambda kv: kv[1][0])
         self.order = [k for k, _ in order]
         self.bounds: Dict[str, Tuple[float, float]] = {}
@@ -569,13 +678,17 @@ def _cluster_x(words: Sequence[Word], gap: float = 8.0) -> List[List[Word]]:
     return clusters
 
 
-def find_header(words: Sequence[Word]) -> Optional[TableColumns]:
-    """Locate the criteria header (starts at the 'Room' word) and derive columns."""
+def find_header(words: Sequence[Word], vocab: Optional[set] = None) -> Optional[TableColumns]:
+    """Locate the criteria header (starts at the 'Room' word) and derive columns.
+
+    ``vocab`` is the set of words a header line may hold (default ``HEADER_VOCAB``; the Emergency 4.1.8 handler
+    passes ``ZONED_HEADER_VOCAB``, which also takes the 'Temperatur' / 'e,' wrap of the temperature heading)."""
+    vocab = HEADER_VOCAB if vocab is None else vocab
     room_candidates = [w for w in words if w.text.lower() == "room" and not is_gutter(w)]
     all_lines = cluster_lines([w for w in words if not is_gutter(w)])
 
     def is_header_line(line: Sequence[Word]) -> bool:
-        return all(w.text.lower() in HEADER_VOCAB or re.fullmatch(r"\d", w.text) for w in line)
+        return all(w.text.lower() in vocab or re.fullmatch(r"\d", w.text) for w in line)
 
     for room in sorted(room_candidates, key=lambda w: w.y0):
         idx = next((i for i, ln in enumerate(all_lines) if room in ln), None)
@@ -590,7 +703,8 @@ def find_header(words: Sequence[Word]) -> Optional[TableColumns]:
             hi += 1
         header = [w for ln in all_lines[lo:hi + 1] for w in ln]
         texts = " ".join(w.text.lower() for w in header)
-        if "pressure" not in texts or "humidity" not in texts:
+        split = vocab is SPLIT_HEADER_VOCAB                 # headings wrapped mid-word: match on the text with the breaks closed
+        if "pressure" not in texts or "midity" not in texts:     # 'midity' also closes the wrapped 'Hu' / 'midity'
             continue
         # footnote superscripts in the header: digit-only words smaller than the header text
         sizes = [w.size for w in header if not re.fullmatch(r"\d", w.text) and w.size]
@@ -599,12 +713,15 @@ def find_header(words: Sequence[Word]) -> Optional[TableColumns]:
         body = [w for w in header if w not in refs and w.text not in (",",)]
         clusters = _cluster_x(body)
         mapping: Dict[str, Tuple[float, float]] = {}
+        texts: Dict[str, str] = {}
         refs_by_col: Dict[str, List[str]] = defaultdict(list)
         for cl in clusters:
             text = join_words(cl).lower()
+            closed = text.replace(" ", "")
             for key, pat in HEADER_KEYS:
-                if key not in mapping and re.search(pat, text):
+                if key not in mapping and (re.search(pat, text) or (split and re.search(pat, closed))):
                     mapping[key] = (min(w.x0 for w in cl), max(w.x1 for w in cl))
+                    texts[key] = join_words(cl)
                     break
         # attach the footnote refs to the column whose x-range contains them
         for ref in refs:        # nearest header cell, within 15 points of its text
@@ -613,7 +730,11 @@ def find_header(words: Sequence[Word]) -> Optional[TableColumns]:
                 key = min(dist, key=dist.get)  # type: ignore[arg-type]
                 if dist[key] <= 15.0:
                     refs_by_col[key].append(ref.text)
-        return TableColumns(mapping, max(w.y1 for w in header), dict(refs_by_col))
+        tc = TableColumns(mapping, max(w.y1 for w in header), dict(refs_by_col), header_text=texts)
+        for key in tc.order:        # the heading of each column as printed: every header word that sits over it
+            lo, hi = tc.bounds[key]
+            texts[key] = join_words([w for w in body if lo <= w.cx < hi])
+        return tc
     return None
 
 
@@ -625,9 +746,31 @@ def _is_pressure_cell(text: str) -> bool:
     return bool(r["ok"] and (r["pa"] or r["pa_min"] or r["direction"]))
 
 
+VISION_ROWS_PATH = Path(__file__).with_name("booklet48_vision_rows.json")
+
+
+def vision_rows(file_name: str, pdf_page: int, path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    """Rows keyed in by eye for a criteria page that is an image (see ``booklet48_vision_rows.json``); ``None`` when none."""
+    try:
+        data = json.loads((path or VISION_ROWS_PATH).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    entry = (data.get(file_name) or {}).get(str(pdf_page))
+    return entry if isinstance(entry, dict) and entry.get("rows") else None
+
+
+def vision_page_rows(entry: Dict[str, Any], box: Tuple[float, float, float, float]) -> List[Dict[str, Any]]:
+    """Rows of ``parse_criteria_page`` shape from a ``vision_rows`` entry; ``box`` is the page image."""
+    cols = entry["cols"]
+    return [{"cells": dict(zip(cols, cells)), "box": box, "marks": [], "note_refs": [], "mode": "",
+             "mode_from_caption": False, "no_pressure": False, "blank_row": False, "pressure_words": [], "vision": True}
+            for cells in entry["rows"]]
+
+
 def parse_criteria_page(words: List[Word], page_h: float, page_w: float,
                         rects: Optional[Sequence[Tuple[float, float, float, float]]] = None,
-                        marks: Optional[Sequence[Dict[str, Any]]] = None
+                        marks: Optional[Sequence[Dict[str, Any]]] = None,
+                        zoned: Optional[Dict[str, Any]] = None
                         ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], str, List[str]]:
     """Parse one criteria page.
 
@@ -640,6 +783,10 @@ def parse_criteria_page(words: List[Word], page_h: float, page_w: float,
     ``marks`` are the reviewer marks of the page (see ``_row_marks``): a strike-through line over the room text, or a
     comment whose callout arrow ends inside the row.  They are carried on the row as ``marks``.
 
+    ``zoned`` is the caption of an Emergency 4.1.8 page (see ``zoned_caption``): the table is the same eleven-column
+    table, but it is captioned 'Rooms Part N' (not 'Room conditions - Part N'), its temperature heading wraps
+    mid-word and a title after the part number ('PANDEMIC SURGE AFFECTED ROOMS') is the operating mode of every row.
+
     Returns ``(rows, notes, table_part, page_failures)``.  Each row is a dict with the raw
     cells (``cells``), the room text, the box, the note references and ``mode`` (the
     section heading such as 'Hybrid Cooling' that precedes it).
@@ -648,11 +795,25 @@ def parse_criteria_page(words: List[Word], page_h: float, page_w: float,
     flat = join_words(words)
     part_m = re.search(r"Room conditions\s*[–—\-]\s*Part\s*(\d+)", flat, re.I)
     table_part = "Part %s" % part_m.group(1) if part_m else ""
-    if not table_part and re.search(r"Room conditions", flat, re.I):
+    if zoned:
+        table_part = zoned["part"]
+    elif not table_part and re.search(r"Room conditions", flat, re.I):
         table_part = "Room conditions (unnumbered)"     # a single table printed without 'Part N' (Dialysis)
+    cols = find_header(words, ZONED_HEADER_VOCAB if zoned else None)
+    if cols is None and not zoned:
+        cols = find_header(words, SPLIT_HEADER_VOCAB)       # headings wrapped mid-word (ICU HDU)
+        if cols is None:
+            cols = find_header(words, AREA_HEADER_VOCAB)    # 'AREA / ROOM' (I-CARE)
+            if cols is not None and not table_part:
+                sub = [ln for ln in cluster_lines([w for w in words if w.y1 <= cols.header_bottom and w.x0 < 735
+                                                   and not is_gutter(w)])
+                       if re.search(r"Operation Mode", join_words(ln), re.I)]
+                if sub:
+                    table_part = clean(re.sub(r"^[•\u2022\s]+", "", join_words(sub[0])))
+        if cols is not None and not table_part:
+            table_part = NO_CAPTION_PART                    # the page prints no 'Room conditions' caption: a source gap
     if not table_part:
         failures.append("table caption ('Room conditions') not found")
-    cols = find_header(words)
     if cols is None:
         failures.append("criteria header not found")
         return [], [], table_part, failures
@@ -773,7 +934,7 @@ def parse_criteria_page(words: List[Word], page_h: float, page_w: float,
         failures.append("room text with no data row nearby: %r" % text)
 
     rows: List[Dict[str, Any]] = []
-    pending_mode = ""
+    pending_mode = zoned["mode"] if zoned else ""
     heading_iter = sorted(headings, key=lambda h: h[0])
     hi = 0
     for anchor in anchors:
@@ -807,11 +968,15 @@ def parse_criteria_page(words: List[Word], page_h: float, page_w: float,
         rows.append({
             "cells": cells, "box": row_box, "marks": _row_marks(row_box, cells_words.get("room", []), marks or []),
             "note_refs": sorted(set(refs), key=lambda s: (len(s), s)),
-            "mode": pending_mode, "no_pressure": bool(anchor.get("no_pressure")),
+            "mode": pending_mode, "mode_from_caption": bool(zoned and zoned["mode"]),
+            "no_pressure": bool(anchor.get("no_pressure")),
             "blank_row": bool(anchor.get("blank_row")),
             "pressure_words": [w for w in anchor["by_col"].get("pressure", [])],
         })
     notes = foot_notes + parse_notes(words, notes_top, footer_top)
+    if zoned is not None:
+        zoned["header_text"] = dict(cols.header_text)       # the column headings as printed, for the report
+        zoned["header_order"] = list(cols.order)
     return rows, notes, table_part, failures
 
 
@@ -879,8 +1044,11 @@ def parse_block_note(words: Sequence[Word], notes_top: float, footer_top: float)
 
 
 def build_criteria_rows(rows: List[Dict[str, Any]], meta: Dict[str, Any], table_part: str,
-                        failures: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Turn raw rows into criteria.csv rows, normalising each cell and recording failed fields."""
+                        failures: List[Dict[str, Any]], zoned: bool = False) -> List[Dict[str, Any]]:
+    """Turn raw rows into criteria.csv rows, normalising each cell and recording failed fields.
+
+    ``zoned`` (Emergency 4.1.8): the zone is read from the room name (``zone_of``) into the ``zone`` column, the prefix
+    as printed is kept in ``raw_cells`` and a room name that opens with no known zone is a failed field."""
     out: List[Dict[str, Any]] = []
     for row in rows:
         c = row["cells"]
@@ -915,14 +1083,20 @@ def build_criteria_rows(rows: List[Dict[str, Any]], meta: Dict[str, Any], table_
             sp = ah = sb = ""
         if not room:
             failed.append("room")
+        zone, zone_prefix = zone_of(room) if zoned else ("", "")
+        if zoned and room and not zone:
+            failed.append("zone")
         if row.get("no_pressure"):
             failed.append("pressure (cell empty)")
         part = table_part + ("; %s" % row["mode"] if row["mode"] else "")
-        confidence = max(0.1, 0.97 - 0.25 * len(failed) - (0.05 if row["mode"] else 0.0))
+        confidence = max(0.1, 0.97 - 0.25 * len(failed)
+                         - (0.05 if row["mode"] and not row.get("mode_from_caption") else 0.0))
         strikes = [m for m in row.get("marks", []) if m["kind"] == "strike"]
         comments = [m for m in row.get("marks", []) if m["kind"] == "comment"]
         if strikes:       # the values are read as printed, but the reviewer has struck the row out: not current
             confidence = min(confidence, 0.50)
+        if row.get("vision"):                 # keyed in from the page image, not read from a text layer
+            confidence = min(confidence, 0.80)
         for field in failed:
             failures.append({"file": meta["source_file"], "pdf_page": meta["pdf_page"],
                              "booklet_page": meta["booklet_page"], "row": room or "(no room text)",
@@ -930,7 +1104,7 @@ def build_criteria_rows(rows: List[Dict[str, Any]], meta: Dict[str, Any], table_
                              "bbox": fmt_bbox(row["box"])})
         out.append({
             "department": meta["department"], "source_file": meta["source_file"],
-            "booklet_page": meta["booklet_page"], "pdf_page": meta["pdf_page"], "table_part": part,
+            "booklet_page": meta["booklet_page"], "pdf_page": meta["pdf_page"], "table_part": part, "zone": zone,
             "room_type_as_printed": room, "room_type_norm": room_norm(room),
             "pressure_regime_as_printed": c.get("pressure", ""), "pressure_pa": pa,
             "pressure_pa_min": pr["pa_min"], "pressure_pa_max": pr["pa_max"],
@@ -944,8 +1118,11 @@ def build_criteria_rows(rows: List[Dict[str, Any]], meta: Dict[str, Any], table_
             "reviewer_markup": "; ".join("struck through by a reviewer %s annotation%s" % (
                 m["type"], " (%s)" % m["author"] if m["author"] else "") for m in strikes),
             "reviewer_comments": " || ".join(m["text"] for m in comments),
-            "raw_cells": json.dumps({k: c.get(k, "") for k in
-                                     ("min_oa", "min_total", "single_pass", "afterhours", "setback")},
+            "raw_cells": json.dumps({**{k: c.get(k, "") for k in
+                                        ("min_oa", "min_total", "single_pass", "afterhours", "setback")},
+                                     **({"zone_prefix": zone_prefix} if zoned else {}),
+                                     **({"read_by": "vision: page is an image, cells keyed in from the render"}
+                                        if row.get("vision") else {})},
                                     ensure_ascii=False),
         })
     return out
@@ -1062,6 +1239,10 @@ def standby_notes(words: List[Word], page_h: float) -> Tuple[str, List[Dict[str,
     """Note references printed on the Configuration header ('1,2') and the NOTE block of a standby page."""
     refs = ""
     conf = [w for w in words if w.text.startswith("Configuration") and not is_gutter(w)]
+    area = [w for w in words if w.text == "Area" and not is_gutter(w)]
+    if conf and area:        # a page title that holds the word ('Equipment Configuration Summary Level 4') is not the header
+        near = [w for w in conf if abs(w.cy - area[0].cy) <= 40.0]
+        conf = near or conf
     if conf:
         head = min(conf, key=lambda w: w.y0)
         for w in words:
@@ -1070,16 +1251,34 @@ def standby_notes(words: List[Word], page_h: float) -> Tuple[str, List[Dict[str,
                 refs = w.text
                 break
         top = find_notes_top(words, head.y1, page_h)
+        if top >= page_h:
+            top = _unmarked_notes_top(words, head.y1, page_h)
     else:
         top = page_h
     return refs, parse_notes(words, top, page_h)
 
 
-def _row_bands(rects: Sequence[Tuple[float, float, float, float]], cx: float, top: float, bottom: float
-               ) -> List[Tuple[float, float, float, float]]:
+def _unmarked_notes_top(words: Sequence[Word], below_y: float, page_h: float) -> float:
+    """Top of a numbered note block printed with no NOTE marker (Emergency standby page: '1 - REFER TO APPENDIX 4.B ...'):
+    the first line below the last equipment tag or configuration cell that opens with a number and a dash.
+    ``page_h`` when there is none."""
+    cells = [w for w in words if not is_gutter(w) and w.y0 > below_y and
+             (TAG_RE.match(w.text) or re.match(r"^(?:AHU-)?CONFIG-", w.text, re.I))]
+    if not cells:
+        return page_h
+    table_bottom = max(w.y1 for w in cells)
+    for line in cluster_lines([w for w in words if w.y0 > table_bottom + 2.0 and not is_gutter(w)]):
+        if re.match(r"^\d+\s*[–—\-]\s*\S", join_words(line)):
+            return min(w.y0 for w in line)
+    return page_h
+
+
+def _row_bands(rects: Sequence[Tuple[float, float, float, float]], cx: float, top: float, bottom: float,
+               max_width: float = 700.0) -> List[Tuple[float, float, float, float]]:
     """Row rectangles of one column: filled rectangles holding x = ``cx``, between ``top`` and ``bottom``,
-    taller than a text line, innermost only, in reading order."""
-    cand = [r for r in rects if r[0] - 1 <= cx <= r[2] + 1 and r[3] - r[1] > 8 and r[2] - r[0] < 700
+    taller than a text line and narrower than ``max_width`` (a page-wide fill is not a cell), innermost only, in
+    reading order."""
+    cand = [r for r in rects if r[0] - 1 <= cx <= r[2] + 1 and r[3] - r[1] > 8 and r[2] - r[0] < max_width
             and r[1] >= top - 1 and r[3] <= bottom + 1]
     keep = [r for r in cand if not any(o is not r and o[0] >= r[0] - 1 and o[2] <= r[2] + 1
                                        and o[1] >= r[1] - 1 and o[3] <= r[3] + 1
@@ -1093,7 +1292,8 @@ def _row_bands(rects: Sequence[Tuple[float, float, float, float]], cx: float, to
 
 
 def parse_standby_page(words: List[Word], page_h: float, carry_heading: str,
-                       rects: Optional[Sequence[Tuple[float, float, float, float]]] = None
+                       rects: Optional[Sequence[Tuple[float, float, float, float]]] = None,
+                       page_w: float = 1190.52
                        ) -> Tuple[List[Dict[str, Any]], str, List[str]]:
     """Parse one standby-summary page.
 
@@ -1138,18 +1338,24 @@ def parse_standby_page(words: List[Word], page_h: float, carry_heading: str,
     if set(mapping) != need:
         return [], carry_heading, ["standby header columns not derived (got %s)" % sorted(mapping)]
     cols = TableColumns(mapping, header_bottom, {}, centre_bounds=True)
+    first_x0 = min(x0 for x0, _ in mapping.values())
+    # a table whose first heading is the Equipment Tag column prints no 'Level NN wing' column (Emergency 4.1.8)
+    no_level_column = not any(w.x1 < first_x0 - 2.0 for w in header_words if not is_gutter(w))
     notes_top = find_notes_top(words, header_bottom, page_h)
+    if notes_top >= page_h:
+        notes_top = _unmarked_notes_top(words, header_bottom, page_h)
     body_bottom = min(notes_top, page_h)
     body = [w for w in words if w.y0 > header_bottom - 0.5 and w.y0 < body_bottom - 0.5
             and not is_gutter(w)]
     config_cx = (mapping["config"][0] + mapping["config"][1]) / 2.0
     area_cx = (mapping["area"][0] + mapping["area"][1]) / 2.0
     bands = _row_bands(rects or [], config_cx, header_bottom, body_bottom)
-    tag_like = [w for w in body if TAG_RE.match(w.text)]
+    tag_like = [w for w in body if STANDBY_TAG_RE.match(w.text)]
     if tagless:
         if not bands:
             return [], carry_heading, ["standby table has no Equipment Tag column and no row rectangles"]
-        area_cols = _row_bands(rects or [], area_cx, header_bottom, body_bottom)
+        # the Area cell can be wider than 700 points (Paeds: 704): only a fill as wide as the page is not a cell
+        area_cols = _row_bands(rects or [], area_cx, header_bottom, body_bottom, max_width=page_w * 0.9)
         level_edge = (min(r[0] for r in area_cols) if area_cols else mapping["area"][0] - 10.0) - 2.0
     else:
         if not tag_like:
@@ -1184,20 +1390,26 @@ def parse_standby_page(words: List[Word], page_h: float, carry_heading: str,
     if bands:
         built: List[Dict[str, Any]] = []
         ok = True
+        used = 0
         for band in bands:
             ws = [w for w in data_words if band[1] - 1.0 <= w.cy <= band[3] + 1.0]
             if not ws:
                 continue
-            tags = [w for w in ws if TAG_RE.match(w.text) and w.cx < band[0] - 0.5]   # 'AHU-CONFIG-E' looks like a tag
-            if len(tags) > 1 or (not tagless and not tags):
+            tags = [w for w in ws if STANDBY_TAG_RE.match(w.text) and w.cx < band[0] - 0.5]   # 'AHU-CONFIG-E' looks like a tag
+            # several tags stacked in one cell (a duty and standby pair, '...-01A' over '...-01B'): one row per tag
+            stacked = len(tags) <= 1 or (max(t.x0 for t in tags) - min(t.x0 for t in tags) < 3.0
+                                          and len({round(t.cy) for t in tags}) == len(tags))
+            if not stacked or (not tagless and not tags):
                 ok = False
                 break
-            rest = [w for w in ws if not (tags and w is tags[0])]
-            built.append({"cells": {"tag": tags[0].text if tags else "",
-                                    "area": join_words([w for w in rest if w.cx < band[0] - 0.5]),
-                                    "config": join_words([w for w in rest if w.cx >= band[0] - 0.5])},
-                          "cy": (band[1] + band[3]) / 2.0, "boxes": [w.box() for w in ws]})
-        used = sum(len(r["boxes"]) for r in built)
+            rest = [w for w in ws if not any(w is t for t in tags)]
+            area = join_words([w for w in rest if w.cx < band[0] - 0.5])
+            config = join_words([w for w in rest if w.cx >= band[0] - 0.5])
+            used += len(ws)
+            for tag in (sorted(tags, key=lambda t: t.cy) or [None]):
+                built.append({"cells": {"tag": tag.text if tag else "", "area": area, "config": config},
+                              "cy": (band[1] + band[3]) / 2.0 if tag is None or len(tags) < 2 else tag.cy,
+                              "boxes": [w.box() for w in rest] + ([tag.box()] if tag else [])})
         n_tags = sum(1 for w in tag_like if w.cx < min(r[0] for r in bands) - 0.5)
         if ok and built and (tagless or len(built) == n_tags) and used == len(data_words):
             rows, banded = built, True
@@ -1235,6 +1447,7 @@ def parse_standby_page(words: List[Word], page_h: float, carry_heading: str,
                 if abs(best["cy"] - r["cy"]) <= 60.0:
                     chosen = best
         r["heading"] = chosen["text"] if chosen else carry_heading
+        r["no_level_column"] = no_level_column
         if chosen:
             last_heading = chosen["text"]
         r["box"] = union_box(r.pop("boxes"))
@@ -1336,14 +1549,14 @@ def has_colour_legend(page: "pymupdf.Page", words: Sequence[Word]) -> bool:
     return False
 
 
-def raster_legend(page: "pymupdf.Page") -> str:
+def raster_legend(page: "pymupdf.Page", min_share: float = 0.01) -> str:
     """Bounding box of a raster colour legend (an image in the lower-right of the plan holding at least
     two clearly coloured fills), or ''.  Its text is not in the text layer and is not read here; the
     colours are not interpreted."""
     w, h = page.rect.width, page.rect.height
     for im in page.get_image_info():
         x0, y0, x1, y1 = im["bbox"]
-        if not (x0 > w * 0.7 and y0 > h * 0.6 and y1 < h * 0.93 and 90 <= x1 - x0 <= 320 and 50 <= y1 - y0 <= 220):
+        if not (x0 > w * 0.7 and y0 > h * 0.5 and y1 < h * 0.93 and 90 <= x1 - x0 <= 320 and 50 <= y1 - y0 <= 220):
             continue
         pix = page.get_pixmap(clip=pymupdf.Rect(x0, y0, x1, y1), dpi=40, alpha=False)
         counts: Dict[Tuple[int, int, int], int] = defaultdict(int)
@@ -1352,14 +1565,18 @@ def raster_legend(page: "pymupdf.Page") -> str:
             r, g, b = pix.samples[i], pix.samples[i + 1], pix.samples[i + 2]
             if max(r, g, b) - min(r, g, b) >= 40:          # saturated, not white/grey/black
                 counts[(r // 48, g // 48, b // 48)] += 1
-        if sum(1 for c in counts.values() if c >= 0.01 * n) >= 2:
+        if sum(1 for c in counts.values() if c >= min_share * n) >= 2:
             return fmt_bbox((x0, y0, x1, y1))
     return ""
 
 
-def zoning_records(page: "pymupdf.Page", words: List[Word]) -> Tuple[str, List[Dict[str, Any]], bool]:
+def zoning_records(page: "pymupdf.Page", words: List[Word], pair_tags: bool = False
+                   ) -> Tuple[str, List[Dict[str, Any]], bool]:
     """Keyplan title, every tag and room label with bbox, and the legend ``(source, bbox)``:
-    source is 'text' (words beside swatches), 'image' (raster legend, text not in the text layer) or ''."""
+    source is 'text' (words beside swatches), 'image' (raster legend, text not in the text layer) or ''.
+
+    ``pair_tags`` (Emergency): a label such as 'AHU-B-02-01EDP3WAIT-01A/B', the duty and standby pair, is an equipment tag."""
+    tag_re = PAIR_TAG_RE if pair_tags else TAG_RE
     annots = page_annotations(page)
     arects = [a["rect"] for a in annots]
     lines = [ln for ln in page_lines(page) if not FURNITURE_LINE_RE.match(ln["text"])
@@ -1373,12 +1590,12 @@ def zoning_records(page: "pymupdf.Page", words: List[Word]) -> Tuple[str, List[D
     for w in words:
         if is_gutter(w) or _inside_any(w.box(), arects):
             continue
-        if TAG_RE.match(w.text):
+        if tag_re.match(w.text):
             records.append({"label_kind": "equipment_tag", "text": w.text, "block_text": w.text,
                             "bbox": fmt_bbox(w.box())})
     for ln in lines:
         text = ln["text"]
-        if TAG_RE.match(text) or all(TAG_RE.match(p) for p in text.split() if p):
+        if tag_re.match(text) or all(tag_re.match(p) for p in text.split() if p):
             continue
         if "KEYPLAN" in text.upper():
             kind = "keyplan_title"
@@ -1398,17 +1615,25 @@ def zoning_records(page: "pymupdf.Page", words: List[Word]) -> Tuple[str, List[D
     if has_colour_legend(page, words):
         legend = ("text", "")
     else:
-        box = raster_legend(page)
+        box = raster_legend(page, min_share=0.001 if pair_tags else 0.01)    # Emergency: small swatches in a wide image
         legend = ("image", box) if box else ("", "")
     return title, records, legend
 
 
-def pressure_records(page: "pymupdf.Page", notes_top: Optional[float] = None
+def pressure_records(page: "pymupdf.Page", notes_top: Optional[float] = None,
+                     heading_words: Optional[Sequence[Word]] = None
                      ) -> Tuple[str, List[Dict[str, Any]]]:
     """Drawing text labels (room names, +/- values) of a pressure regime page, plus reviewer annotations
     (PDF comments) kept apart as label_kind reviewer_annotation.  Lines at or below ``notes_top`` (the NOTE
-    block) are not labels: they are recorded verbatim in criteria_notes.csv."""
+    block) are not labels: they are recorded verbatim in criteria_notes.csv.
+
+    ``heading_words`` are the words of the big-type page heading.  When it opens with PRESSURE REGIME, every line of it
+    is the page heading ('PRESSURE REGIME P3 WAITING & CONSULT BUSINESS AS USUAL'), so a second line that names the
+    operating mode is not lost as a drawing label."""
     heading = ""
+    head_text = join_words(heading_words) if heading_words else ""
+    head_box = union_box(w.box() for w in heading_words) \
+        if heading_words and head_text.startswith("PRESSURE REGIME") else None
     records: List[Dict[str, Any]] = []
     annots = page_annotations(page)
     arects = [a["rect"] for a in annots]
@@ -1417,6 +1642,9 @@ def pressure_records(page: "pymupdf.Page", notes_top: Optional[float] = None
         if FURNITURE_LINE_RE.match(text) or _inside_any(ln["box"], arects):
             continue      # comment text is recorded once, below, as a reviewer_annotation
         if notes_top is not None and ln["box"][1] >= notes_top - 0.5:
+            continue
+        if head_box is not None and _inside_any(ln["box"], [head_box], pad=1.0):
+            heading = head_text
             continue
         if re.match(r"^PRESSURE REGIME", text):
             heading = text
@@ -1437,10 +1665,15 @@ def pressure_records(page: "pymupdf.Page", notes_top: Optional[float] = None
 # File-level driver
 # --------------------------------------------------------------------------- #
 def department_from_name(path: Path) -> str:
-    """'IP_FAST_Section_4.8_...' -> 'IP FAST'."""
+    """'IP_FAST_Section_4.8_...' -> 'IP FAST'; 'IGH_DD Booklet_MDU_OCP' -> 'IGH MDU OCP';
+    'Rehab_Med_Combined_Mechanical_Ventilation_Strategy' -> 'Rehab Med Combined'.  The file name is kept in ``source_file``."""
     stem = path.stem
     m = re.match(r"^(.*?)[_ ]Section[_ ]\d", stem, re.I)
     base = m.group(1) if m else stem
+    base = re.sub(r"[_\s]+Mechanical[_\s]+Ventilation[_\s]+Strategy$", "", base, flags=re.I)
+    base = re.sub(r"^\d{8}[_\s]+", "", base)                  # a leading date stamp ('20250819_IGH_DD Booklet_...')
+    base = re.sub(r"^(IGH)[_\s]+DD[_\s]+Booklet[_\s]+", r"\1 ", base, flags=re.I)
+    base = re.sub(r"[_\s]+R$", "", base)                 # 'IGH_DD Booklet_I-CARE_BATCH 1_R': the trailing revision letter
     return re.sub(r"[_\s]+", " ", base).strip()
 
 
@@ -1496,7 +1729,7 @@ def parse_pdf(path: Path, root: Path) -> Dict[str, Any]:
     src = display_path(path, root)
     result: Dict[str, Any] = {"department": dept, "source_file": src, "pages": [], "criteria": [],
                               "notes": [], "standby_notes": [], "standby": [], "zoning": [], "pressure": [],
-                              "room_data": [], "failures": [], "page_failures": []}
+                              "room_data": [], "failures": [], "page_failures": [], "zoned_pages": []}
     doc = pymupdf.open(str(path))
     carry = ""
     try:
@@ -1508,18 +1741,35 @@ def parse_pdf(path: Path, root: Path) -> Dict[str, Any]:
             booklet = printed_page_number(all_words, page_h, page_w)
             words = strip_furniture(all_words, page_h, page_w)     # footer stamp and page number are not body text
             heading_big = large_heading(words)
+            plan_head = plan_heading_words(words)
+            if not re.search(r"PRESSURE REGIME", heading_big) and plan_head \
+                    and re.match(r"PRESSURE REGIME|AHU ZONING", join_words(plan_head)):
+                heading_big = join_words(plan_head)         # 24 pt plan heading (ICU HDU, DI)
+            else:
+                plan_head = []
             strip = section_strip(words)
-            cls = classify_page(page.get_text(), heading_big, strip)
+            cls = classify_page(page.get_text(), heading_big, strip, path.name in UNTITLED_STANDBY_FILES)
+            vision = vision_rows(path.name, pdf_page) if cls == "other" else None
+            image_box = None
+            if vision:        # a criteria table that is a page-sized image: only the strip is text
+                big_imgs = [i["bbox"] for i in page.get_image_info()
+                            if (i["bbox"][2] - i["bbox"][0]) > 0.6 * page_w and (i["bbox"][3] - i["bbox"][1]) > 0.3 * page_h]
+                if big_imgs:
+                    cls, image_box = "criteria", tuple(max(big_imgs, key=lambda b: (b[2] - b[0]) * (b[3] - b[1])))
             annots = page_annotations(page)
             markup = page_markup(page)
             if cls in ("criteria", "standby summary", "room data table") and list(page.annots() or []):
                 drop_annotations(page)          # comment text must not be read as table cells
                 words = strip_furniture(page_words(page), page_h, page_w)
             meta = {"department": dept, "source_file": src, "pdf_page": pdf_page, "booklet_page": booklet}
+            sec_m = re.match(r"^(\d+(?:\.\d+)*)\s+MECHANICAL VENTILATION", strip)
             entry = {"pdf_page": pdf_page, "booklet_page": booklet, "class": cls, "detail": "", "rows": 0,
-                     "annotations": len(annots), "markup": len(markup)}
+                     "section": sec_m.group(1) if sec_m else "",
+                     "annotations": len(annots), "markup": len(markup),
+                     "number_box": printed_page_box(all_words, page_h, page_w) if booklet else None}
             if not booklet:
-                result["page_failures"].append((pdf_page, "printed page number missing or ambiguous in the text layer"))
+                result["page_failures"].append((pdf_page, "printed page number missing or ambiguous in the text layer"
+                                                if all_words else "the page has no text layer (an image): nothing was read"))
 
             def annotation_notes(target: List[Dict[str, Any]], kind: str,
                                  struck: Optional[Dict[int, str]] = None) -> None:
@@ -1535,8 +1785,17 @@ def parse_pdf(path: Path, root: Path) -> Dict[str, Any]:
                           "tip": a["tip"]} for a in annots if a["tip"]]
                 marks += [{"kind": "strike", "type": m["kind"], "author": m["author"], "y": m["y"], "x0": m["x0"],
                            "x1": m["x1"], "idx": i} for i, m in enumerate(markup) if m["strike"]]
-                rows, notes, part, pfail = parse_criteria_page(words, page_h, page_w, _fills(page), marks)
-                built = build_criteria_rows(rows, meta, part, result["failures"])
+                zoned = zoned_caption(words)       # Emergency 4.1.8 layout: 'Rooms Part N', rows grouped by zone
+                rows, notes, part, pfail = parse_criteria_page(words, page_h, page_w, _fills(page), marks, zoned)
+                if image_box is not None and not rows:      # no text-layer table: the rows keyed in by eye
+                    rows = vision_page_rows(vision, image_box)
+                    part, pfail, notes = vision.get("table_part", ""), [], []
+                built = build_criteria_rows(rows, meta, part, result["failures"], zoned=zoned is not None)
+                if zoned is not None:
+                    result["zoned_pages"].append({"pdf_page": pdf_page, "booklet_page": booklet, "strip": strip,
+                                                  "caption": zoned["caption"], "part": zoned["part"],
+                                                  "mode": zoned["mode"], "header": zoned.get("header_text", {}),
+                                                  "order": zoned.get("header_order", []), "rows": len(built)})
                 result["criteria"].extend(built)
                 for n in notes:
                     result["notes"].append(_note_row(src, dept, booklet, pdf_page, n["number"], n["text"],
@@ -1548,7 +1807,10 @@ def parse_pdf(path: Path, root: Path) -> Dict[str, Any]:
                             struck[m["idx"]] = (struck.get(m["idx"], "") + "; " if m["idx"] in struck else "") + \
                                 (r["cells"].get("room", "") or "(row without room text)")
                 annotation_notes(result["notes"], "reviewer annotation", struck)
-                entry.update(detail=part, rows=len(built), notes=len(notes))
+                entry.update(detail=part + ("; %s" % zoned["mode"] if zoned and zoned["mode"] else "")
+                             + ("; zoned layout" if zoned else "")
+                             + ("; image page, cells keyed in by eye (confidence 0.80)" if image_box is not None else ""),
+                             rows=len(built), notes=len(notes))
                 result["page_failures"].extend((pdf_page, f) for f in pfail)
             elif cls == "room data table":
                 rows, headings, pfail = parse_room_data_page(words, page_h, _fills(page), _rules(page))
@@ -1572,7 +1834,7 @@ def parse_pdf(path: Path, root: Path) -> Dict[str, Any]:
                 entry.update(rows=len(rows), detail="room data table; %d columns" % len(headings))
                 result["page_failures"].extend((pdf_page, f) for f in pfail)
             elif cls == "standby summary":
-                rows, carry, pfail = parse_standby_page(words, page_h, carry, _fills(page))
+                rows, carry, pfail = parse_standby_page(words, page_h, carry, _fills(page), page_w)
                 has_tags = any(r["cells"].get("tag") for r in rows)
                 refs, snotes = standby_notes(words, page_h)
                 for n in snotes:
@@ -1586,12 +1848,15 @@ def parse_pdf(path: Path, root: Path) -> Dict[str, Any]:
                         "level_wing_heading": r["heading"], "tag_as_written": c.get("tag", ""),
                         "tag_normalised": normalise_tag(c.get("tag", "")), "area": c.get("area", ""),
                         "configuration": c.get("config", ""), "note_refs": refs, "bbox": fmt_bbox(r["box"]),
-                        "confidence": "0.97" if (c.get("area") and c.get("config") and r["heading"]
+                        "confidence": "0.97" if (c.get("area") and c.get("config")
+                                                 and (r["heading"] or r.get("no_level_column"))
                                                  and (c.get("tag") or not has_tags)) else "0.50",
                     })
                     for field, key in (("area", "area"), ("configuration", "config"),
                                        ("level_wing_heading", None)):
                         val = r["heading"] if key is None else c.get(key, "")
+                        if key is None and r.get("no_level_column"):
+                            continue        # the table prints no Level / wing column: nothing to read
                         if not val:
                             result["failures"].append({"file": src, "pdf_page": pdf_page, "booklet_page": booklet,
                                                        "row": c.get("tag", "") or c.get("area", ""),
@@ -1601,9 +1866,11 @@ def parse_pdf(path: Path, root: Path) -> Dict[str, Any]:
                                                                       else " (no equipment tag column)"))
                 result["page_failures"].extend((pdf_page, f) for f in pfail)
             elif cls == "zoning keyplan":
-                title, recs, legend = zoning_records(page, words)
+                title, recs, legend = zoning_records(page, words, pair_tags=bool(result["zoned_pages"]))
                 if not title:
-                    result["page_failures"].append((pdf_page, "keyplan title not found"))
+                    result["page_failures"].append((pdf_page, "keyplan title not found" + (
+                        "; the plan is an image with no text layer, so no room or tag labels were read"
+                        if len(recs) < 5 else "")))
                 for rec in recs:
                     result["zoning"].append({**meta, "keyplan_title": title, "has_colour_legend": "Y" if legend[0] else "N",
                                              "legend_source": legend[0], "legend_bbox": legend[1], **rec})
@@ -1612,7 +1879,9 @@ def parse_pdf(path: Path, root: Path) -> Dict[str, Any]:
             elif cls == "pressure regime":
                 notes_top = find_notes_top(words, 0.0, page_h)
                 has_note = notes_top < page_h
-                heading, recs = pressure_records(page, notes_top if has_note else None)
+                head_ws = plan_head or [w for w in words if w.size >= 26.0 and w.x0 < 735 and w.y0 < 140
+                                        and not is_gutter(w)]
+                heading, recs = pressure_records(page, notes_top if has_note else None, head_ws)
                 for rec in recs:
                     result["pressure"].append({**meta, "page_heading": heading, **rec})
                 kind = "pandemic mode note" if re.search(r"PANDEMIC", heading, re.I) else "pressure regime note"
@@ -1634,9 +1903,55 @@ def parse_pdf(path: Path, root: Path) -> Dict[str, Any]:
                         # still recorded, so they are not lost with the table
                         annotation_notes(result["notes"], "reviewer annotation")
             result["pages"].append(entry)
+        _infer_missing_page_numbers(doc, result)
+        sections = sorted({e["section"] for e in result["pages"] if e["section"]})
+        if len(sections) > 1:           # a combined file (Rehab Med): the section strip tells the parts apart
+            for e in result["pages"]:
+                if e["section"] and e["class"] in ("criteria", "standby summary", "pressure regime", "zoning keyplan"):
+                    e["detail"] = (e["detail"] + "; " if e["detail"] else "") + "section %s" % e["section"]
     finally:
         doc.close()
     return result
+
+
+def _infer_missing_page_numbers(doc: "pymupdf.Document", result: Dict[str, Any]) -> None:
+    """A page whose printed number is not in the text layer.
+
+    When the place where the booklet prints its number (taken from the pages that have one) is empty on the rendered
+    page too, the number is simply not printed: that is a gap in the source, not a parsing failure.  The page map then
+    says which number the sequence implies (the printed numbers either side are two apart, so exactly one number is
+    missing) and the page leaves ``page_failures`` for ``page_gaps``.  ``booklet_page`` in the registers stays blank:
+    only what is printed is recorded as printed."""
+    pages = result["pages"]
+    boxes = [e["number_box"] for e in pages if e.get("number_box")]
+    if not boxes:
+        return
+    ref = (sorted(b[0] for b in boxes)[len(boxes) // 2], sorted(b[1] for b in boxes)[len(boxes) // 2],
+           sorted(b[2] for b in boxes)[len(boxes) // 2], sorted(b[3] for b in boxes)[len(boxes) // 2])
+    result.setdefault("page_gaps", [])
+    for i, entry in enumerate(pages):
+        if entry["booklet_page"]:
+            continue
+        msg = "printed page number missing or ambiguous in the text layer"
+        if (entry["pdf_page"], msg) not in result["page_failures"]:
+            continue
+        if not page_number_absent(doc[entry["pdf_page"] - 1], ref):
+            continue
+        prev = next((e["booklet_page"] for e in reversed(pages[:i]) if e["booklet_page"]), "")
+        nxt = next((e["booklet_page"] for e in pages[i + 1:] if e["booklet_page"]), "")
+        inferred = ""
+        if prev.isdigit() and nxt.isdigit() and entry["pdf_page"] > 1:
+            before = pages[i - 1] if i else None
+            after = pages[i + 1] if i + 1 < len(pages) else None
+            if before and after and before["booklet_page"] == prev and after["booklet_page"] == nxt \
+                    and int(nxt) - int(prev) == 2:
+                inferred = str(int(prev) + 1)
+        entry["booklet_inferred"] = inferred
+        result["page_failures"].remove((entry["pdf_page"], msg))
+        result["page_gaps"].append((entry["pdf_page"], "no page number is printed on this page (the place where the booklet prints "
+                                    "it is blank on the render)" + (
+                                        "; by sequence it is %s (%s and %s are printed either side)" % (inferred, prev, nxt)
+                                        if inferred else "; the neighbouring numbers do not fix it")))
 
 
 def collect_inputs(paths: Optional[Sequence[str]], root: Path) -> List[Path]:
@@ -1692,9 +2007,31 @@ def _components(norm: str) -> set:
     return {c.strip() for c in re.split(r"/|\|", norm) if c.strip()}
 
 
+def _split_zones(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """A department whose rows carry a zone (Emergency) is compared zone by zone: each zone becomes its own entry
+    named 'Emergency / P3', and the zone prefix is taken off the room type ('P3 TOILET' is a 'toilet' of zone P3), so
+    that the same room type of two zones, or of Emergency and another department, can be compared."""
+    out: List[Dict[str, Any]] = []
+    for res in results:
+        if not any(r.get("zone") for r in res["criteria"]):
+            out.append(res)
+            continue
+        by_zone: Dict[str, List[Dict[str, Any]]] = {}
+        for r in res["criteria"]:
+            zone = r.get("zone", "")
+            prefix = json.loads(r["raw_cells"]).get("zone_prefix", "") if zone else ""
+            rest = clean(r["room_type_as_printed"][len(prefix):]).strip(" /") if prefix else r["room_type_as_printed"]
+            by_zone.setdefault(zone, []).append({**r, "room_type_norm": room_norm(rest) or r["room_type_norm"],
+                                                 "room_type_as_printed": rest or r["room_type_as_printed"]})
+        for zone, rows in by_zone.items():
+            out.append({**res, "department": "%s / %s" % (res["department"], zone or "no zone"), "criteria": rows})
+    return out
+
+
 def comparison_data(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Match criteria rows across departments by normalised room type and operating mode, and list the
     fields on which the departments differ.  Returns the groups, the near matches and the unmatched names."""
+    results = _split_zones(results)
     depts = [r["department"] for r in results if r["criteria"]]
     table: Dict[Tuple[str, str], Dict[str, Dict[str, Any]]] = {}
     label: Dict[Tuple[str, str], str] = {}
@@ -2019,6 +2356,168 @@ def n_is_table_note1(n: Dict[str, Any]) -> bool:
     return n["note_kind"] == "table note" and n["note_number"] == "1"
 
 
+def _unnumbered_label(p: Dict[str, Any]) -> str:
+    """Page-map cell for a page with no printed number in the text layer."""
+    if "booklet_inferred" in p:
+        return "not printed" + (" (%s by sequence)" % p["booklet_inferred"] if p["booklet_inferred"] else "")
+    return "not in text layer"
+
+
+def _emergency_section(results: List[Dict[str, Any]]) -> List[str]:
+    """Emergency (section 4.1.8): the zoned criteria layout, its other pages, and the Paeds fixes.  Everything is taken
+    from this run; the statements about the other departments were checked against the registers of the previous run."""
+    emer = [r for r in results if r.get("zoned_pages")]
+    L: List[str] = ["## Emergency (section 4.1.8) and Paeds", ""]
+    if not emer:
+        return L + ["No file with the zoned criteria layout (a criteria page captioned 'Rooms Part N') was parsed.", ""]
+    for res in emer:
+        L += ["### %s: criteria layout" % res["department"], "",
+              "The criteria tables of this file are the eleven-column table of the other booklets, with these differences "
+              "(read from the words and confirmed on the rendered pages):", "",
+              "- The caption is `Rooms Part N` (20 pt, top left), not `Room conditions - Part N`; part 6 is captioned "
+              "`Rooms Part 6 - PANDEMIC SURGE AFFECTED ROOMS`, and that title is the operating mode of its rows "
+              "(`table_part` = `Part 6; PANDEMIC SURGE AFFECTED ROOMS`). Parts 1 to 5 carry no mode.",
+              "- There is **no zone column and no merged or vertical text**: the zone is the opening words of the room name "
+              "(`P3 RECEPTION / WAITING`, `FEVER Gown Down`, `P2 South NP Toilet`, `CAC FEVER Triage`). The parser reads the zone from "
+              "that prefix into the new `zone` column (`ZONE_PREFIXES`, longest prefix first) and keeps the prefix as printed in "
+              "`raw_cells.zone_prefix`; `room_type_as_printed` is the whole name as printed. There is no mode, HEPA or other extra "
+              "column: `HEPA` is a value of Filter.",
+              "- Single Pass holds `Y`, `N` or the words `Non-Recirculating` (wrapped over two lines in the cell). The words are "
+              "stored as `Y` (air that is not recirculated is single-pass air) and the words as printed are kept in `raw_cells`; "
+              "this is an interpretation to confirm (below).",
+              "- Pressure is `+5 Pa`, `-5 Pa`, `-10 Pa`, `Neutral`, or `-ve` (a direction with no figure). `-ve` gives direction "
+              "`negative` and a blank `pressure_pa`; `pressure_pa` is signed wherever a figure is printed.",
+              "- The toilet, DU (dirty utility), disposal, cleaner and `CAC FEVER Store` rows (" + str(sum(1 for r in res["criteria"] if r["filter"] == "N")) + " rows) print `N` under **Filter, Relative "
+              "Humidity and Design Temperature** as well as under Afterhours and Setback. The earlier reading that these were shifted columns was "
+              "wrong: the rendered pages show the five `N` in five different columns, so they are as printed (no filter, no humidity "
+              "control, no temperature control). `N` in Relative Humidity and Temperature gives blank normalised values, with the `N` kept "
+              "as printed; Filter is free text and keeps `N`.",
+              "- Relative humidity is printed `≤65` (read as maximum 65 %, `rh_max_pct` = 65).",
+              "- The heading `Design Temperature, C` wraps mid-word on parts 1 to 5 (`Temperatur` / `e, C`, header at y = 123 to 156) and does "
+              "not on part 6 (header at y = 92 to 112, columns narrower); the header rows are found by words, not by position, so both "
+              "read the same eleven columns.",
+              "- Recognition: the strip `4.1.8 MECHANICAL VENTILATION STRATEGY | DESIGN CRITERIA` cannot tell the layouts apart, because "
+              "Paeds, Palliative, Healthy Aging and part of Psych Med print the same `4.1.8` strip over the standard `Room conditions` tables. "
+              "The zoned handler is therefore chosen by the header signature: the caption `Rooms Part N` together with the "
+              "`Pressure Regime, Pa` ... `Setback mode, Y/N` header (`zoned_caption`, `ZONED_HEADER_VOCAB`).", ""]
+        nfail = len(res["failures"]) + len(res["page_failures"])
+        L += ["Failed fields in this file: %s. Rows per table row as printed: %d criteria rows from the six pages "
+              "(26 + 24 + 22 + 27 + 19 + 27 when the rows of each rendered page are counted by eye)." % (
+                  "none" if not nfail else str(nfail), len(res["criteria"])), ""]
+        L += ["Header as printed (text-layer words over each column, read in order):", "",
+              "| PDF page | Booklet p. | Caption | " + " | ".join(
+                  h for h in ("Room", "Pressure", "Min. OA", "Min. total", "Single pass", "Air class", "Filter", "RH", "Temp", "After", "Setback"))
+              + " |", "|---|---|---|" + "---|" * 11]
+        keys = ["room", "pressure", "min_oa", "min_total", "single_pass", "air_class", "filter", "rh", "temp", "afterhours", "setback"]
+        for z in res["zoned_pages"]:
+            L.append("| %s | %s | %s | %s |" % (z["pdf_page"], z["booklet_page"], md(z["caption"]),
+                                               " | ".join(md(z["header"].get(k, "(not found)")) for k in keys)))
+        L += ["", "Section strip of those pages: `%s`." % res["zoned_pages"][0]["strip"], ""]
+        zones: List[str] = []
+        for r in res["criteria"]:
+            if r["zone"] not in zones:
+                zones.append(r["zone"])
+        parts = sorted({r["table_part"] for r in res["criteria"]})
+        L += ["Rows per zone and table part:", "",
+              "| Zone | " + " | ".join(md(pt) for pt in parts) + " | Total | Pressures as printed |",
+              "|---|" + "---|" * (len(parts) + 2)]
+        for zone in zones:
+            zr = [r for r in res["criteria"] if r["zone"] == zone]
+            counts = ["%d" % sum(1 for r in zr if r["table_part"] == pt) or "" for pt in parts]
+            pr: Dict[str, int] = defaultdict(int)
+            for r in zr:
+                pr[clean(r["pressure_regime_as_printed"])] += 1
+            L.append("| %s | %s | %d | %s |" % (zone or "(no zone read)", " | ".join(c if c != "0" else "" for c in counts), len(zr),
+                                                 ", ".join("%s x%d" % kv for kv in sorted(pr.items()))))
+        L.append("| **All** | %s | %d | |" % (" | ".join(str(sum(1 for r in res["criteria"] if r["table_part"] == pt)) for pt in parts),
+                                           len(res["criteria"])))
+        L.append("")
+        pa = defaultdict(int)
+        for r in res["criteria"]:
+            pa[(clean(r["pressure_regime_as_printed"]), r["pressure_pa"], r["pressure_direction"])] += 1
+        L += ["Pressure cells as printed, with what they were read as:", "",
+              "| As printed | `pressure_pa` | `pressure_direction` | Rows |", "|---|---|---|---|"]
+        for (asp, pa_v, dr), n in sorted(pa.items()):
+            L.append("| %s | %s | %s | %d |" % (md(asp), pa_v or "(blank)", dr or "(blank)", n))
+        sp = defaultdict(int)
+        for r in res["criteria"]:
+            sp[(json.loads(r["raw_cells"]).get("single_pass", ""), r["single_pass"])] += 1
+        L += ["", "Single Pass as printed, with what it was read as: " + "; ".join(
+            "`%s` -> `%s` (%d rows)" % (a or "(blank)", b or "(blank)", n) for (a, b), n in sorted(sp.items())) + ".", ""]
+        L += ["### %s: the other pages" % res["department"], "",
+              "| PDF page | Booklet p. | Class | Rows | Detail |", "|---|---|---|---|---|"]
+        for p in res["pages"]:
+            if p["class"] != "criteria":
+                L.append("| %d | %s | %s | %s | %s |" % (p["pdf_page"], p["booklet_page"] or _unnumbered_label(p), p["class"],
+                                                         p["rows"] or "", md(p["detail"])))
+        n_tags = sum(1 for z in res["zoning"] if z["label_kind"] == "equipment_tag")
+        L += ["", "- **Standby summary** (booklet p. %s): the table has three columns, Equipment Tag, **Area Served** and Equipment Standby "
+              "Configuration (note references `1,2`), and no Level or wing column, so `level_wing_heading` is blank on purpose and "
+              "is not a failure. Each row names a duty and a standby tag stacked in one cell (`...-01A` over `...-01B`); the handler "
+              "writes one register row per tag, both with the same area and configuration (%d rows from %d table rows). The two "
+              "numbered notes under the table have no `NOTE` marker and are recorded in `booklet_standby_notes.csv`. The tag of the "
+              "`P2 Acute (N)` standby pair is printed `...EDP2ACUTEN-01A` over `...EDP3ACUTEN-01B` (a `3` where the pair has a `2`); it is "
+              "kept as printed." % (next((p["booklet_page"] for p in res["pages"] if p["class"] == "standby summary"), "?"),
+                                    len(res["standby"]), len(res["standby"]) // 2),
+              "- **Zoning keyplans**: three AHU ZONING plans of the 1st storey (booklet p. 136 to 138) carry the labels "
+              "`AHU-B-02-01EDP3WAIT-01A/B` ... (a duty and standby pair per label; the reader of the standby table finds `-01A` and "
+              "`-01B`). Those labels did not match the tag pattern, so the keyplans showed 0 tags; they now give %d tags (the pair "
+              "pattern is switched on only for a file whose criteria use the zoned layout, so the other departments' zoning rows are unchanged). "
+              "The two detail keyplans (p. 150 and 151) carry a raster `MODE OF VENTILATION` legend (AC, AC (24HR), HC, MV, N.A, NV) "
+              "whose swatches are small; it is now found (the legend image sits higher on the page and its swatches are under 1 %% of "
+              "its area), the text is in the image and is not read, and colours are not interpreted." % n_tags,
+              "- **Pressure regime pages** (10): drawings with the text labels of rooms over a raster plan; the pressure figures of the "
+              "plan (`0 Pa`, `-ve Pa`, `12 ACH`, `Non-Recirculating`) are inside the image and are not in the text layer, so the register "
+              "holds the room labels only. The page heading has two lines (`PRESSURE REGIME P3 WAITING & CONSULT` / `BUSINESS AS USUAL`, "
+              "`... P2 ACCUTE NORTH` / `PANDEMIC SURGE`); the whole heading is now `page_heading` (before, the second line, which names "
+              "the operating mode, was lost as a drawing label). Spelling `ACCUTE` is as printed.", ""]
+        L += ["Colours: on part 6 many cells are set in green type (Single Pass, Air Class and, for the CAC rows, Pressure). Colour is not "
+              "interpreted by the parser; the green cells are probably the values that the pandemic surge changes, which should be "
+              "confirmed from the booklet legend or with the author.", ""]
+    L += ["### Paeds: the two failures", "",
+          "Paeds parses with 22 criteria rows as before (standard `Room conditions` layout). The two failed fields were:", "",
+          "- **Standby area blank** (PDF p17, booklet p117): the Area column of that table is 704 points wide, and the row-rectangle finder "
+          "ignored rectangles 700 points or wider (meant for page-wide fills). With the Area cells not found, the Level / wing column edge "
+          "fell in the middle of the Area text, and the seven standby rows were mis-split (the first words of each area read as the "
+          "level heading, `Level 9 West Core wing Caregiver Accommodation` as one heading with a blank area) while still carrying "
+          "confidence 0.97. The limit is now the page width, and the seven rows read as printed (`Level 8 NE wing`: two areas; "
+          "`Level 9 NW wing`: two; `Level 9 NE wing`: two; `Level 9 West Core wing`: `Caregiver Accommodation`; configuration "
+          "`AHU-CONFIG-E` throughout).",
+          "- **Printed page number missing** (PDF p13): the page prints no number. The place where the booklet prints it (taken from the "
+          "other pages) is blank on the render, so it is a gap in the source and not a parsing failure; the page map says "
+          "`not printed (113 by sequence)` (pages 112 and 114 are printed either side) and `booklet_page` stays blank. The same test "
+          "is applied to every file, so pages of other departments that also print no number moved from failures to source gaps "
+          "(listed under 'Source gaps'); their rows are unchanged.", ""]
+    L += ["### Checked against the previous run", "",
+          "The registers of the previous run were kept and compared department by department after this change. Rows of Dialysis, "
+          "Healthy Aging Geriatrics, IP FAST, IP SURGICAL, ISO AH, Palliative and Psych Med are identical in all seven registers "
+          "(`criteria.csv` with the new `zone` column left out, `criteria_notes.csv`, `booklet_equipment_standby.csv`, "
+          "`booklet_standby_notes.csv`, `booklet_zoning_labels.csv`, `booklet_pressure_labels.csv`, `booklet_room_data.csv`). "
+          "Paeds differs only in the seven standby rows described above. Emergency is the file that changes: criteria 27 -> %d rows "
+          "(failed fields 145 -> %d), standby 29 -> %d, standby notes 0 -> 2, zoning labels 1308 (9 tags instead of 0; the "
+          "legend of p. 150 and 151), pressure labels 286 -> %d (the heading's second line is no longer a label)." % (
+              sum(len(r["criteria"]) for r in emer), sum(len(r["failures"]) + len(r["page_failures"]) for r in emer),
+              sum(len(r["standby"]) for r in emer), sum(len(r["pressure"]) for r in emer)), "",
+          "Three parsers are shared by all files and changed: `-ve` / `+ve` give a direction, a relative humidity or temperature of `N` "
+          "gives blank values, and `≤65` gives a maximum; no cell of another file reads differently (the comparison above found no change). Pages of other files whose page number is "
+          "genuinely absent are source gaps (above). The `ISO AH` and `Healthy Aging` keyplans also carry labels of the form "
+          "`...-01A/B` that are recorded as room labels, not tags, because the pair pattern is limited to the Emergency file; that "
+          "is left unchanged here and is worth a decision.", ""]
+    L += ["### Parsing decisions to confirm (Emergency)", "",
+          "- `Non-Recirculating` is stored as single pass `Y`. The same page prints `Y` for P2 North patient bays in pandemic mode and "
+          "`Non-Recirculating` for P2 South NP and CAC rows, which suggests the same meaning, but the booklet does not say so.",
+          "- A room name that opens with two zones (`FEVER / RESUS NP`, `FEVER / RESUS NP ANTE MMD LINEN`) is read as zone `FEVER` "
+          "(the first word printed). `P2 Waiting / Reception`, `P2 Interview` and `P2 Store` are zone `P2` with no sub-zone printed; "
+          "`P2 South Neutra Staff Station / Linen` is zone `P2 South Neutral` (the `l` is missing in the print).",
+          "- The zone is derived, not printed, so `zone` is blank for every other department and the room name is never altered. "
+          "The pressure regime page titles (P3, ISOL FEVER, P2 ACCUTE NORTH / SOUTH, EDTU, STAFF SUPPORT & COMMON SPACES) use the same "
+          "names, except that the criteria table has a `RESUS` and a `CAC` zone for which no pressure regime page is titled.",
+          "- In the cross-department comparison below, Emergency is compared zone by zone (`Emergency / P3`, ...) with the zone prefix "
+          "taken off the room type, so that a toilet of zone P3 can be compared with a toilet of Dialysis; `room_type_norm` in "
+          "`criteria.csv` is unchanged (it keeps the prefix).", ""]
+    return L
+
+
 def _annot_cell(p: Dict[str, Any]) -> str:
     """Page map 'Annots' cell: reviewer comments, and marks with no text (strike-through, box, arrow) after a plus."""
     n, m = p.get("annotations") or 0, p.get("markup") or 0
@@ -2049,7 +2548,7 @@ def build_report(results: List[Dict[str, Any]], notes_all: List[Dict[str, Any]])
         L += ["### %s (%s)" % (res["department"], res["source_file"]), "",
               "| PDF page | Booklet page | Class | Rows | Annots | Detail |", "|---|---|---|---|---|---|"]
         for p in res["pages"]:
-            L.append("| %d | %s | %s | %s | %s | %s |" % (p["pdf_page"], p["booklet_page"] or "not in text layer",
+            L.append("| %d | %s | %s | %s | %s | %s |" % (p["pdf_page"], p["booklet_page"] or _unnumbered_label(p),
                                                         p["class"], p["rows"] if p["rows"] else "",
                                                         _annot_cell(p), md(p["detail"])))
         L.append("")
@@ -2079,10 +2578,18 @@ def build_report(results: List[Dict[str, Any]], notes_all: List[Dict[str, Any]])
           + "; ".join("%s p%s %s" % (r["department"], p["booklet_page"] or "?", "yes" if "colour legend yes" in p["detail"] else "no")
                       for r in results for p in r["pages"] if p["class"] == "zoning keyplan"), ""]
     nopage = ["%s PDF p%d (%s)" % (r["department"], p["pdf_page"], p["class"])
-              for r in results for p in r["pages"] if not p["booklet_page"]]
+              for r in results for p in r["pages"] if not p["booklet_page"] and "booklet_inferred" not in p]
     if nopage:
         L += ["%d pages have a printed page number that is not in the text layer or is ambiguous (left blank; nothing is "
               "inferred from the sequence): %s." % (len(nopage), "; ".join(nopage)), ""]
+    unprinted = ["%s PDF p%d%s" % (r["department"], p["pdf_page"],
+                                   " (%s by sequence)" % p["booklet_inferred"] if p["booklet_inferred"] else "")
+                 for r in results for p in r["pages"] if "booklet_inferred" in p]
+    if unprinted:
+        L += ["%d pages print no page number at all (the place where the booklet prints it is blank on the render, so this is a "
+              "gap in the source, listed under 'Source gaps' below and not counted as a failed field); `booklet_page` stays blank "
+              "in the registers, and the number the sequence implies is given only here, in the page map: %s." % (
+                  len(unprinted), "; ".join(unprinted)), ""]
 
     L += ["## Criteria notes (verbatim)", "",
           "`criteria_notes.csv` holds every free-text note that bears on the criteria: the numbered NOTE block under a "
@@ -2135,6 +2642,13 @@ def build_report(results: List[Dict[str, Any]], notes_all: List[Dict[str, Any]])
         L.append("")
     if not any_fail:
         L += ["No field failed to parse.", ""]
+    gaps = [(r["department"], pg, msg) for r in results for pg, msg in r.get("page_gaps", [])]
+    if gaps:
+        L += ["### Source gaps (not failures)", "",
+              "| Department | PDF page | What is missing from the source |", "|---|---|---|"]
+        for d, pg, msg in gaps:
+            L.append("| %s | %s | %s |" % (d, pg, md(msg)))
+        L.append("")
     L += ["Not failures, by design: `NR` (not required/recorded) and `-` cells are valid and give a blank "
           "normalised value (single pass `NR` is kept as `NR`); a pressure regime given only in words "
           "(Neutral, Negative, Positive) has a direction but a blank `pressure_pa` because no Pa value is printed; "
@@ -2149,6 +2663,7 @@ def build_report(results: List[Dict[str, Any]], notes_all: List[Dict[str, Any]])
           "- Equipment standby notes (1 and 2) are written to `booklet_standby_notes.csv`; the references printed on the "
           "Configuration header (`1,2`) are carried on every standby row as `note_refs`.", ""]
     L += _second_batch_section(results)
+    L += _emergency_section(results)
     L += ["## Differences between departments for the same room type", ""]
     L += compare_departments(results)
     L += _corrections_section(results)

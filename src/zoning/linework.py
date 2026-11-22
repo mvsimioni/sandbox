@@ -20,6 +20,7 @@ ARC_MIN_SEGS = 4
 ARC_MIN_RADIUS_PT = 5.0       # 0.44 m at 1:250
 ARC_MAX_RADIUS_PT = 30.0      # 2.6 m
 ARC_MAX_RMS_PT = 0.35
+ARC_MAX_TURN_DEG = 50.0       # a chain is cut where the path turns by more than this between two consecutive pieces
 ARC_MIN_SPAN_DEG = 35.0
 ARC_MAX_SPAN_DEG = 200.0
 JOIN_TOL_PT = 0.12            # end points closer than this are the same node
@@ -93,17 +94,33 @@ def extract_strokes(page) -> StrokeSet:
         if typ in ("f", "fs") and p.get("fill") is not None:
             fc = tuple(round(float(v), 2) for v in p["fill"])
             if fc != (1.0, 1.0, 1.0):
-                pts = []
+                # one ring per sub-path: a new ring starts when a line does not begin where the previous one ended
+                ring: List[Tuple[float, float]] = []
+
+                def flush():
+                    if len(ring) >= 3:
+                        fills.append({"rgb": fc, "pts": list(ring)})
+                    ring.clear()
+
                 for it in p["items"]:
                     if it[0] == "l":
-                        if not pts:
-                            pts.append(tr(it[1]))
-                        pts.append(tr(it[2]))
+                        a_, b_ = tr(it[1]), tr(it[2])
+                        if ring and math.hypot(ring[-1][0] - a_[0], ring[-1][1] - a_[1]) > 1e-3:
+                            flush()
+                        if not ring:
+                            ring.append(a_)
+                        ring.append(b_)
                     elif it[0] == "re":
+                        flush()
                         r = it[1]
-                        pts = [tr((r[0], r[1])), tr((r[2], r[1])), tr((r[2], r[3])), tr((r[0], r[3]))]
-                if len(pts) >= 3:
-                    fills.append({"rgb": fc, "pts": pts})
+                        ring.extend([tr((r[0], r[1])), tr((r[2], r[1])), tr((r[2], r[3])), tr((r[0], r[3]))])
+                        flush()
+                    elif it[0] == "qu":
+                        flush()
+                        q = it[1]
+                        ring.extend([tr(q[0]), tr(q[1]), tr(q[3]), tr(q[2])])
+                        flush()
+                flush()
     inv = [None] * len(styles)
     for k, i in styles.items():
         inv[i] = k
@@ -162,6 +179,7 @@ class Arc:
     p1: Tuple[float, float]
     span_deg: float
     rms: float
+    seg_idx: Tuple[int, ...] = ()      # indices (into the stroke set) of the chain of short segments that forms the arc
 
 
 def _fit_circle(pts: np.ndarray):
@@ -201,15 +219,36 @@ def detect_door_arcs(ss: StrokeSet, widths=(0.24, 0.36), colour=(0.0, 0.0, 0.0))
             x = parent[x]
         return x
 
+    def end_toward(i: int, nx: float, ny: float):
+        """(far end, near end) of segment i, the near end being the one closer to the node (nx, ny)."""
+        a, b = seg[i, :2], seg[i, 2:]
+        if math.hypot(a[0] - nx, a[1] - ny) <= math.hypot(b[0] - nx, b[1] - ny):
+            return b, a
+        return a, b
+
     for (kx, ky), lst in list(node.items()):
         cand = list(lst)
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 if dx or dy:
                     cand += node.get((kx + dx, ky + dy), [])
-        deg = len(set(cand))
-        if deg > 2:  # a branch point is not part of a single arc
+        uniq = sorted(set(cand))
+        if len(uniq) > 2:  # a branch point is not part of a single arc
             continue
+        if len(uniq) == 2:
+            # two arcs that meet at a cusp (a double door: both leaves close on the same point) are two arcs, not one:
+            # the path turns back on itself there, a smooth arc turns by a few degrees only
+            i, j = uniq
+            nx, ny = kx * 0.15, ky * 0.15
+            fi, ni = end_toward(i, nx, ny)
+            fj, nj = end_toward(j, nx, ny)
+            vi = np.array([ni[0] - fi[0], ni[1] - fi[1]])
+            vj = np.array([fj[0] - nj[0], fj[1] - nj[1]])
+            li, lj = np.hypot(*vi), np.hypot(*vj)
+            if li > 1e-9 and lj > 1e-9:
+                turn = math.degrees(math.acos(max(-1.0, min(1.0, float(vi @ vj) / (li * lj)))))
+                if turn > ARC_MAX_TURN_DEG:
+                    continue
         for j in cand[1:]:
             ra, rb = find(cand[0]), find(j)
             if ra != rb:
@@ -240,7 +279,7 @@ def detect_door_arcs(ss: StrokeSet, widths=(0.24, 0.36), colour=(0.0, 0.0, 0.0))
         a1 = a[k]
         p0 = (cx + r * math.cos(math.radians(a0)), cy + r * math.sin(math.radians(a0)))
         p1 = (cx + r * math.cos(math.radians(a1)), cy + r * math.sin(math.radians(a1)))
-        arcs.append(Arc(cx, cy, r, p0, p1, span, rms))
+        arcs.append(Arc(cx, cy, r, p0, p1, span, rms, tuple(int(x) for x in g)))
     return arcs
 
 

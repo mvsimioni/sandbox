@@ -753,7 +753,8 @@ def test_footer_year_is_not_a_page_number(tmp_path: Path) -> None:
     assert b.printed_page_number(b.page_words(p2), p2.rect.height, p2.rect.width) == "136"
 
 
-def build_banded_standby_page(doc: "pymupdf.Document", tags: bool = True, annotate: bool = False) -> None:
+def build_banded_standby_page(doc: "pymupdf.Document", tags: bool = True, annotate: bool = False,
+                              wide_area: bool = False) -> None:
     """Standby table with one rectangle per row in every column.  Area text is centred in a wide cell and wraps
     above and below the tag line, Configuration sits a few points off it, and the level heading wraps in a merged cell."""
     cv = Canvas(doc)
@@ -762,6 +763,8 @@ def build_banded_standby_page(doc: "pymupdf.Document", tags: bool = True, annota
     if not tags:
         x_tag = x_level      # no tag column: Level | Area | Configuration
         x_area = 295.0
+    if wide_area:            # an Area cell 704 points wide (Paeds), wider than the 700 point cut-off for page-wide fills
+        x_area, x_cfg = 251.0, 955.0
     x_end = 1143.0
     heads = [(x_level, x_tag if tags else x_area, "IP TEST")]
     if tags:
@@ -987,3 +990,258 @@ def test_page_markup_marks_only_thin_horizontal_lines_as_strikes() -> None:
         a.update()
     marks = b.page_markup(page)
     assert [m["strike"] for m in marks] == [True, False] and [m["kind"] for m in marks] == ["Line", "Line"]
+
+
+# --------------------------------------------------------------------------- #
+# Emergency 4.1.8: zoned criteria layout, stacked standby tags, pair tags on keyplans, page numbers, Paeds standby
+# --------------------------------------------------------------------------- #
+STRIP_418 = "4.1.8 MECHANICAL VENTILATION STRATEGY"          # 15 pt in the strip at the top right, as in the booklets
+
+
+def build_zoned_criteria_page(doc: "pymupdf.Document", caption: str = "Rooms Part 1", booklet_page: str = "130",
+                              extra_rows=None) -> None:
+    """The Emergency layout: caption 'Rooms Part N' (20 pt) beside the 4.1.8 strip, a header whose temperature
+    heading wraps mid-word, no zone column (the zone opens the room name), 'Non-' / 'Recirculating' over two lines in
+    Single Pass, '-ve' pressures and an 'N' under Filter, Humidity and Temperature for toilets."""
+    cv = Canvas(doc)
+    cv.text(745, 55, STRIP_418, 15)
+    cv.text(60, 95, "DESIGN CRITERIA", 12)
+    cv.text(91, 54, caption, 20)
+    cv.rect(50, 118, 1140, 162, fill=(0.35, 0.6, 0.83))
+    head = {
+        "room": ["Room"], "pressure": ["Pressure", "Regime, Pa"], "oa": ["Min.", "Outdoor", "ACH"],
+        "total": ["Min. Total", "ACH"], "single": ["Single", "Pass"], "aclass": ["Air Class"],
+        "filter": ["Filter"], "rh": ["Relative", "Humidity"], "temp": ["Design", "Temperatur", "e, C"],
+        "after": ["Afterhours", "mode, Y/N"], "setback": ["Setback", "mode, Y/N"],
+    }
+    for key, lines in head.items():
+        top = 140 - 7 * len(lines)
+        for i, line in enumerate(lines):
+            x = 60 if key == "room" else CENTRE[key]
+            cv.text(x, top + 14 * i, line, 11, centre=key != "room")
+    base = {"filter": "MERV 15", "rh": "≤65", "temp": "21-24", "after": "N", "setback": "N"}
+    rows = [
+        ("P3 TRIAGE", {**base, "pressure": "Neutral", "oa": "2", "total": "12", "single": "NONREC", "aclass": "4",
+                       "filter": "HEPA"}),
+        ("P3 TOILET", {**base, "pressure": "-ve", "oa": "2", "total": "15", "single": "Y", "aclass": "4",
+                       "filter": "N", "rh": "N", "temp": "N"}),
+        ("FEVER Gown Down", {**base, "pressure": "+5 Pa", "oa": "10", "total": "10", "single": "Y", "aclass": "4"}),
+        ("P2 South NP Patient Bay", {**base, "pressure": "-10 Pa", "oa": "2", "total": "12", "single": "N", "aclass": "3"}),
+        ("P2 South Neutra Staff Station / Linen", {**base, "pressure": "Neutral", "oa": "2", "total": "12",
+                                                   "single": "N", "aclass": "3"}),
+        ("CAC FEVER Triage", {**base, "pressure": "-5 Pa", "oa": "12", "total": "12", "single": "Y", "aclass": "4"}),
+        ("P3 Bed Room", {**base, "pressure": "Neutral", "oa": "2", "total": "9", "single": "N", "aclass": "2"}),
+    ] + list(extra_rows or [])
+    y = 190.0
+    for room, cells in rows:
+        cv.text(60, y, room, 11)
+        for key, val in cells.items():
+            if val == "NONREC":
+                cv.text(CENTRE[key], y - 8, "Non-", 11, centre=True)
+                cv.text(CENTRE[key], y + 8, "Recirculating", 11, centre=True)
+            else:
+                cv.text(CENTRE[key], y, val, 11, centre=True)
+        y += 34.0
+    _footer(cv, booklet_page)
+
+
+def test_zone_of_reads_the_leading_zone_words() -> None:
+    assert b.zone_of("P3 RECEPTION / WAITING") == ("P3", "P3")
+    assert b.zone_of("P2 South NP Staff Station / Linen / store") == ("P2 South NP", "P2 South NP")
+    assert b.zone_of("P2 South Neutra Staff Station / Linen") == ("P2 South Neutral", "P2 South Neutra")
+    assert b.zone_of("P2 North CU MEDS")[0] == "P2 North" and b.zone_of("P2 Interview")[0] == "P2"
+    assert b.zone_of("CAC FEVER Triage")[0] == "CAC FEVER" and b.zone_of("CAC Toilet")[0] == "CAC"
+    assert b.zone_of("FEVER / RESUS NP")[0] == "FEVER" and b.zone_of("RESUS")[0] == "RESUS"
+    assert b.zone_of("Staff Support Pods")[0] == "Staff Support" and b.zone_of("Plant Store") == ("", "")
+    assert b.zone_of("P20 Room") == ("", "")                      # a prefix must end at a word boundary
+
+
+def test_direction_words_and_the_new_cell_values() -> None:
+    assert b.parse_pressure_full("-ve") == {"pa": "", "pa_min": "", "pa_max": "", "direction": "negative", "ok": True}
+    assert b.parse_pressure_full("+ve")["direction"] == "positive" and b.parse_pressure_full("-ve")["pa"] == ""
+    assert b.parse_pressure_full("-10 Pa")["pa"] == "-10" and b.parse_pressure_full("+5 Pa")["pa"] == "5"
+    assert b.parse_pressure_full("Neutral")["direction"] == "neutral"
+    assert b.parse_single_pass("Non- Recirculating") == ("Y", True) and b.parse_single_pass("Non-Recirculating") == ("Y", True)
+    assert b.parse_single_pass("N") == ("N", True) and b.parse_single_pass("Recirculating")[1] is False
+    assert b.parse_rh("≤65") == ("65", "", True) and b.parse_rh("N") == ("", "", True) and b.parse_rh("Max 60%") == ("60", "", True)
+    assert b.parse_temp("N") == ("", "", True) and b.parse_temp("21-24") == ("21", "24", True)
+
+
+def test_zoned_layout_reads_zone_pressure_and_words(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    build_zoned_criteria_page(doc)
+    build_zoned_criteria_page(doc, caption="Rooms Part 6 – PANDEMIC SURGE AFFECTED ROOMS", booklet_page="135")
+    res = _parse(_save(doc, tmp_path, "IP_ZONED_Section_4.1.8_X.pdf"), tmp_path)
+    assert res["failures"] == [] and res["page_failures"] == []
+    assert [p["class"] for p in res["pages"]] == ["criteria", "criteria"]
+    rows = res["criteria"]
+    assert len(rows) == 14 and set(rows[0]) == set(b.CRITERIA_FIELDS)
+    first = rows[:7]
+    assert [r["zone"] for r in first] == ["P3", "P3", "FEVER", "P2 South NP", "P2 South Neutral", "CAC FEVER", "P3"]
+    assert [r["room_type_as_printed"] for r in first][:2] == ["P3 TRIAGE", "P3 TOILET"]      # the name is never altered
+    assert json_raw(first[4])["zone_prefix"] == "P2 South Neutra" and json_raw(first[0])["zone_prefix"] == "P3"
+    triage, toilet, fever, south, _, cac, _ = first
+    assert triage["single_pass"] == "Y" and json_raw(triage)["single_pass"] == "Non- Recirculating"   # as printed kept
+    assert triage["filter"] == "HEPA" and triage["rh_as_printed"] == "≤65" and triage["rh_max_pct"] == "65"
+    assert toilet["pressure_regime_as_printed"] == "-ve" and toilet["pressure_direction"] == "negative"
+    assert toilet["pressure_pa"] == "" and toilet["filter"] == "N" and toilet["rh_as_printed"] == "N"
+    assert toilet["rh_max_pct"] == "" and toilet["temp_as_printed"] == "N" and toilet["temp_min_c"] == ""
+    assert (toilet["afterhours"], toilet["setback"]) == ("N", "N") and toilet["min_total_ach"] == "15"
+    assert fever["pressure_pa"] == "5" and fever["pressure_direction"] == "positive"          # signed
+    assert south["pressure_pa"] == "-10" and cac["pressure_pa"] == "-5"
+    assert {r["confidence"] for r in rows} == {"0.97"} and all(r["booklet_page"] in ("130", "135") for r in rows)
+    assert {r["table_part"] for r in rows[:7]} == {"Part 1"}
+    assert {r["table_part"] for r in rows[7:]} == {"Part 6; PANDEMIC SURGE AFFECTED ROOMS"}   # mode from the caption
+    z = res["zoned_pages"][0]
+    assert z["strip"].startswith("4.1.8") and z["caption"] == "Rooms Part 1" and z["header"]["temp"] == "Design Temperatur e, C"
+    assert z["header"]["pressure"] == "Pressure Regime, Pa" and z["header"]["single_pass"] == "Single Pass"
+    assert z["header"]["afterhours"] == "Afterhours mode, Y/N" and z["rows"] == 7
+
+
+def test_a_room_with_no_known_zone_is_a_failed_field(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    build_zoned_criteria_page(doc, extra_rows=[("Plant Store", {"pressure": "Neutral", "oa": "2", "total": "6", "single": "N",
+                                                               "aclass": "2", "filter": "MERV 15", "rh": "≤65", "temp": "21-24",
+                                                               "after": "N", "setback": "N"})])
+    res = _parse(_save(doc, tmp_path, "IP_ZONED_Section_4.1.8_X.pdf"), tmp_path)
+    assert [(f["row"], f["field"]) for f in res["failures"]] == [("Plant Store", "zone")]
+    assert res["criteria"][-1]["zone"] == "" and float(res["criteria"][-1]["confidence"]) < 0.9
+
+
+def test_the_4_1_8_strip_alone_does_not_select_the_zoned_handler(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    build_criteria_page(doc)                                   # caption 'Room conditions - Part 3', standard table
+    doc[0].insert_text((745, 68), STRIP_418, fontname="helv", fontsize=15)
+    res = _parse(_save(doc, tmp_path), tmp_path)
+    assert "4.1.8" in b.section_strip(b.page_words(pymupdf.open(str(tmp_path / "IP_TEST_Section_4.8_Mechanical_Ventilation_Strategy.pdf"))[0]))
+    assert res["zoned_pages"] == [] and {r["zone"] for r in res["criteria"]} == {""}
+    assert res["criteria"][0]["table_part"] == "Part 3" and len(res["criteria"]) == 7 and res["failures"] == []
+    assert b.zoned_caption(b.page_words(doc[0])) is None
+
+
+def test_zone_column_is_blank_for_other_departments_and_signed_pressure_is_kept() -> None:
+    assert b.CRITERIA_FIELDS.index("zone") == b.CRITERIA_FIELDS.index("table_part") + 1
+    assert b.CRITERIA_FIELDS.index("pressure_pa_min") == b.CRITERIA_FIELDS.index("pressure_pa") + 1
+
+
+def test_comparison_goes_zone_by_zone_with_the_prefix_taken_off(tmp_path: Path) -> None:
+    z_doc, s_doc = pymupdf.open(), pymupdf.open()
+    build_zoned_criteria_page(z_doc)
+    build_criteria_page(s_doc)                                 # 'Bed Room': total ACH 8 against the zone P3 'Bed Room': 9
+    rz = _parse(_save(z_doc, tmp_path, "IP_ZONED_Section_4.1.8_X.pdf"), tmp_path)
+    rs = _parse(_save(s_doc, tmp_path, "IP_PLAIN_Section_4.8_X.pdf"), tmp_path)
+    data = b.comparison_data([rz, rs])
+    assert "IP ZONED / P3" in data["departments"] and "IP ZONED / CAC FEVER" in data["departments"]
+    diff = next(d for d in data["diffs"] if d["label"] == "Bed Room")
+    assert diff["fields"][0][0] == "min_total_ach"
+    assert sorted(ds[0] for _, ds in diff["fields"][0][1]) == ["IP PLAIN", "IP ZONED / P3"]
+    assert rz["criteria"][-1]["room_type_norm"] == "p3 bed room"                      # criteria.csv keeps the prefix
+
+
+def build_pair_standby_page(doc: "pymupdf.Document") -> None:
+    """Emergency standby table: Equipment Tag | Area Served | Equipment Standby Configuration (no level column); a
+    duty and standby tag stacked in one cell; numbered notes with no NOTE marker, one of which holds 'CONFIGURATION'."""
+    cv = Canvas(doc)
+    cv.text(120, 40, "EQUIPMENT STANDBY CONFIGURATION SUMMARY", 20)
+    for x0, x1, lines in ((84.0, 338.0, ["Equipment Tag"]), (338.0, 947.0, ["Area Served"]),
+                          (947.0, 1125.0, ["Equipment Standby", "Configuration 1,2"])):
+        cv.rect(x0, 105, x1, 182, fill=(0.35, 0.6, 0.83))
+        for i, line in enumerate(lines):
+            cv.text((x0 + x1) / 2.0, 135 + 18 * i - 9 * (len(lines) - 1), line, 14, centre=True)
+    y = 182.0
+    for tag, area, cfg in (("AHU-B-02-01EDP3WAIT", "P3 Waiting & Consult", "CONFIG-B"),
+                           ("AHU-B-03-01EDFEVER", "Fever", "CONFIG-A")):
+        for x0, x1 in ((84.0, 338.0), (338.0, 947.0), (947.0, 1125.0)):
+            cv.rect(x0, y, x1, y + 58, fill=(0.82, 0.87, 0.94))
+        cv.text(90, y + 8, tag + "-01A", 14)
+        cv.text(90, y + 28, tag + "-01B", 14)
+        cv.text(345, y + 20, area, 14)
+        cv.text(1036, y + 20, cfg, 14, centre=True)
+        y += 58
+    cv.text(85, 740, "1 – REFER TO APPENDIX 4.B FOR RESILIENCE STRATEGY.", 14)
+    cv.text(85, 757, "2 – EXCEPT FOR EQUIPMENT STANDBY CONFIGURATION TYPE H, ALL CONFIGURATIONS ALLOWS FOR REDUNDANCY.", 14)
+    _footer(cv, "139")
+
+
+def test_standby_with_stacked_tags_and_no_level_column(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    build_pair_standby_page(doc)
+    res = _parse(_save(doc, tmp_path, "IP_ZONED_Section_4.1.8_X.pdf"), tmp_path)
+    assert res["failures"] == [] and res["page_failures"] == [] and res["pages"][0]["class"] == "standby summary"
+    got = [(r["tag_as_written"], r["area"], r["configuration"], r["level_wing_heading"]) for r in res["standby"]]
+    assert got == [("AHU-B-02-01EDP3WAIT-01A", "P3 Waiting & Consult", "CONFIG-B", ""),
+                   ("AHU-B-02-01EDP3WAIT-01B", "P3 Waiting & Consult", "CONFIG-B", ""),
+                   ("AHU-B-03-01EDFEVER-01A", "Fever", "CONFIG-A", ""),
+                   ("AHU-B-03-01EDFEVER-01B", "Fever", "CONFIG-A", "")]
+    assert {r["confidence"] for r in res["standby"]} == {"0.97"} and {r["note_refs"] for r in res["standby"]} == {"1,2"}
+    assert [n["note_number"] for n in res["standby_notes"]] == ["1", "2"]
+    assert res["standby_notes"][1]["text"].startswith("EXCEPT FOR EQUIPMENT STANDBY CONFIGURATION TYPE H")
+    assert not any(r["tag_as_written"].startswith(("1", "2")) for r in res["standby"])      # a note is not a row
+
+
+def test_standby_area_cell_wider_than_700_points(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    build_banded_standby_page(doc, tags=False, wide_area=True)
+    res = _parse(_save(doc, tmp_path), tmp_path)
+    assert res["failures"] == [] and res["page_failures"] == []
+    assert {r["level_wing_heading"] for r in res["standby"]} == {"Level 15 NW wing"}
+    assert res["standby"][0]["area"].startswith("Patient Bay") and res["standby"][1]["area"].endswith("Cleaner Room")
+    assert [r["configuration"] for r in res["standby"]] == ["AHU-CONFIG-E", "AHU-CONFIG-F"]
+
+
+def test_keyplan_pair_tags_only_for_the_zoned_file(tmp_path: Path) -> None:
+    def keyplan(doc):
+        cv = Canvas(doc)
+        cv.text(900, 150, "IP 1ST STOREY KEYPLAN", 14)
+        cv.text(300, 300, "AHU-B-02-01EDP3WAIT-01A/B", 12)
+        cv.text(400, 400, "STAFF", 10)
+        _footer(cv, "136")
+    zoned, plain = pymupdf.open(), pymupdf.open()
+    build_zoned_criteria_page(zoned)
+    keyplan(zoned)
+    keyplan(plain)
+    rz = _parse(_save(zoned, tmp_path, "IP_ZONED_Section_4.1.8_X.pdf"), tmp_path)
+    rp = _parse(_save(plain, tmp_path, "IP_PLAIN_Section_4.8_X.pdf"), tmp_path)
+    kinds = lambda res: {z["text"]: z["label_kind"] for z in res["zoning"]}
+    assert kinds(rz)["AHU-B-02-01EDP3WAIT-01A/B"] == "equipment_tag" and "1 tags" in rz["pages"][1]["detail"]
+    assert kinds(rp)["AHU-B-02-01EDP3WAIT-01A/B"] == "room_label"          # other departments are left as they were
+
+
+def test_pressure_page_heading_keeps_its_second_line(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    cv = Canvas(doc)
+    cv.text(100, 18, "PRESSURE REGIME P3 WAITING & CONSULT", 28)
+    cv.text(100, 56, "BUSINESS AS USUAL", 28)
+    cv.text(300, 300, "TRIAGE", 12)
+    _footer(cv, "140")
+    res = _parse(_save(doc, tmp_path, "IP_ZONED_Section_4.1.8_X.pdf"), tmp_path)
+    assert res["pages"][0]["class"] == "pressure regime"
+    assert res["pressure"][0]["page_heading"] == "PRESSURE REGIME P3 WAITING & CONSULT BUSINESS AS USUAL"
+    assert [p["text"] for p in res["pressure"]] == ["TRIAGE"] and res["pages"][0]["detail"].endswith("BUSINESS AS USUAL")
+
+
+def _numbered_booklet(tmp_path: Path, ink_on_middle: bool) -> dict:
+    doc = pymupdf.open()
+    for number in ("112", "", "114"):
+        cv = Canvas(doc)
+        cv.text(900, 150, "IP 9TH STOREY KEYPLAN", 14)
+        cv.text(60, 805, "ALEXANDRA HOSPITAL REDEVELOPMENT PROJECT | DETAILED DESIGN BOOKLET", 11)
+        if number:
+            cv.text(1150, 808, number, 14)
+        elif ink_on_middle:                            # a page number that is a picture: ink, but no text
+            cv.page.draw_rect(pymupdf.Rect(1150, 808, 1172, 824), color=None, fill=(0, 0, 0))
+    return _parse(_save(doc, tmp_path, "IP_NUM_Section_4.8_X.pdf"), tmp_path)
+
+
+def test_a_page_that_prints_no_number_is_a_source_gap_not_a_failure(tmp_path: Path) -> None:
+    res = _numbered_booklet(tmp_path, ink_on_middle=False)
+    assert res["page_failures"] == []
+    assert res["page_gaps"] and res["page_gaps"][0][0] == 2 and "113 (112 and 114" in res["page_gaps"][0][1]
+    assert [p["booklet_page"] for p in res["pages"]] == ["112", "", "114"]         # as printed: stays blank
+    assert res["pages"][1]["booklet_inferred"] == "113" and b._unnumbered_label(res["pages"][1]) == "not printed (113 by sequence)"
+    assert all(z["booklet_page"] == "" for z in res["zoning"] if z["pdf_page"] == 2)
+
+
+def test_a_page_number_that_is_ink_but_not_text_stays_a_failure(tmp_path: Path) -> None:
+    res = _numbered_booklet(tmp_path, ink_on_middle=True)
+    assert res["page_gaps"] == [] and [pg for pg, _ in res["page_failures"]] == [2]

@@ -280,8 +280,10 @@ def bridge_openings(seg: np.ndarray, max_gap_pt: float = BRIDGE_MAX_PT, lateral_
 # --------------------------------------------------------------------------- #
 # Furniture and door-swing faces: merge small tagless faces bounded by thin lines
 # --------------------------------------------------------------------------- #
-FURNITURE_MAX_M2 = 8.0
+FURNITURE_MAX_M2 = 8.0       # tagless faces below this and at least half fine pen are furniture or door-swing slivers
+FLIGHT_MAX_M2 = 8.0          # no separate larger class: every candidate face is under 8 m2 (a tread, a fitting, a sliver); blobs of them may be larger
 THIN_FRACTION_MIN = 0.5
+THIN_FRACTION_LARGE = 0.8
 WALL_NEAR_PT = 0.45
 SAMPLE_STEP_PT = 0.6
 
@@ -297,74 +299,98 @@ def _boundary_samples(face: Polygon) -> np.ndarray:
     return np.concatenate(pts)
 
 
+BLOB_MAX_M2 = 150.0
+
+
 def merge_small_faces(polys: Sequence[Polygon], tags: Sequence[dict], wall_lines: np.ndarray,
-                      area_scale_m2_per_pt2: float, max_passes: int = 8) -> Tuple[List[Polygon], dict]:
-    """Merge tagless faces below ``FURNITURE_MAX_M2`` into the neighbour they share most thin-line boundary with.
+                      area_scale_m2_per_pt2: float) -> Tuple[List[Polygon], dict]:
+    """Merge furniture, door-swing, finish and stair-tread faces back into the room they sit in.
 
     The faces come from noding every black line (heavy wall strokes and the fine-pen furniture, door leaves and
-    partitions).  A tagless face whose boundary is at least half fine-pen line is a furniture or door-swing
-    sliver, not a room; wall-thickness faces are bounded by heavy strokes and stay separate.  A boundary point
-    counts as heavy wall when a heavy-wall line (``wall_lines``, an array of shapely lines) is within 0.45 pt.
-    Faces merge through shared thin-line boundary only, so a heavy wall is never dissolved.
+    partitions).  A *candidate* is a tagless face bounded mostly by fine pen: under 8 m2 with at least half of its boundary
+    fine pen, or under 40 m2 with at least 80 % (a stair flight, a fitted unit).  A boundary point counts as heavy wall when a
+    heavy-wall line (``wall_lines``, an array of shapely lines) is within 0.45 pt, so wall-thickness faces (bounded by heavy
+    strokes) are never candidates.  Candidates that touch each other through fine-pen boundary form blobs (a row of
+    treads); a blob of at most 150 m2 is merged into the non-candidate face (a tagged room, a bigger space) with which it
+    shares the most fine-pen boundary.  A heavy wall is never dissolved.
     """
     faces = list(polys)
     wall_tree = STRtree(wall_lines)
     tag_pts = shapely.points([[t["x_pv"], t["y_pv"]] for t in tags]) if tags else np.array([], dtype=object)
-    merged_total = 0
-    for _ in range(max_passes):
-        tree = STRtree(faces)
-        has_tag = np.zeros(len(faces), bool)
-        if len(tag_pts):
-            _, li = tree.query(tag_pts, predicate="within")
-            has_tag[np.unique(li)] = True
-        area = shapely.area(faces) * area_scale_m2_per_pt2
-        small = np.where((~has_tag) & (area < FURNITURE_MAX_M2))[0]
-        target: Dict[int, int] = {}
-        for i in small:
-            samp = _boundary_samples(faces[i])
-            sp = shapely.points(samp)
-            near_wall = np.zeros(len(sp), bool)
-            qi, _ = wall_tree.query(sp, predicate="dwithin", distance=WALL_NEAR_PT)
-            near_wall[np.unique(qi)] = True
-            if near_wall.mean() > (1.0 - THIN_FRACTION_MIN):
-                continue   # bounded mostly by heavy strokes: a wall-thickness face, keep it
-            thin_pts = sp[~near_wall]
-            if len(thin_pts) == 0:
-                continue
-            qi, fj = tree.query(thin_pts, predicate="dwithin", distance=0.3)
-            cnt: Dict[int, int] = defaultdict(int)
-            for j in fj:
-                if j != i:
-                    cnt[int(j)] += 1
-            if cnt:
-                target[int(i)] = max(cnt, key=lambda j: (cnt[j], area[j]))
-        if not target:
-            break
-        parent = list(range(len(faces)))
+    tree = STRtree(faces)
+    has_tag = np.zeros(len(faces), bool)
+    if len(tag_pts):
+        _, li = tree.query(tag_pts, predicate="within")
+        has_tag[np.unique(li)] = True
+    area = shapely.area(faces) * area_scale_m2_per_pt2
+    is_cand = np.zeros(len(faces), bool)
+    thin_pts: Dict[int, np.ndarray] = {}
+    for i in np.where((~has_tag) & (area < FLIGHT_MAX_M2))[0]:
+        sp = shapely.points(_boundary_samples(faces[i]))
+        near_wall = np.zeros(len(sp), bool)
+        qi, _ = wall_tree.query(sp, predicate="dwithin", distance=WALL_NEAR_PT)
+        near_wall[np.unique(qi)] = True
+        need = THIN_FRACTION_MIN if area[i] < FURNITURE_MAX_M2 else THIN_FRACTION_LARGE
+        if (1.0 - near_wall.mean()) >= need:
+            is_cand[i] = True
+            thin_pts[int(i)] = sp[~near_wall]
+    # thin-boundary adjacency counts
+    adj: Dict[int, Dict[int, int]] = {}
+    for i, pts in thin_pts.items():
+        if len(pts) == 0:
+            continue
+        _, fj = tree.query(pts, predicate="dwithin", distance=0.3)
+        cnt: Dict[int, int] = defaultdict(int)
+        for j in fj:
+            if j != i:
+                cnt[int(j)] += 1
+        adj[i] = cnt
+    parent = list(range(len(faces)))
 
-        def find(x):
-            while parent[x] != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
 
-        for i, j in target.items():
-            ri, rj = find(i), find(j)
-            if ri != rj:
-                parent[ri] = rj
-        groups: Dict[int, List[int]] = defaultdict(list)
-        for i in range(len(faces)):
-            groups[find(i)].append(i)
-        new_faces: List[Polygon] = []
-        for members in groups.values():
-            if len(members) == 1:
-                new_faces.append(faces[members[0]])
-            else:
-                u = shapely.union_all([faces[m] for m in members])
-                new_faces.extend(list(u.geoms) if u.geom_type == "MultiPolygon" else [u])
-        merged_total += len(target)
-        faces = new_faces
-    return faces, {"merged_faces": merged_total, "faces_after": len(faces)}
+    for i, cnt in adj.items():
+        for j in cnt:
+            if is_cand[j]:
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[ri] = rj
+    blobs: Dict[int, List[int]] = defaultdict(list)
+    for i in np.where(is_cand)[0]:
+        blobs[find(int(i))].append(int(i))
+    target_of: Dict[int, int] = {}
+    n_blobs_unplaced = 0
+    for root, members in blobs.items():
+        if sum(area[m] for m in members) > BLOB_MAX_M2:
+            n_blobs_unplaced += 1
+            continue
+        score: Dict[int, int] = defaultdict(int)
+        for m in members:
+            for j, c in adj.get(m, {}).items():
+                if not is_cand[j]:
+                    score[j] += c
+        if not score:
+            n_blobs_unplaced += 1
+            continue
+        best = max(score, key=lambda j: (has_tag[j], score[j], area[j]))
+        for m in members:
+            target_of[m] = best
+    groups: Dict[int, List[int]] = defaultdict(list)
+    for i in range(len(faces)):
+        groups[target_of.get(i, i)].append(i)
+    new_faces: List[Polygon] = []
+    for root, members in groups.items():
+        if len(members) == 1:
+            new_faces.append(faces[members[0]])
+        else:
+            u = shapely.union_all([faces[m] for m in members])
+            new_faces.extend(list(u.geoms) if u.geom_type == "MultiPolygon" else [u])
+    return new_faces, {"merged_faces": int(len(target_of)), "faces_after": len(new_faces), "n_candidate_faces": int(is_cand.sum()),
+                       "n_blobs": len(blobs), "n_blobs_unplaced": n_blobs_unplaced}
 
 
 # --------------------------------------------------------------------------- #
@@ -434,8 +460,8 @@ def centreline_polygon(region: Polygon, half_gap_pt: float, others: STRtree, oth
     g = region.buffer(half_gap_pt, join_style="mitre", mitre_limit=2.0)
     for j in others.query(g, predicate="intersects"):
         o = other_geoms[j]
-        if o is region or o.equals(region):
-            continue
+        if o is region or o.intersection(region).area > 0.5 * o.area:
+            continue      # the region itself (or its counterpart from the other method)
         g = g.difference(o)
     if g.geom_type == "MultiPolygon":
         g = max(g.geoms, key=lambda x: x.area)
@@ -460,8 +486,13 @@ class VectorResult:
 
 
 def measure_rooms(ss: lw.StrokeSet, tags: Sequence[dict], area_scale_m2_per_pt2: float,
-                  heavy_widths: Sequence[float] = HEAVY_WIDTHS, thin_widths: Sequence[float] = THIN_WIDTHS) -> VectorResult:
-    """Run method A on a stroke set and the room-tag seeds."""
+                  heavy_widths: Sequence[float] = HEAVY_WIDTHS, thin_widths: Sequence[float] = THIN_WIDTHS,
+                  blocker_tags: Sequence[dict] = ()) -> VectorResult:
+    """Run method A on a stroke set and the room-tag seeds.
+
+    ``blocker_tags`` are shaft and riser codes (lift cars, risers): a face holding one is a space of its own, never merged
+    into a neighbouring room as furniture.
+    """
     diag: dict = {"heavy_widths_pt": list(heavy_widths), "thin_widths_pt": list(thin_widths)}
     arcs = lw.detect_door_arcs(ss)
     wseg, wdiag = build_wall_segments(ss, heavy_widths, include_arcs=True, arcs=arcs)
@@ -478,7 +509,8 @@ def measure_rooms(ss: lw.StrokeSet, tags: Sequence[dict], area_scale_m2_per_pt2:
     polys = polygonise(allseg)
     diag["n_faces_raw"] = len(polys)
     wlines = segments_to_lines(wseg)
-    faces, md = merge_small_faces(polys, tags, wlines, area_scale_m2_per_pt2)
+    faces, md = merge_small_faces(polys, list(tags) + list(blocker_tags), wlines, area_scale_m2_per_pt2)
+    md["n_blocker_tags"] = len(blocker_tags)
     diag.update(md)
     regions = regions_with_tags(faces, tags, area_scale_m2_per_pt2)
     gaps, gstat = local_wall_gaps(regions, faces, area_scale_m2_per_pt2)

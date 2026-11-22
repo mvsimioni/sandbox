@@ -123,7 +123,7 @@ def build_sample_zones(sample_polys: Sequence[dict], calib_sample: cal.Calibrati
         mot = "MOT" in (row.get("contents", "") or "") or row.get("pattern", "") not in ("", None)
         z = Zone(key=gov, kind="AHU", source="RFI-ME-0233 sample", tag=gov, sample_tag=tag, tag_basis=basis,
                  polygons_pv=[poly], fill_hex=avoid_pure_red(sp["fill"]), sample_fill_hex=sp["fill"],
-                 departments="%s (%s)" % (row["dept_code"], row["department"]), storey_served=served or "4", plant_level=plant,
+                 departments=row["department"], storey_served=served or "4", plant_level=plant,
                  refs=["data/source/Template/AHU Zoning - RFI-ME-0233.pdf p1 annot xref %s" % sp["xref"],
                        "out/registers/sample_zones.csv zone_index %s" % row["zone_index"],
                        "out/registers/tag_crossref_rfi_me_0233.csv", "out/registers/conflicts.csv CF-0003" if tag in tag_map else ""],

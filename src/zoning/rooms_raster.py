@@ -24,7 +24,10 @@ from shapely.geometry import Polygon
 TILE_PX = 2048
 MAX_MM_PER_PX = 10.0
 FURNITURE_MAX_M2 = 8.0
+FLIGHT_MAX_M2 = 8.0
 THIN_FRACTION_MIN = 0.5
+THIN_FRACTION_LARGE = 0.8
+BLOB_MAX_M2 = 150.0
 
 
 def pixels_per_pt(mm_per_pt: float, target_mm_per_px: float = 8.0) -> float:
@@ -123,6 +126,30 @@ def _pair_contacts(lab: np.ndarray, wall: np.ndarray, offsets=(2, 3, 4), chunk_r
     return acc
 
 
+def _boundary_pixel_counts(lab: np.ndarray, wall: np.ndarray, n: int, chunk_rows: int = 1024) -> Tuple[np.ndarray, np.ndarray]:
+    """Per component: number of its pixels 4-adjacent to a heavy-wall pixel and to a fine-pen-only pixel."""
+    wall_adj = np.zeros(n, np.int64)
+    thin_adj = np.zeros(n, np.int64)
+    H, W = lab.shape
+    for r0 in range(0, H, chunk_rows):
+        r1 = min(r0 + chunk_rows, H)
+        L = lab[r0:r1]
+        Wm = wall[r0:r1] > 0
+        for dr, dc in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+            # neighbour of each pixel in direction (dr, dc), clipped to the chunk's rows with a one-row halo
+            ra, rb = max(r0 + dr, 0), min(r1 + dr, H)
+            ca, cb_ = max(dc, 0), W + min(dc, 0)
+            sub = L[(ra - dr - r0):(rb - dr - r0), (ca - dc):(cb_ - dc)]
+            nb_lab = lab[ra:rb, ca:cb_]
+            nb_wall = wall[ra:rb, ca:cb_] > 0
+            sel = (sub > 0) & (nb_lab == 0)
+            if not sel.any():
+                continue
+            wall_adj += np.bincount(sub[sel & nb_wall], minlength=n)
+            thin_adj += np.bincount(sub[sel & ~nb_wall], minlength=n)
+    return wall_adj, thin_adj
+
+
 @dataclass
 class SeedRegion:
     tag_index: int
@@ -138,8 +165,13 @@ class SeedRegion:
 
 def grow_regions(wall: np.ndarray, thin: np.ndarray, roi: Tuple[float, float, float, float], S: float,
                  seeds_pv: np.ndarray, m2_per_px: float, pt_per_px: float,
-                 max_region_m2: float = 4000.0) -> Tuple[List[SeedRegion], dict]:
-    """Seeded region growing from tag seeds (page-view pt) on the wall and thin rasters."""
+                 max_region_m2: float = 4000.0, n_room_seeds: Optional[int] = None) -> Tuple[List[SeedRegion], dict]:
+    """Seeded region growing from tag seeds (page-view pt) on the wall and thin rasters.
+
+    The first ``n_room_seeds`` seeds are room tags (they get regions and split shared components); the rest are shaft and
+    riser codes that only stop their component being absorbed as furniture.
+    """
+    n_room_seeds = len(seeds_pv) if n_room_seeds is None else n_room_seeds
     x0, y0, _, _ = roi
     barrier = (wall > 0) | (thin > 0)
     lab, n = ndi.label(~barrier)           # 4-connected
@@ -184,43 +216,59 @@ def grow_regions(wall: np.ndarray, thin: np.ndarray, roi: Tuple[float, float, fl
             x = parent[x]
         return x
 
-    small = (~has_seed) & (areas * m2_per_px < FURNITURE_MAX_M2)
-    small[0] = False
+    # candidates: unseeded components bounded mostly by fine pen (same thresholds as method A)
+    cand = (~has_seed) & (areas * m2_per_px < FLIGHT_MAX_M2)
+    cand[0] = False
+    wall_adj, thin_adj = _boundary_pixel_counts(lab, wall, n + 1)
+    own = wall_adj + thin_adj
+    thin_frac = np.divide(thin_adj, own, out=np.zeros(n + 1), where=own > 0)
+    need = np.where(areas * m2_per_px < FURNITURE_MAX_M2, THIN_FRACTION_MIN, THIN_FRACTION_LARGE)
+    cand &= thin_frac >= need
+    for b_ in border_set:
+        cand[b_] = False
     contacts = _pair_contacts(lab, wall)
     diag["n_contact_pairs"] = len(contacts)
+    diag["n_candidate_components"] = int(cand.sum())
+    # blobs of candidates joined through fine-pen contact (a row of stair treads), then merged into the best anchor
+    for (a_, b_), (t, w_) in contacts.items():
+        if t > 0 and cand[a_] and cand[b_]:
+            ra, rb = find(a_), find(b_)
+            if ra != rb:
+                parent[ra] = rb
+    blob_members: Dict[int, List[int]] = defaultdict(list)
+    for c in np.nonzero(cand)[0]:
+        blob_members[find(int(c))].append(int(c))
+    score: Dict[int, Dict[int, int]] = defaultdict(lambda: defaultdict(int))
+    for (a_, b_), (t, w_) in contacts.items():
+        if t <= 0:
+            continue
+        if cand[a_] and not cand[b_]:
+            score[find(a_)][b_] += t
+        elif cand[b_] and not cand[a_]:
+            score[find(b_)][a_] += t
+    final_parent = np.arange(n + 1)
     merged = 0
-    for _ in range(8):
-        agg: Dict[int, Dict[int, List[int]]] = defaultdict(lambda: defaultdict(lambda: [0, 0]))
-        for (a, b), (t, w) in contacts.items():
-            ra, rb = find(a), find(b)
-            if ra == rb:
-                continue
-            agg[ra][rb][0] += t; agg[ra][rb][1] += w
-            agg[rb][ra][0] += t; agg[rb][ra][1] += w
-        changed = False
-        for c, nb in agg.items():
-            if parent[c] != c or not small[c] or c in border_set:
-                continue
-            thin_tot = sum(v[0] for v in nb.values())
-            wall_tot = sum(v[1] for v in nb.values())
-            if thin_tot + wall_tot == 0 or thin_tot / (thin_tot + wall_tot) < THIN_FRACTION_MIN:
-                continue
-            tgt = max(nb.items(), key=lambda kv: (kv[1][0], areas[kv[0]]))[0]
-            parent[c] = tgt
-            areas[tgt] += areas[c]
-            small[tgt] = small[tgt] and (not has_seed[tgt]) and areas[tgt] * m2_per_px < FURNITURE_MAX_M2
-            changed = True
+    blob_unplaced = 0
+    for root, members in blob_members.items():
+        tot = sum(areas[m] for m in members) * m2_per_px
+        sc = score.get(root)
+        if tot > BLOB_MAX_M2 or not sc:
+            blob_unplaced += 1
+            continue
+        anchor = max(sc, key=lambda k: (has_seed[k], sc[k], areas[k]))
+        for m in members:
+            final_parent[m] = anchor
             merged += 1
-        if not changed:
-            break
     diag["n_absorbed_components"] = merged
+    diag["n_blobs_unplaced"] = blob_unplaced
+    parent = final_parent
     root = np.array([find(i) for i in range(n + 1)], dtype=np.int64)
     lab2 = root[lab]
     del lab
     # group seeds by merged component
     comp_seeds: Dict[int, List[int]] = defaultdict(list)
     for i, l in enumerate(seed_lab):
-        if l > 0:
+        if l > 0 and i < n_room_seeds:
             comp_seeds[int(root[l])].append(i)
     results: List[SeedRegion] = []
     h, w = lab2.shape
@@ -251,7 +299,9 @@ def grow_regions(wall: np.ndarray, thin: np.ndarray, roi: Tuple[float, float, fl
                 results.append(SeedRegion(i, px, area, 0.0, None, comp, len(idxs) > 1, True, "component open to the outside"))
                 continue
             poly, perim = _mask_polygon(m, r0, c0, x0, y0, S)
-            results.append(SeedRegion(i, px, area, perim * pt_per_px / S * 0 + perim, poly, comp, len(idxs) > 1, leaked))
+            if poly is not None:
+                area = poly.area * m2_per_px * S * S      # polygon on the line centre: same convention as the vector face
+            results.append(SeedRegion(i, px, area, perim * pt_per_px, poly, comp, len(idxs) > 1, leaked))
     diag["n_seed_regions"] = len(results)
     diag["n_split_components"] = sum(1 for idxs in comp_seeds.values() if len(idxs) > 1)
     diag["n_unplaced_seeds"] = int((seed_lab == 0).sum())
@@ -259,7 +309,8 @@ def grow_regions(wall: np.ndarray, thin: np.ndarray, roi: Tuple[float, float, fl
 
 
 def _mask_polygon(mask: np.ndarray, r0: int, c0: int, x0: float, y0: float, S: float):
-    """Polygon (page-view pt) of a boolean mask: pixel outline grown by half a pixel, holes kept; returns (polygon, perimeter pt)."""
+    """Polygon (page-view pt) of a boolean mask: the traced outline (through the centres of the outermost region pixels) grown by one
+    pixel, which puts it on the centre of the 1 px wall line, the same place as the vector face; holes kept; returns (polygon, perimeter pt)."""
     m = np.pad(mask.astype(np.uint8), 1)
     cnts, hier = cv2.findContours(m, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
     if hier is None:
@@ -280,7 +331,7 @@ def _mask_polygon(mask: np.ndarray, r0: int, c0: int, x0: float, y0: float, S: f
     if not polys:
         return None, 0.0
     poly = polys[0] if len(polys) == 1 else shapely.union_all(polys)
-    poly = poly.buffer(0.5 / S, join_style="mitre", mitre_limit=2.0)
+    poly = poly.buffer(1.0 / S, join_style="mitre", mitre_limit=2.0)
     if poly.geom_type == "MultiPolygon":
         poly = max(poly.geoms, key=lambda g: g.area)
     return poly, float(poly.length)
@@ -293,15 +344,15 @@ def roi_from_points(pts: np.ndarray, margin_pt: float = 40.0) -> Tuple[float, fl
 
 
 def measure_rooms(wall_segments: np.ndarray, thin_segments: np.ndarray, tags: Sequence[dict], mm_per_pt: float,
-                  target_mm_per_px: float = 8.0, margin_pt: float = 40.0) -> Tuple[List[SeedRegion], dict]:
+                  target_mm_per_px: float = 8.0, margin_pt: float = 40.0, blocker_tags: Sequence[dict] = ()) -> Tuple[List[SeedRegion], dict]:
     """Rasterise in tiles and grow a region from each tag seed; returns regions and diagnostics."""
-    seeds = np.array([[t["x_pv"], t["y_pv"]] for t in tags], float)
+    seeds = np.array([[t["x_pv"], t["y_pv"]] for t in list(tags) + list(blocker_tags)], float)
     roi = roi_from_points(seeds, margin_pt)
     S = pixels_per_pt(mm_per_pt, target_mm_per_px)
     wall = render_tiles(wall_segments, roi, S)
     thin = render_tiles(thin_segments, roi, S)
     thin[wall > 0] = 0
     m2_per_px = (mm_per_pt / S / 1000.0) ** 2
-    res, diag = grow_regions(wall, thin, roi, S, seeds, m2_per_px, mm_per_pt / 1000.0)
+    res, diag = grow_regions(wall, thin, roi, S, seeds, m2_per_px, mm_per_pt / 1000.0, n_room_seeds=len(tags))
     diag.update({"roi_pv": list(roi), "px_per_pt": S, "mm_per_px_x": mm_per_pt / S, "tile_px": TILE_PX})
     return res, diag

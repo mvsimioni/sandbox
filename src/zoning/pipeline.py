@@ -60,6 +60,14 @@ def load_tags(reg: Path) -> List[dict]:
     return rows
 
 
+def load_code_tags(reg: Path) -> List[dict]:
+    """Shaft and riser codes of the sheet (lift cars, risers): blockers, not rooms."""
+    rows = [r for r in common.read_csv_dicts(reg / "room_tags_plans.csv") if r["page"] == "8" and r["kind"] == "code"]
+    for r in rows:
+        r["x_pv"] = float(r["x_pv"]); r["y_pv"] = float(r["y_pv"])
+    return rows
+
+
 # --------------------------------------------------------------------------- #
 def stage_calibrate(ctx: dict) -> dict:
     P = ctx["P"]
@@ -105,7 +113,7 @@ def stage_vector(ctx: dict) -> dict:
     plan_box = (min(t["x_pv"] for t in tags) - 60, min(t["y_pv"] for t in tags) - 60, max(t["x_pv"] for t in tags) + 60, max(t["y_pv"] for t in tags) + 60)
     t0 = time.time()
     classes = lw.class_table(ss, bbox=plan_box)
-    vec = rv.measure_rooms(ss, tags, k2)
+    vec = rv.measure_rooms(ss, tags, k2, blocker_tags=ctx["codes"])
     vec.diagnostics["seconds"] = round(time.time() - t0, 1)
     vec.diagnostics["stroke_classes"] = classes
     vec.diagnostics["n_strokes_total"] = int(len(ss.seg))
@@ -117,7 +125,7 @@ def stage_raster(ctx: dict) -> dict:
     vec: rv.VectorResult = ctx["vector"]["vec"]
     cb: cal.Calibration = ctx["cal"]["cal_bg"]
     t0 = time.time()
-    res, diag = rr.measure_rooms(vec.wall_segments, vec.thin_segments, ctx["tags"], 0.5 * (cb.scale_x_mm_per_pt + cb.scale_y_mm_per_pt))
+    res, diag = rr.measure_rooms(vec.wall_segments, vec.thin_segments, ctx["tags"], 0.5 * (cb.scale_x_mm_per_pt + cb.scale_y_mm_per_pt), blocker_tags=ctx["codes"])
     diag["seconds"] = round(time.time() - t0, 1)
     return {"regions": res, "diag": diag}
 
@@ -185,6 +193,23 @@ def stage_compare(ctx: dict) -> dict:
               "method_agreement", "a_minus_b_pct", "appd_caption_m2", "appd_annotation_index", "appd_overlap_room", "appd_overlap_polygon",
               "error_vs_caption_pct", "error_b_vs_caption_pct", "flags", "source"]
     common.write_csv_dicts(P["reg"] / "room_polygons_L04.csv", rows, fields)
+    # the wall-face polygons (and the centre-line and method B outlines) in building mm, as WKT
+    cb_ = ctx["cal"]["cal_bg"]
+
+    def to_mm(poly):
+        if poly is None:
+            return ""
+        def conv(coords):
+            xs, ys = cb_.to_building(np.array([c[0] for c in coords]), np.array([c[1] for c in coords]))
+            return list(zip(np.round(xs, 0).tolist(), np.round(ys, 0).tolist()))
+        shell = conv(poly.exterior.coords)
+        holes = [conv(r.coords) for r in poly.interiors]
+        return Polygon(shell, holes).wkt
+
+    wkt_rows = [{"room_id": r["room_id"], "wall_face_wkt_mm": to_mm(r["a_face"]), "centreline_wkt_mm": to_mm(r["a_cl"]),
+                 "method_b_wkt_mm": to_mm(r["b_face"]), "frame": "building mm, origin grid 2 / A, X along numbered grids, Y along lettered grids (grid_model.json)",
+                 "source": "%s page 8, calibrated by src/zoning/calibrate.py" % BG_PDF} for r in rooms]
+    common.write_csv_dicts(P["reg"] / "room_polygons_L04_wkt.csv", wkt_rows, ["room_id", "wall_face_wkt_mm", "centreline_wkt_mm", "method_b_wkt_mm", "frame", "source"])
     return {"appd": appd, "rooms": rooms, "rows": rows, "stats": stats}
 
 
@@ -201,6 +226,8 @@ def stage_zones(ctx: dict) -> dict:
     classes = zn.classify_appd_spaces(appd, common.read_csv_dicts(P["reg"] / "appd_spaces.csv") and [r for r in common.read_csv_dicts(P["reg"] / "appd_spaces.csv") if r["page"] == "5"],
                                       [r for r in common.read_csv_dicts(P["reg"] / "appd_equipment.csv") if r["page"] == "5"])
     appd_zones = zn.merge_appd_zones(appd, classes)
+    for z in appd_zones:
+        z.transfer_residual_mm = C["transfer_residual_appd_mm"]["max"]
     zones = sample_zones + appd_zones
     k2 = C["cal_bg"].area_scale_mm2_per_pt2() / 1e6
     rooms = ctx["compare"]["rooms"]
@@ -279,7 +306,7 @@ def run(stages: Sequence[str], work: Optional[Path] = None) -> dict:
     P = paths()
     work = Path(work) if work else P["work"]
     common.ensure_dir(work)
-    ctx: dict = {"P": P, "tags": load_tags(P["reg"])}
+    ctx: dict = {"P": P, "tags": load_tags(P["reg"]), "codes": load_code_tags(P["reg"])}
     fn = {"calibrate": stage_calibrate, "vector": stage_vector, "raster": stage_raster, "compare": stage_compare,
           "zones": stage_zones, "pdf": stage_pdf, "report": stage_report}
     last = max(STAGES.index(s) for s in stages)

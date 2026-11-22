@@ -83,6 +83,7 @@ def zone_contents(z: zn.Zone, area_m2: float, polygon_area_m2: float, n_rooms: i
         "Plant level: %s" % ("L%s" % z.plant_level if z.plant_level else "not stated in tag"),
         "Area: %.1f m2 (sum of %d assigned rooms); zone polygon %.1f m2" % (area_m2, n_rooms, polygon_area_m2),
         "Room count: %d" % n_rooms,
+        "Transfer to this sheet: grid-calibrated, residual %.1f mm" % z.transfer_residual_mm if z.source.startswith("RFI") else "Geometry: App D polygon transferred through the grid calibration, residual %.1f mm" % z.transfer_residual_mm,
         "Tag basis: %s%s" % (z.tag_basis, ("; sample wrote %s" % z.sample_tag) if z.sample_tag and z.sample_tag != z.tag else ""),
         "Sources: %s" % " | ".join(z.refs),
     ]

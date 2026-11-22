@@ -72,11 +72,14 @@ def write_qa_report(ctx: dict, out_md: Path, crops_dir: Path, page) -> dict:
     Z = ctx.get("zones")
     pdfr = ctx.get("pdf")
     cb = C["cal_bg"]
+    crops_dir.mkdir(parents=True, exist_ok=True)
+    for old in crops_dir.glob("crop_*.png"):
+        old.unlink()          # crops of an earlier run must not survive
     L: List[str] = []
     w = L.append
     w("# Pilot room measurement, 4th storey IP (L04)\n")
     w("Sheet AR-IP-01-04-001 (tender Corrigendum 6), page 8 of `data/source/Basis/Arch Combined Tender .pdf`. Every number below is produced by `src/zoning` "
-      "(`python3 -I -m src.zoning.pipeline`); nothing was measured from pixels by eye. Register: `out/registers/room_polygons_L04.csv`. "
+      "(`python3 -I src/zoning/pilot_l4.py`); nothing was measured from pixels by eye. Register: `out/registers/room_polygons_L04.csv`. "
       "Positions are page-view pt (rotated landscape frame, origin top-left) unless a column says building mm (origin grid 2 / A, X along the numbered grids, Y along the lettered grids).\n")
 
     # ---------------------------------------------------------------- calibration
@@ -125,8 +128,8 @@ def write_qa_report(ctx: dict, out_md: Path, crops_dir: Path, page) -> dict:
             role = "fine pen (furniture, door leaves, partitions, door-swing arcs)"
         w("| %s | %.2f | %d | %.0f | %.2f | %.2f | %.2f | %s |" % (r["colour"], r["width_pt"], r["segments"], r["total_len_pt"], r["mean_len_pt"], r["axis_share"], r["joined_share"], role))
     w("\nChoice: walls are black strokes of width 0.60, 0.84, 1.08, 1.32 and 2.76 pt (the heavy pens: long, orthogonal, joined runs). Black 0.24, 0.36 and 0.48 pt are the fine pens: they carry the finishes, "
-      "door leaves, door-swing arcs (0.24/0.36) and furniture. Heavy strokes alone close only about a quarter of the rooms (105 of 422 tags in a bounded region at 2 px/pt in the trial; 174 with long fine-pen runs, 199 with bridging), "
-      "so all fine-pen lines are noded too and the faces that are only furniture are merged back (below). Grey, white, red, orange, cyan and green strokes are grids, hatches, dimensions and mark-ups and are not used.\n")
+      "door leaves, door-swing arcs (0.24/0.36) and furniture. In an exploratory trial run outside the pipeline (flood at 2 px/pt, scratch notes, not re-run here) heavy strokes with door closers closed 105 of the 422 room tags into a bounded region, 174 with long fine-pen runs added and 199 with bridging added, "
+      "so all fine-pen lines are noded too and the faces that are only furniture, door swings or stair treads are merged back (below). Shaft and riser codes (%d `code` tags: lift cars, risers) make their faces spaces of their own, so a lift shaft is not merged into its lobby." % d.get("n_blocker_tags", 0) + " Grey, white, red, orange, cyan and green strokes are grids, hatches, dimensions and mark-ups and are not used.\n")
     w("* Door openings: %d door-swing arcs recognised (chains of short segments that fit a circle of 0.44-2.6 m radius and 35-200 deg span); %d closed with a straight closer from the hinge to the arc end that lies on the wall line (%d connectors joining the closer ends to the wall)." % (
         d["n_arcs"], d["n_doors_closed"], d.get("n_door_connectors", 0)))
     w("* Openings without an arc: %d bridges between wall ends facing each other on one line (gap up to 2.4 m); %d short connectors snapping dangling wall ends (<= 1 pt) to the nearest line." % (d["n_bridges"], d.get("n_snap_connectors", 0) + d.get("n_bridge_snap_connectors", 0)))
@@ -154,8 +157,8 @@ def write_qa_report(ctx: dict, out_md: Path, crops_dir: Path, page) -> dict:
     w("**Method A against method B.** %d rooms (A regions); B has a region for %d. Agreement means |A - B| <= 2 %% or 0.3 m2 on the wall-face area. Share within tolerance: **%s** (%d of %d). Configuration asks for at least 95 %% (`tolerances.method_a_vs_b.min_share`): %s.\n" % (
         n_rooms, ab, _pct(share), round(share * ab) if ab else 0, ab, "met" if share >= 0.95 else "NOT met"))
     pa, pb = stats["A/wall_face"], stats["B/wall_face"]
-    w("**Both against the App D captions.** A room is matched to an App D polygon when each covers at least 80 %% of the other after the polygon is transferred into the background frame. Matched: %d rooms by method A, %d by method B (of %d App D polygons; %d room(s) per App D polygon at most one)." % (
-        stats["n_matched_A"], stats["n_matched_B"], len(appd), 1))
+    w("**Both against the App D captions.** A room is matched to an App D polygon when each covers at least 80 %% of the other after the polygon is transferred into the background frame. Matched: %d rooms by method A, %d by method B (of %d App D polygons; one room per polygon)." % (
+        stats["n_matched_A"], stats["n_matched_B"], len(appd)))
     w("\n| method / boundary convention | matched rooms | median error | median abs error | mean error | within 2 % | within 5 % | 90th percentile abs error |")
     w("|---|---|---|---|---|---|---|---|")
     for m in ("A", "B"):
@@ -199,7 +202,7 @@ def write_qa_report(ctx: dict, out_md: Path, crops_dir: Path, page) -> dict:
     diffs = [(abs(float(r["a_minus_b_pct"])), i) for i, r in enumerate(rows) if r["a_minus_b_pct"] != ""]
     diffs.sort(reverse=True)
     n_dis = sum(1 for r in rows if r["method_agreement"] == "differ")
-    w("%d rooms differ between A and B beyond tolerance, %d have no B region. The three largest differences follow.\n" % (n_dis, sum(1 for r in rows if r["method_agreement"] == "no B region")))
+    w("%d rooms differ between A and B beyond tolerance, %d have no B region. The largest differences are open areas that leak to the outside in one method (a plant room, terraces) and lift lobbies where method A merges the X-braced lift-car faces into the lobby while method B leaves them out (crops below). The three largest differences follow.\n" % (n_dis, sum(1 for r in rows if r["method_agreement"] == "no B region")))
     for _, i in diffs[:3]:
         r, rm = rows[i], rooms[i]
         n += 1
