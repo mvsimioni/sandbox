@@ -59,10 +59,11 @@ def read_proposals(rc: Path) -> List[Dict[str, Any]]:
         b, a, f = before.get(ahu, {}), after.get(ahu, {}), fcu.get(no, {})
         sep = status == "SEPARATE"
         src = f.get("oasrc")
+        src_txt = "an outdoor-air source still to be chosen from the zoning" if str(src or "").strip().lower() in ("", "not set") else src
         out.append(dict(
             department_no=dept_no, department=dept_name, room_no=no, room_name=r[hdr["Room name"]], storey=r[hdr["Storey"]],
             ahu_before=ahu, rule_outcome=status,
-            proposal=(f"dedicated FCU for the room load; outdoor air ducted from {src}" if sep else
+            proposal=(f"dedicated FCU for the room load; outdoor air ducted from {src_txt}" if sep else
                       "not separated: criteria an FCU might not meet (air class, filtration, pressure control or fixed by specification)"),
             room_supply_lps=r[hdr["Final supply"]], room_oa_lps=r[hdr["Outdoor air"]], room_oa_fraction=r[hdr["Outdoor-air fraction"]],
             ahu_oa_fraction_before=b.get("frac"), ahu_oa_fraction_after=a.get("frac") if sep else b.get("frac"),

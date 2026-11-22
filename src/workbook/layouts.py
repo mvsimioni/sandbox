@@ -229,7 +229,7 @@ VAV_KEYS = ["tag", "type", "rooms", "n", "max", "min", "turn", "code", "src", "r
 VEN_KEYS = ["tag", "room", "role", "d1", "d2", "off", "design", "tight", "ratio", "status", "code", "src", "remark"]
 FB_KEYS = ["no", "name", "ahu", "supply", "oa", "exhaust", "ret", "extract", "leak_in", "leak_out", "inn", "out", "net",
            "close", "status", "ach"]
-FB2_KEYS = ["ahu", "supply", "oa", "exhaust", "ret", "relief", "net_ach", "area", "vol", "sum_net", "close", "status"]
+FB2_KEYS = ["ahu", "supply", "oa", "exhaust", "ret", "relief", "net_ach", "area", "vol", "sum_net", "close", "status", "note"]
 CP_KEYS = ["no", "name", "ahu", "calc_s", "sch_s", "d_s", "dp_s", "calc_r", "sch_r", "d_r", "calc_e", "sch_e", "d_e",
            "pa_calc", "pa_sch", "flag", "code", "src", "remark"]
 CP2_KEYS = ["ahu", "calc", "sch", "d", "dp", "sched", "d_sched", "flag", "code", "src", "remark"]

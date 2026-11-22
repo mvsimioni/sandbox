@@ -381,7 +381,7 @@ def write_flow_balance(ctx: Ctx) -> None:
     heads2 = [H("ahu", "AHU or system", "", 24), H("supply", "Room supply", "L/s", 9), H("oa", "AHU outdoor air", "L/s", 9),
               H("exhaust", "Exhaust", "L/s", 9), H("ret", "Return", "L/s", 9), H("relief", "Net positive air to relieve", "L/s", 10),
               H("net_ach", "As air changes", "ACH", 8), H("area", "Area", "m" + U, 8), H("vol", "Volume", "m³", 9),
-              H("sum_net", "Sum of room nets", "L/s", 9), H("close", "Tolerance", "L/s", 9), H("status", "Closure", "", 14)]
+              H("sum_net", "Sum of room nets", "L/s", 9), H("close", "Tolerance", "L/s", 9), H("status", "Closure", "", 14), H("note", "Note", "", 46)]
     for k, h, u, w in heads2:
         _hl(ws, f"{L2.col(k)}{L2.first - 2}", h, "Header")
         _hl(ws, f"{L2.col(k)}{L2.first - 1}", u or None, "Unit")
@@ -396,6 +396,8 @@ def write_flow_balance(ctx: Ctx) -> None:
         put(ws, g("sum_net"), f"=SUMIFS({L.rng('net')},{L.rng('ahu')},{g('ahu')})", "Calc", "d1")
         put(ws, g("close"), f"=MAX(BalTolLps,BalTolPct*{g('supply')})", "Calc", "d1")
         put(ws, g("status"), f'=IF(AND(ABS({g("relief")}-{g("oa")}+{g("exhaust")})<={g("close")},{g("ret")}>=0,{g("oa")}<={AH.addr("sa_ahu", t)}+{g("close")}),"PASS","FAIL")', "Check")
+        put(ws, g("note"), (f'=IF({g("relief")}<-{g("close")},"Negative relief: "&TEXT(-{g("relief")},"0")&" L/s of make-up air is drawn as transfer air from '
+                            f'adjacent spaces; the corridor or adjacent system must supply it.",IF({g("relief")}>{g("close")},"Positive relief: "&TEXT({g("relief")},"0")&" L/s to spill or transfer out.",""))'), "Note")
     if ctx.ahus:
         cf_text(ws, f"{L2.col('status')}{L2.first}:{L2.col('status')}{L2.last}", f"{L2.col('status')}{L2.first}", "FAIL")
     _setup(ws, ctx, L, L.idx["ach"], L2.last, "4:6", f"{L.col('name')}{L.first}", "FF00B050")

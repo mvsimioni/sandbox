@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import datetime
 import json
 import re
 import shutil
@@ -120,6 +121,9 @@ def ka_input() -> Dict[str, Any]:
                method="transcribed from the brief", confidence="high")
     d = copy.deepcopy(base)
     d["sources"].append(src)
+    d["project"] = dict(d["project"], name="Known-answer pressure suites (synthetic test)",
+                        revision=dict(rev="A", date=datetime.date.today().isoformat(), description="Synthetic known-answer test; not a Rev A reproduction",
+                                      by="", checked="", approved=""))
     d["department"] = dict(number="KA", name="Known-answer pressure suites (synthetic test)")
     d["references"] = []
     d["flags"] = []
@@ -228,7 +232,7 @@ def compare_reva(rc: Path, root: Path) -> Dict[str, Any]:
     add("Fan heat (kW)", pick("fan"), ahs["B31"].value)
     add("Outdoor air sensible, example basis (kW)", pick("oa_sens_ms"), ahs["B26"].value)
     add("Coil duty on the example's outdoor-air basis (kW)", pick("coil_ms"), ahs["B35"].value,
-        "return enthalpy is the supply-weighted mean of the room conditions (52.81 kJ/kg) where the example takes the first space type (52.6)")
+        "room condition of the first space type (52.6 kJ/kg), as the example's AHU Summary B13/B14")
     # per room
     rz_rows = {"Z1": 30, "Z2": 31, "Z3": 32, "Z4": 33, "Z5": 34}
     eng = gen["Level 1 Room Zones"]

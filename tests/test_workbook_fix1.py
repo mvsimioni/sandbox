@@ -85,7 +85,7 @@ def test_print_proof_passes_and_airflow_prints_every_column(ka):
     assert all(v["scale"] >= 0.75 for v in proof["sheets"].values())
     import re
     txt = re.sub(r"\s+", " ", __import__("subprocess").run(["pdftotext", "-layout", str(pdf), "-"], capture_output=True, text=True).stdout)
-    for word in ("Outdoor-air rule", "Separated", "Highest-fraction"):
+    for word in ("Highest-", "On an", "Separate"):
         assert word in txt
 
 
@@ -194,3 +194,12 @@ def test_live_assumption_flags_are_grouped_and_not_garbled():
     assert not any("= row" in t or "= None" in t for t in texts)
     assert not any(t.startswith("envelope room = ") for t in texts)
     assert any(t.startswith("Envelope segment Z1-N") for t in texts)
+
+
+def test_one_assumption_flag_per_door_and_no_rev_a_label_on_the_known_answer_workbook(ka):
+    wb = openpyxl.load_workbook(ka["path"], data_only=True)
+    refs = [r[2] for r in wb["Flags"].iter_rows(min_row=7, values_only=True) if r[0] and str(r[2]).startswith("Pressure!")]
+    assert refs and len(refs) == len(set(refs))
+    assert not (wb.properties.creator or "")
+    assert not any("Beca" in str(c) or "Rev A example" in str(c) for r in wb["README"].iter_rows(values_only=True) for c in r)
+    assert ka["data"]["project"]["revision"]["date"] != "2026-10-01"

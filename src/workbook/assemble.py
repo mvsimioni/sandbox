@@ -111,6 +111,18 @@ def _people(root: Path) -> Dict[str, str]:
     return dict(by=str(p.get("author") or ""), checked=str(p.get("checked_by") or ""), approved=str(p.get("approved_by") or ""))
 
 
+def _revision_date(root: Path) -> str:
+    """Revision date: workbook.revision_date in config/project.yaml when given, else the build date (never the Rev A example date)."""
+    import datetime
+    import yaml
+    try:
+        cfg = yaml.safe_load((root / "config" / "project.yaml").read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        cfg = {}
+    given = (cfg.get("workbook") or {}).get("revision_date")
+    return str(given) if given else datetime.date.today().isoformat()
+
+
 def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path(".")) -> Dict[str, Any]:
     key = _dept_key(dept)
     soa = [r for r in _read(root / REG / "soa_rooms.csv") if r["dept_no"] == key and r.get("governing", "").lower() == "yes"]
@@ -281,7 +293,7 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
     data = dict(base)
     data.update(
         department=dict(number=key, name=re.sub(r"^\d+\s*-\s*", "", dept_name)),
-        project=dict(base["project"], revision=dict(rev="A", date=base["project"]["revision"]["date"], description="Generated from the registers", **people)),
+        project=dict(base["project"], revision=dict(rev="A", date=_revision_date(root), description="Generated from the registers", **people)),
         scope=f"Thermal load, airflow, outdoor air and pressure workbook for {dept_name}, assembled from the registers; unmatched rooms are listed on Flags.",
         storeys=storeys, storey_labels={s: _storey_label(s) for s in storeys}, space_types=sp, sources=sources, rooms=rooms,
         ahus=list(ahus.values()), flags=flags, references=[], documents=[d for d in base["documents"][:1]],

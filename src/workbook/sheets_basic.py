@@ -183,6 +183,13 @@ def write_basis(ctx: Ctx) -> None:
              "difference); supply is the larger, not less than exhaust and pressure require; round once, at the end.",
              "AHU outdoor air = outdoor-air fraction of the highest-standard room on the AHU × AHU supply airflow, with duct leakage added to supply "
              "first. The plain sum and the multiple-space value of the example are shown beside it.",
+             "Outdoor air is capped at room supply: exhaust or pressure needs beyond the supply are made up by transfer air from the adjacent "
+             "spaces, not by outdoor air. Areas are taken to 0.1 m² (named cell AreaDecimals); airflows are calculated unrounded and rounded once at the end.",
+             "Coil duty keeps the method of the Rev A AHU Summary: room condition for the outdoor-air load taken from the first space type "
+             "(here the first supply room of the AHU, in room order); the example's own basis (maximum of the sum and the multiple-space value) is shown "
+             "beside the rule-based duty. No change of method has been approved.",
+             "Rooms fixed by the MOT specification (code S on their criteria) keep their specified supply, outdoor air and exhaust; they are not resized, "
+             "and the offset needed is shown beside the specified one on Airflow and Pressure.",
              PRESSURE_METHOD]:
         c = put(ws, f"B{r}", text, "TextWrap")
         ws.merge_cells(f"B{r}:G{r}")
@@ -300,6 +307,9 @@ def build_flag_rows(ctx: Ctx) -> List[Dict[str, Any]]:
     # one flag per design constant or table row, and one per room (or per room and sheet) for the room-level inputs
     grouped: Dict[Any, List[Dict[str, Any]]] = {}
     for a in ctx.assumptions:
+        if a["sheet"] == "Pressure" and a["label"].startswith("door "):
+            grouped.setdefault((a["sheet"], a["label"].split()[1], a["room"]), []).append(a)
+            continue
         if a["sheet"] in ("Room Information", "Envelope") and a.get("room"):
             grouped.setdefault((a["sheet"], a["room"]), []).append(a)
             continue
@@ -311,7 +321,17 @@ def build_flag_rows(ctx: Ctx) -> List[Dict[str, Any]]:
             typ = "ASSUMPTION"
         rows.append(dict(type=typ, ref=f"{a['sheet']}!{a['cell']}", desc=desc, status="OPEN", owner="Marcus", src=a.get("src", ""),
                          link=(a["sheet"], a["cell"])))
-    for (sheet, room), items in grouped.items():
+    door_fields = {"kind": "type", "seal": "seal type", "gap_cm2": "gap area (cm²)", "leaf_w_m": "leaf width (m)", "leaf_h_m": "leaf height (m)",
+                   "fixed_flow_m3h": "fixed transfer (m³/h)"}
+    for key, items in grouped.items():
+        if key[0] == "Pressure":
+            _, door, room = key
+            parts = [f"{door_fields[a['label'].split()[2]]} {str(a['value']).replace('_', ' ')}" for a in items if a["label"].split()[2] in door_fields]
+            what = "; ".join(parts) if parts else "door row entered without a measured or scheduled value"
+            rows.append(dict(type="ASSUMPTION", ref=f"Pressure!{door}", desc=f"Door {door} (room {room}): assumed inputs, to confirm: {what}.",
+                             status="OPEN", owner="Marcus", src=items[0].get("src", ""), link=("Pressure", items[0]["cell"])))
+            continue
+        sheet, room = key
         what = ", ".join(f"{a['label'].replace('room ', '')} {a['value']}" for a in items)
         who = f"Envelope segment {room}" if sheet == "Envelope" else f"Room {room}"
         rows.append(dict(type="ASSUMPTION", ref=f"{sheet}!{room}", desc=f"{who}: assumed inputs, to confirm: {what}.",
@@ -370,8 +390,8 @@ def write_flags(ctx: Ctx, rows: List[Dict[str, Any]]) -> None:
         sep = (f'"Outdoor-air rule: separate room "&{pick("no")}&" ("&{pick("name")}&") from "&{ahu}&" onto a dedicated FCU. Its outdoor-air fraction "'
                f'&TEXT({pick("frac")},"0.0%")&" on "&TEXT({pick("supply")},"0")&" L/s of supply sets the AHU fraction. AHU supply "&TEXT({sb},"0")&" to "'
                f'&TEXT({sa},"0")&" L/s, outdoor air "&TEXT({before},"0")&" to "&TEXT({after},"0")&" L/s, coil duty "&TEXT({cb},"0.0")&" to "'
-               f'&TEXT({ca},"0.0")&" kW. FCU outdoor air from "&INDEX({FC.rng("oasrc")},{fm})&" ("&INDEX({FC.rng("oaby")},{fm})&", "'
-               f'&INDEX({FC.rng("oacond")},{fm})&"); source capacity "&INDEX({FC.rng("cap")},{fm})&". Proposal in zoning_change_proposals.csv; '
+               f'&TEXT({ca},"0.0")&" kW. "&IF(INDEX({FC.rng("oasrc")},{fm})="not set","FCU outdoor-air source not set: choose it from the zoning",'
+               f'"FCU outdoor air from "&INDEX({FC.rng("oasrc")},{fm})&" ("&INDEX({FC.rng("oaby")},{fm})&", "&INDEX({FC.rng("oacond")},{fm})&"); source capacity "&INDEX({FC.rng("cap")},{fm}))&". Proposal in zoning_change_proposals.csv; '
                f'after Marcus approves, update the zone schedule and the zoning PDF and carry the FCU into Task 4."')
         lst = (f'"Outdoor-air rule: room "&{pick("no")}&" ("&{pick("name")}&") sets the outdoor-air fraction of "&{ahu}&" with "'
                f'&TEXT({pick("frac")},"0.0%")&" on a small share of the supply, but its criteria (air class, filtration, pressure, or fixed by '

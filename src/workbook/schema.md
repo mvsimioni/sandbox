@@ -6,14 +6,14 @@ Codes: `D` value taken from a document, `M` measured from a drawing, `S` fixed b
 `A` assumed, to confirm (shown yellow and listed on Basis of Design and Flags).
 
 Provenance is given as `[code, source_id]`. A room carries `prov`, a map from input group to that pair, with an optional
-`prov_default`. A value without provenance is rejected (`InputError`).
+`prov_default`; a key that is a field name (for example `terminal_tag`) overrides its group for that field. Room Information shows a code and source ID beside every input (identity and zoning fields included); a blank input shows neither. A value without provenance is rejected (`InputError`).
 
 ## Top level
 
 | Key | Content |
 |---|---|
 | `schema_version` | 1 |
-| `project` | `name`, `code`, `revision {rev, date, description, by, checked, approved}` |
+| `project` | `name`, `code`, `revision {rev, date, description, by, checked, approved}`; `by` (author), `checked`, `approved` come from the project input (`config/project.yaml` `workbook.people`), blank when not given, and `by` is also the file's author property |
 | `department` | `number`, `name` |
 | `scope`, `purpose`, `criteria_origin[]`, `key_flags[]`, `documents[]` | text for README and Basis of Design; `documents` rows `{document, role, issue, taken, source}` |
 | `storeys[]`, `storey_labels{}` | order of the storey codes and their tab labels (`L01` -> `Level 1`); one `<Level> Room Zones` tab per storey |
@@ -42,7 +42,7 @@ the outdoor-air rule 5 % and 5 percentage points, check tolerances) has a defaul
 | Key | Group in `prov` | Note |
 |---|---|---|
 | `number`, `name`, `storey` | `identity` | `number` is the key used everywhere |
-| `ahu`, `zone_tag`, `system_type`, `terminal_tag`, `exhaust_fan`, `oa_source`, `oa_condition` | `zoning` | `oa_source`: PAHU or fan that serves the room's outdoor air if it moves to an FCU; `oa_condition`: TREATED or UNTREATED |
+| `ahu`, `zone_tag`, `system_type`, `terminal_tag`, `exhaust_fan`, `oa_source`, `oa_condition` | `zoning` | `oa_source`: PAHU or fan that serves the room's outdoor air if it moves to an FCU (blank: the FCU tab takes the first PAHU, else the first outdoor-air fan, on `fans[]` whose `serves` is the room's AHU, and flags it; none found: NOT SET, coil on untreated air); `oa_condition`: TREATED or UNTREATED (blank: TREATED for a PAHU) |
 | `space_type`, `room_condition` | `space_type` | must be a name in `space_types`; `room_condition` Comfort or Critical |
 | `soa_area_m2` | `soa_area` | |
 | `measured_area_m2` | `measured_area` | normally code M |
@@ -53,7 +53,7 @@ the outdoor-air rule 5 % and 5 percentage points, check tolerances) has a defaul
 | `lighting_w_m2`, `small_power_w_m2`, `equipment_sensible_w`, `equipment_latent_w` | `lighting`, `small_power`, `equipment_sensible`, `equipment_latent` | |
 | `criteria` | one `source` and `code` for the whole row | `criteria_row`, `page`, `min_oa_ach`, `oa_lps_per_person`, `oa_specified_lps`, `min_total_ach`, `supply_lps_m2`, `supply_specified_lps`, `exhaust_ach`, `exhaust_lps_m2`, `exhaust_specified_lps`, `temp_min_c`, `temp_max_c`, `rh_max_pct`, `pressure_regime` (POSITIVE, NEGATIVE, NEUTRAL), `pressure_pa_booklet`, `pressure_pa_tender`, `pressure_pa_working`, `air_class`, `filter`, `single_pass` (Y or N), `afterhours`, `remark`. Specified values (MOT theatres) use code `S`. The pressure target used is the tender value, then the working-drawing value, then the booklet value. |
 | `envelope[]` | per row `source`, `code` | `{segment, building_part, face, azimuth_deg, orientation (a name in `orientations`), glazing_m2, wall_m2, roof_m2, shading, method, remark}`; a room with no rows is internal |
-| `pressure` | `prov` for the perimeter | `{mode: controlled or free, suite, perimeter_m, surface_override_m2, surface_prov, doors[]}`. `controlled`: the room has a pressure target in its criteria. `free`: no set pressure; the tab solves it in fixed Newton steps. Door `{id, to, kind, seal (hinged, sliding, bed_width, shaft), gap_cm2, leaf_w_m, leaf_h_m, fixed_flow_m3h, code, source}`; `to` is a room number on Pressure or a `pressure_nodes` tag; a door listed from both sides is entered once; `fixed_flow_m3h` is positive from the room to `to`. Precedence of the gap area: fixed flow, then `gap_cm2`, then `seal`, then the leaf size with the unsealed gap widths. |
+| `pressure` | `prov` for the perimeter | `{mode: controlled or free, suite, perimeter_m, surface_override_m2, surface_prov, doors[]}`. `controlled`: the room has a pressure target in its criteria. `free`: no set pressure; the tab solves it in fixed Newton steps. Door `{id, to, kind, seal (hinged, sliding, bed_width, shaft), gap_cm2, leaf_w_m, leaf_h_m, fixed_flow_m3h, code, source}`; `to` is a room number on Pressure or a `pressure_nodes` tag; a door is one air path between the room and `to` and acts on both spaces it joins: enter it once, under either room (the same `id` listed from both sides counts once; the workbook and `src/recompute` both apply this, including across suites); `fixed_flow_m3h` is positive from the room to `to`. Precedence of the gap area: fixed flow, then `gap_cm2`, then `seal`, then the leaf size with the unsealed gap widths. |
 | `schematic` | `source`, `code` | `{supply_lps, return_lps, exhaust_lps, pressure_pa, remark}` read from the air-side schematics |
 | `remark` | | plain-language remark on the source reference, e.g. "SOA V16 row 42; plan area 21.4 m2, agrees" |
 
@@ -63,3 +63,10 @@ the outdoor-air rule 5 % and 5 percentage points, check tolerances) has a defaul
 * Only `leaks_to: REF` is supported (the whole envelope leaks to the reference space).
 * A controlled room needs a pressure value in `criteria`; a direction only (POSITIVE, NEGATIVE) with no value is listed on Flags, not calculated.
 * Rooms with no AHU are listed on Flags; the AHU tab lists AHUs found on the rooms.
+
+## Outdoor-air rule, MOT rooms and outputs
+
+* Outdoor air of a room is the larger of its minimum and what exhaust and pressurisation need, never more than its supply.
+* A room whose `criteria.code` is `S` (MOT theatre) is fixed: specified supply, outdoor air and exhaust stand, and Airflow and Pressure report the offset needed beside the specified one (VERIFY on Checks if it is short). Such a room is listed for Marcus, never separated.
+* Every room the rule separates (CONFIRM) or lists (VERIFY) has a live row on Flags with status OPEN, and `python3 -m src.workbook build` writes it to `out/zoning/zoning_change_proposals.csv` (rows keyed by department; `--no-proposals` skips it).
+* Coil duty reference condition: the first supply room of the AHU, as the example's AHU Summary takes the first space type.
