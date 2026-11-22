@@ -57,11 +57,13 @@ CRITERIA_FIELDS = [
 ]
 NOTES_FIELDS = ["file", "page", "note_number", "text", "booklet_page", "pdf_page", "bbox"]
 STANDBY_FIELDS = ["department", "source_file", "booklet_page", "pdf_page", "level_wing_heading",
-                  "tag_as_written", "tag_normalised", "area", "configuration", "bbox", "confidence"]
+                  "tag_as_written", "tag_normalised", "area", "configuration", "note_refs", "bbox", "confidence"]
+STANDBY_NOTES_FIELDS = ["file", "page", "note_number", "text", "booklet_page", "pdf_page", "bbox"]
 ZONING_FIELDS = ["department", "source_file", "booklet_page", "pdf_page", "keyplan_title",
-                 "label_kind", "text", "block_text", "bbox", "has_colour_legend"]
+                 "label_kind", "text", "block_text", "bbox", "has_colour_legend", "legend_source", "legend_bbox"]
 PRESSURE_FIELDS = ["department", "source_file", "booklet_page", "pdf_page", "page_heading",
-                   "label_kind", "text", "bbox"]
+                   "label_kind", "text", "bbox", "annotation_author", "annotation_date"]
+# label_kind values: text_label | pressure_value (drawing text) | reviewer_annotation (a PDF comment, not drawing text)
 
 # header keyword -> criteria field
 HEADER_KEYS: List[Tuple[str, str]] = [
@@ -415,14 +417,23 @@ def _cluster_x(words: Sequence[Word], gap: float = 8.0) -> List[List[Word]]:
 def find_header(words: Sequence[Word]) -> Optional[TableColumns]:
     """Locate the criteria header (starts at the 'Room' word) and derive columns."""
     room_candidates = [w for w in words if w.text.lower() == "room" and not is_gutter(w)]
+    all_lines = cluster_lines([w for w in words if not is_gutter(w)])
+
+    def is_header_line(line: Sequence[Word]) -> bool:
+        return all(w.text.lower() in HEADER_VOCAB or re.fullmatch(r"\d", w.text) for w in line)
+
     for room in sorted(room_candidates, key=lambda w: w.y0):
-        below = [w for w in words if w.y0 >= room.y0 - 3.0 and not is_gutter(w)]
-        header: List[Word] = []
-        for line in cluster_lines(below):
-            if all(w.text.lower() in HEADER_VOCAB or re.fullmatch(r"\d", w.text) for w in line):
-                header.extend(line)
-            else:
-                break
+        idx = next((i for i, ln in enumerate(all_lines) if room in ln), None)
+        if idx is None or not is_header_line(all_lines[idx]):
+            continue
+        lo = hi = idx       # header cells are centred, so lines above and below 'Room' belong to it
+        while lo > 0 and is_header_line(all_lines[lo - 1]) and \
+                abs(all_lines[lo][0].cy - all_lines[lo - 1][0].cy) <= 25:
+            lo -= 1
+        while hi + 1 < len(all_lines) and is_header_line(all_lines[hi + 1]) and \
+                abs(all_lines[hi + 1][0].cy - all_lines[hi][0].cy) <= 25:
+            hi += 1
+        header = [w for ln in all_lines[lo:hi + 1] for w in ln]
         texts = " ".join(w.text.lower() for w in header)
         if "pressure" not in texts or "humidity" not in texts:
             continue
@@ -441,9 +452,11 @@ def find_header(words: Sequence[Word]) -> Optional[TableColumns]:
                     mapping[key] = (min(w.x0 for w in cl), max(w.x1 for w in cl))
                     break
         # attach the footnote refs to the column whose x-range contains them
-        for ref in refs:
-            for key, (x0, x1) in mapping.items():
-                if x0 - 3 <= ref.cx <= x1 + 3:
+        for ref in refs:        # nearest header cell, within 15 points of its text
+            dist = {key: max(x0 - ref.cx, ref.cx - x1, 0.0) for key, (x0, x1) in mapping.items()}
+            if dist:
+                key = min(dist, key=dist.get)  # type: ignore[arg-type]
+                if dist[key] <= 15.0:
                     refs_by_col[key].append(ref.text)
         return TableColumns(mapping, max(w.y1 for w in header), dict(refs_by_col))
     return None
@@ -473,8 +486,7 @@ def parse_criteria_page(words: List[Word], page_h: float, page_w: float
         if "room" not in cols.clusters or "pressure" not in cols.clusters:
             return [], [], table_part, failures
 
-    note_words = [w for w in words if re.fullmatch(r"NOTES?:?-?", w.text, re.I) and w.y0 > cols.header_bottom]
-    notes_top = min((w.y0 for w in note_words), default=page_h * 0.93)
+    notes_top = find_notes_top(words, cols.header_bottom, page_h)
     footer_top = page_h * 0.93
     body = [w for w in words if w.y0 >= cols.header_bottom - 0.5 and w.y0 < min(notes_top, footer_top) - 0.5
             and not is_gutter(w)]
@@ -532,7 +544,7 @@ def parse_criteria_page(words: List[Word], page_h: float, page_w: float
     hi = 0
     for anchor in anchors:
         while hi < len(heading_iter) and heading_iter[hi][0] < anchor["cy"]:
-            pending_mode = heading_iter[hi][1]
+            pending_mode = heading_iter[hi][1]   # a section row holds until the next one
             hi += 1
         cells_words: Dict[str, List[Word]] = defaultdict(list)
         for col, ws in anchor["by_col"].items():
@@ -561,9 +573,17 @@ def parse_criteria_page(words: List[Word], page_h: float, page_w: float
             "mode": pending_mode, "no_pressure": bool(anchor.get("no_pressure")),
             "pressure_words": [w for w in anchor["by_col"].get("pressure", [])],
         })
-        pending_mode = ""   # a section heading applies to the row that follows it
     notes = parse_notes(words, notes_top, footer_top)
     return rows, notes, table_part, failures
+
+
+def find_notes_top(words: Sequence[Word], below_y: float, page_h: float) -> float:
+    """Top of the NOTE block: the first line below ``below_y`` that starts with the capitalised
+    marker NOTE or NOTE:- (a data cell reading 'note' does not start the block)."""
+    for line in cluster_lines([w for w in words if w.y0 > below_y and not is_gutter(w)]):
+        if re.fullmatch(r"NOTES?:?-?", line[0].text) and len(line) <= 2:
+            return min(w.y0 for w in line)
+    return page_h * 0.93
 
 
 def parse_notes(words: Sequence[Word], notes_top: float, footer_top: float
@@ -573,7 +593,7 @@ def parse_notes(words: Sequence[Word], notes_top: float, footer_top: float
     notes: List[Dict[str, Any]] = []
     for ln in cluster_lines(region):
         text = join_words(ln)
-        if re.fullmatch(r"NOTES?:?-?", text, re.I):
+        if re.fullmatch(r"NOTES?:?-?", text):
             continue
         m = re.match(r"^(\d+)\s*[–—\-.)]\s*(.*)$", text)
         if m:
@@ -658,6 +678,23 @@ def normalise_tag(tag: str) -> str:
     return re.sub(r"\s+", "", t)
 
 
+def standby_notes(words: List[Word], page_h: float) -> Tuple[str, List[Dict[str, Any]]]:
+    """Note references printed on the Configuration header ('1,2') and the NOTE block of a standby page."""
+    refs = ""
+    conf = [w for w in words if w.text.startswith("Configuration") and not is_gutter(w)]
+    if conf:
+        head = min(conf, key=lambda w: w.y0)
+        for w in words:
+            if re.fullmatch(r"\d+(?:,\d+)*", w.text) and w.x0 >= head.x1 - 2 and abs(w.cy - head.cy) <= 14 \
+                    and not is_gutter(w):
+                refs = w.text
+                break
+        top = find_notes_top(words, head.y1, page_h)
+    else:
+        top = page_h * 0.93
+    return refs, parse_notes(words, top, page_h * 0.93)
+
+
 def parse_standby_page(words: List[Word], page_h: float, carry_heading: str,
                        rects: Optional[Sequence[Tuple[float, float, float, float]]] = None
                        ) -> Tuple[List[Dict[str, Any]], str, List[str]]:
@@ -696,8 +733,7 @@ def parse_standby_page(words: List[Word], page_h: float, carry_heading: str,
     if set(mapping) != {"tag", "area", "config"}:
         return [], carry_heading, ["standby header columns not derived (got %s)" % sorted(mapping)]
     cols = TableColumns(mapping, header_bottom, {}, centre_bounds=True)
-    note_words = [w for w in words if re.fullmatch(r"NOTES?:?-?", w.text, re.I) and w.y0 > header_bottom]
-    notes_top = min((w.y0 for w in note_words), default=page_h * 0.93)
+    notes_top = find_notes_top(words, header_bottom, page_h)
     body = [w for w in words if w.y0 > header_bottom - 0.5 and w.y0 < min(notes_top, page_h * 0.93) - 0.5
             and not is_gutter(w)]
     tag_like = [w for w in body if TAG_RE.match(w.text)]
@@ -782,6 +818,25 @@ def page_lines(page: "pymupdf.Page") -> List[Dict[str, Any]]:
     return out
 
 
+def page_annotations(page: "pymupdf.Page") -> List[Dict[str, Any]]:
+    """Reviewer comments (PDF annotations carrying text) of a page, text verbatim."""
+    out: List[Dict[str, Any]] = []
+    for annot in page.annots() or []:
+        info = annot.info or {}
+        text = clean(re.sub(r"[\r\n]+", " / ", info.get("content", "") or ""))
+        if not text:
+            continue
+        out.append({"text": text, "rect": tuple(annot.rect), "author": clean(info.get("title", "") or ""),
+                    "date": clean(info.get("modDate", "") or info.get("creationDate", "") or "")})
+    return out
+
+
+def _inside_any(box: Tuple[float, float, float, float], rects: Sequence[Tuple[float, float, float, float]],
+                pad: float = 2.0) -> bool:
+    cx, cy = (box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0
+    return any(r[0] - pad <= cx <= r[2] + pad and r[1] - pad <= cy <= r[3] + pad for r in rects)
+
+
 def has_colour_legend(page: "pymupdf.Page", words: Sequence[Word]) -> bool:
     """True when a coloured swatch has text right beside it, or the word LEGEND appears.
 
@@ -802,9 +857,34 @@ def has_colour_legend(page: "pymupdf.Page", words: Sequence[Word]) -> bool:
     return False
 
 
+def raster_legend(page: "pymupdf.Page") -> str:
+    """Bounding box of a raster colour legend (an image in the lower-right of the plan holding at least
+    two clearly coloured fills), or ''.  Its text is not in the text layer and is not read here; the
+    colours are not interpreted."""
+    w, h = page.rect.width, page.rect.height
+    for im in page.get_image_info():
+        x0, y0, x1, y1 = im["bbox"]
+        if not (x0 > w * 0.7 and y0 > h * 0.6 and y1 < h * 0.93 and 90 <= x1 - x0 <= 320 and 50 <= y1 - y0 <= 220):
+            continue
+        pix = page.get_pixmap(clip=pymupdf.Rect(x0, y0, x1, y1), dpi=40, alpha=False)
+        counts: Dict[Tuple[int, int, int], int] = defaultdict(int)
+        n = pix.width * pix.height
+        for i in range(0, len(pix.samples) - 2, pix.n):
+            r, g, b = pix.samples[i], pix.samples[i + 1], pix.samples[i + 2]
+            if max(r, g, b) - min(r, g, b) >= 40:          # saturated, not white/grey/black
+                counts[(r // 48, g // 48, b // 48)] += 1
+        if sum(1 for c in counts.values() if c >= 0.01 * n) >= 2:
+            return fmt_bbox((x0, y0, x1, y1))
+    return ""
+
+
 def zoning_records(page: "pymupdf.Page", words: List[Word]) -> Tuple[str, List[Dict[str, Any]], bool]:
-    """Keyplan title, every tag and room label with bbox, and the legend flag."""
-    lines = [ln for ln in page_lines(page) if not FURNITURE_LINE_RE.match(ln["text"])]
+    """Keyplan title, every tag and room label with bbox, and the legend ``(source, bbox)``:
+    source is 'text' (words beside swatches), 'image' (raster legend, text not in the text layer) or ''."""
+    annots = page_annotations(page)
+    arects = [a["rect"] for a in annots]
+    lines = [ln for ln in page_lines(page) if not FURNITURE_LINE_RE.match(ln["text"])
+             and not _inside_any(ln["box"], arects)]
     title = ""
     for ln in lines:
         if "KEYPLAN" in ln["text"].upper():
@@ -812,7 +892,7 @@ def zoning_records(page: "pymupdf.Page", words: List[Word]) -> Tuple[str, List[D
             break
     records: List[Dict[str, Any]] = []
     for w in words:
-        if is_gutter(w):
+        if is_gutter(w) or _inside_any(w.box(), arects):
             continue
         if TAG_RE.match(w.text):
             records.append({"label_kind": "equipment_tag", "text": w.text, "block_text": w.text,
@@ -830,22 +910,37 @@ def zoning_records(page: "pymupdf.Page", words: List[Word]) -> Tuple[str, List[D
             kind = "room_label"
         records.append({"label_kind": kind, "text": text, "block_text": ln["block_text"],
                         "bbox": fmt_bbox(ln["box"])})
-    return title, records, has_colour_legend(page, words)
+    for a in annots:
+        records.append({"label_kind": "reviewer_annotation", "text": a["text"], "block_text": a["text"],
+                        "bbox": fmt_bbox(a["rect"])})
+    if has_colour_legend(page, words):
+        legend = ("text", "")
+    else:
+        box = raster_legend(page)
+        legend = ("image", box) if box else ("", "")
+    return title, records, legend
 
 
 def pressure_records(page: "pymupdf.Page") -> Tuple[str, List[Dict[str, Any]]]:
-    """Text labels (room names, +/- values, comments) of a pressure regime drawing."""
+    """Drawing text labels (room names, +/- values) of a pressure regime page, plus reviewer annotations
+    (PDF comments) kept apart as label_kind reviewer_annotation."""
     heading = ""
     records: List[Dict[str, Any]] = []
+    annots = page_annotations(page)
+    arects = [a["rect"] for a in annots]
     for ln in page_lines(page):
         text = ln["text"]
-        if FURNITURE_LINE_RE.match(text):
-            continue
+        if FURNITURE_LINE_RE.match(text) or _inside_any(ln["box"], arects):
+            continue      # comment text is recorded once, below, as a reviewer_annotation
         if re.match(r"^PRESSURE REGIME", text):
             heading = text
             continue
         kind = "pressure_value" if PRESSURE_VALUE_RE.match(text) or text in ("+", "-") else "text_label"
-        records.append({"label_kind": kind, "text": text, "bbox": fmt_bbox(ln["box"])})
+        records.append({"label_kind": kind, "text": text, "bbox": fmt_bbox(ln["box"]),
+                        "annotation_author": "", "annotation_date": ""})
+    for a in annots:
+        records.append({"label_kind": "reviewer_annotation", "text": a["text"], "bbox": fmt_bbox(a["rect"]),
+                        "annotation_author": a["author"], "annotation_date": a["date"]})
     return heading, records
 
 
@@ -872,7 +967,7 @@ def parse_pdf(path: Path, root: Path) -> Dict[str, Any]:
     dept = department_from_name(path)
     src = display_path(path, root)
     result: Dict[str, Any] = {"department": dept, "source_file": src, "pages": [], "criteria": [],
-                              "notes": [], "standby": [], "zoning": [], "pressure": [],
+                              "notes": [], "standby_notes": [], "standby": [], "zoning": [], "pressure": [],
                               "failures": [], "page_failures": []}
     doc = pymupdf.open(str(path))
     carry = ""
@@ -902,13 +997,18 @@ def parse_pdf(path: Path, root: Path) -> Dict[str, Any]:
                 rects = [tuple(d["rect"]) for d in page.get_drawings()
                          if d.get("fill") is not None and d["rect"].width > 20 and d["rect"].height > 10]
                 rows, carry, pfail = parse_standby_page(words, page_h, carry, rects)
+                refs, snotes = standby_notes(words, page_h)
+                for n in snotes:
+                    result["standby_notes"].append({"file": src, "page": booklet, "note_number": n["number"],
+                                                    "text": n["text"], "booklet_page": booklet,
+                                                    "pdf_page": pdf_page, "bbox": fmt_bbox(n["box"])})
                 for r in rows:
                     c = r["cells"]
                     result["standby"].append({
                         "department": dept, "source_file": src, "booklet_page": booklet, "pdf_page": pdf_page,
                         "level_wing_heading": r["heading"], "tag_as_written": c.get("tag", ""),
                         "tag_normalised": normalise_tag(c.get("tag", "")), "area": c.get("area", ""),
-                        "configuration": c.get("config", ""), "bbox": fmt_bbox(r["box"]),
+                        "configuration": c.get("config", ""), "note_refs": refs, "bbox": fmt_bbox(r["box"]),
                         "confidence": "0.97" if (c.get("area") and c.get("config") and r["heading"]) else "0.50",
                     })
                     for field, key in (("area", "area"), ("configuration", "config"), ("level_wing_heading", None)):
@@ -924,9 +1024,10 @@ def parse_pdf(path: Path, root: Path) -> Dict[str, Any]:
                 if not title:
                     result["page_failures"].append((pdf_page, "keyplan title not found"))
                 for rec in recs:
-                    result["zoning"].append({**meta, "keyplan_title": title, "has_colour_legend": "Y" if legend else "N", **rec})
+                    result["zoning"].append({**meta, "keyplan_title": title, "has_colour_legend": "Y" if legend[0] else "N",
+                                             "legend_source": legend[0], "legend_bbox": legend[1], **rec})
                 tags = sum(1 for r in recs if r["label_kind"] == "equipment_tag")
-                entry.update(rows=len(recs), detail="%s; %d tags; colour legend %s" % (title or "no title", tags, "yes" if legend else "no"))
+                entry.update(rows=len(recs), detail="%s; %d tags; colour legend %s" % (title or "no title", tags, "yes (%s)" % legend[0] if legend[0] else "no"))
             elif cls == "pressure regime":
                 heading, recs = pressure_records(page)
                 for rec in recs:
@@ -1032,7 +1133,7 @@ def compare_departments(results: List[Dict[str, Any]]) -> List[str]:
                     matched_b.add(best)
                     only_a.remove(k)
                     ra, rb = ka[k], kb[best]
-                    vals = ["%s: %s | %s" % (f, ra[f] or "(blank)", rb[f] or "(blank)")
+                    vals = ["%s: %s vs %s" % (f, ra[f] or "(blank)", rb[f] or "(blank)")
                             for f in COMPARE_FIELDS if clean(ra[f]) != clean(rb[f])]
                     near.append("| %s | %s | %s |" % (ra["room_type_as_printed"] + (" [%s]" % k[1] if k[1] else ""),
                                                       rb["room_type_as_printed"] + (" [%s]" % best[1] if best[1] else ""),
@@ -1041,7 +1142,7 @@ def compare_departments(results: List[Dict[str, Any]]) -> List[str]:
             if near:
                 lines.append("Near matches (names differ, so not compared automatically; check by eye):")
                 lines.append("")
-                lines.append("| %s | %s | Differences (%s | %s) |" % (a["department"], b["department"],
+                lines.append("| %s | %s | Differences (%s vs %s) |" % (a["department"], b["department"],
                                                                      a["department"], b["department"]))
                 lines.append("|---|---|---|")
                 lines.extend(near)
@@ -1054,6 +1155,65 @@ def compare_departments(results: List[Dict[str, Any]]) -> List[str]:
                     kb[k]["room_type_as_printed"] + (" [%s]" % k[1] if k[1] else "") for k in only_b)))
             lines.append("")
     return lines
+
+
+def _corrections_section(results: List[Dict[str, Any]]) -> List[str]:
+    """Corrections made after the independent verification (counts are taken from this run)."""
+    L: List[str] = ["", "## Corrections after verification", "",
+                    "Independent verification (`out/qa/verify/booklet48_parser_verify.md`) confirmed the criteria "
+                    "(41 rows, 533 cells), standby (50 rows) and page classes, and refuted one claim. What changed:", ""]
+    ann = [(r["department"], p) for r in results for p in r["pressure"] if p["label_kind"] == "reviewer_annotation"]
+    drawing = {r["department"]: sum(1 for p in r["pressure"] if p["label_kind"] != "reviewer_annotation")
+               for r in results}
+    L += ["### Pressure regime labels versus reviewer comments", "",
+          "- `booklet_pressure_labels.csv` mixed drawing text with PDF FreeText annotations (reviewer comments), "
+          "all typed `text_label`. Annotations are now recorded once each, with `label_kind = reviewer_annotation`, "
+          "the annotation rectangle as `bbox` and `annotation_author` / `annotation_date` from the PDF; the same text is "
+          "no longer repeated as drawing labels. The same separation applies to zoning keyplans.",
+          "- Drawing labels now: %s. Reviewer annotations: %s." % (
+              ", ".join("%s %d" % kv for kv in drawing.items()),
+              ", ".join("%s p%s" % (d, p["booklet_page"]) for d, p in ann) or "none"), ""]
+    if ann:
+        L += ["| Department | Booklet p. | PDF p. | Author | Comment (verbatim, line breaks as ` / `) | bbox |",
+              "|---|---|---|---|---|---|"]
+        for d, p in ann:
+            L.append("| %s | %s | %s | %s | %s | %s |" % (d, p["booklet_page"], p["pdf_page"], p["annotation_author"] or "-",
+                                                          p["text"], p["bbox"]))
+        L += ["", "**Reliance caveat.** One IP FAST comment reads that sign-off does not include endorsement for the "
+              "ACMV / Pressure Regime portion, pending the consultant's consolidated inputs for a run-through with the "
+              "infection-prevention and MOHH teams. The pressure regime drawings are therefore not signed-off design "
+              "values. Other comments say some wards are negative and some positive, that the airlock is slightly positive "
+              "to the staff corridor, and that NEP-capable wards convert to a single-pass BIBO exhaust in pandemic mode; "
+              "one asks whether NEP-capable should be read against the adjacent external corridor (marked 'To verify'). "
+              "No other page of either file carries annotations.", ""]
+    L += ["### Zoning keyplan colour legend (earlier 'no legend' was wrong)", "",
+          "- The earlier result rested on the absence of legend words. Swatch geometry shows no vector swatches (one white "
+          "rectangle per page), but each keyplan page carries a raster legend image in the lower right whose text is not in "
+          "the text layer. A render of IP FAST PDF p9 shows a heading 'Normal Mode Operation' and three coloured swatches "
+          "labelled Recirculation, Single Pass and Recirculation with HEPA. The other keyplan pages carry an image of the same "
+          "size and position class; they were detected by geometry and colour count, not read.",
+          "- `booklet_zoning_labels.csv` now has `has_colour_legend = Y`, `legend_source` (`text` or `image`) and `legend_bbox`. "
+          "Colours are not interpreted and the image text is not transcribed into the registers.", ""]
+    zl = [z for res in results for z in res["zoning"]]
+    kinds: Dict[Tuple[str, str], int] = defaultdict(int)
+    for z in zl:
+        kinds[(z["department"], z["label_kind"])] += 1
+    L += ["### Zoning label split re-derived", "",
+          "Counts by kind: " + "; ".join("%s %s = %d" % (d, k, n) for (d, k), n in sorted(kinds.items())) + ". "
+          "`other_text` holds only 'AHU ZONING', 'DEPARTMENTAL BOUNDARY', 'N', 'Typical for :' and the 'Nth ... wing' "
+          "storey notes; none of those strings appears under `room_label`.", ""]
+    L += ["### Equipment standby note references", "",
+          "- `booklet_equipment_standby.csv` has a `note_refs` column (`1,2`, printed beside the Configuration header) and the "
+          "NOTE block of each standby page is written to `booklet_standby_notes.csv`.", ""]
+    L += ["### Observation to cross-check (not a parser error)", "",
+          "- IP FAST keyplan on PDF p9, titled 'IP 20TH STOREY', carries level-19 NW tags `AHU-B-19-19MEDSNWWG-1` and `-2`, but the "
+          "standby summary lists level 19 NE and SE wings only. The storey title and the level in the tags also differ by one. "
+          "Check against the zoning source.", ""]
+    L += ["### Tests added", "",
+          "- A value word whose plain box reaches into the Room column (the 'Interview Room' / 'Neutral' case).",
+          "- Reviewer annotation on a pressure regime page kept apart from drawing labels.",
+          "- Raster colour legend flagged as `image`.", "- Standby note references and NOTE block.", ""]
+    return L
 
 
 def build_report(results: List[Dict[str, Any]], notes_all: List[Dict[str, Any]]) -> str:
@@ -1086,7 +1246,7 @@ def build_report(results: List[Dict[str, Any]], notes_all: List[Dict[str, Any]])
         for r in res["criteria"]:
             parts[r["table_part"].split(";")[0]] += 1
         L.append("- %s: %s" % (res["department"], ", ".join("%s = %d" % kv for kv in sorted(parts.items())) or "none"))
-    L += ["", "Zoning keyplan colour legend (text beside coloured swatches): "
+    L += ["", "Zoning keyplan colour legend (text beside swatches, or a raster legend image whose text is not in the text layer): "
           + "; ".join("%s p%s %s" % (r["department"], p["booklet_page"], "yes" if "colour legend yes" in p["detail"] else "no")
                       for r in results for p in r["pages"] if p["class"] == "zoning keyplan"), ""]
 
@@ -1138,14 +1298,17 @@ def build_report(results: List[Dict[str, Any]], notes_all: List[Dict[str, Any]])
           "(Neutral, Negative, Positive) has a direction but a blank `pressure_pa` because no Pa value is printed; "
           "a single design temperature (for example `27`) is stored as min = max.", ""]
     L += ["## Parsing decisions to confirm", "",
-          "- Section rows inside a criteria table (`Hybrid Cooling`, `Pandemic Mode`, centred, no room or pressure text) "
-          "are applied to the row that follows them only; the heading is appended to `table_part` "
-          "(for example `Part 2; Hybrid Cooling`). The row after the Hybrid Cooling row (`Corridor`) therefore carries no mode; "
-          "the printed layout does not say whether it belongs to that section.",
-          "- Pressure direction is left blank for `NR` cells.",
-          "- Equipment standby notes (1 and 2) are not written to `criteria_notes.csv`.", ""]
+          "- Section rows inside a criteria table (`Hybrid Cooling`, `Pandemic Mode`: a coloured band across the table, "
+          "no room or pressure text) hold for every row below them until the next section row or the end of the table; "
+          "the heading is appended to `table_part` (for example `Part 2; Hybrid Cooling`). The rendered page shows the "
+          "`Corridor` row inside the Hybrid Cooling section, so it carries that mode.",
+          "- Pressure direction is left blank for `NR` cells; `pressure_pa` is blank wherever only a word "
+          "(Neutral, Negative, Positive) is printed.",
+          "- Equipment standby notes (1 and 2) are written to `booklet_standby_notes.csv`; the references printed on the "
+          "Configuration header (`1,2`) are carried on every standby row as `note_refs`.", ""]
     L += ["## Differences between departments for the same room type", ""]
     L += compare_departments(results)
+    L += _corrections_section(results)
     return "\n".join(L).rstrip() + "\n"
 
 
@@ -1160,11 +1323,13 @@ def run(paths: Optional[Sequence[str]] = None, quiet: bool = False) -> Dict[str,
     criteria = [r for res in results for r in res["criteria"]]
     notes = [n for res in results for n in res["notes"]]
     standby = [r for res in results for r in res["standby"]]
+    standby_notes_rows = [n for res in results for n in res["standby_notes"]]
     zoning = [r for res in results for r in res["zoning"]]
     pressure = [r for res in results for r in res["pressure"]]
     common.write_csv_dicts(registers / "criteria.csv", criteria, CRITERIA_FIELDS)
     common.write_csv_dicts(registers / "criteria_notes.csv", notes, NOTES_FIELDS)
     common.write_csv_dicts(registers / "booklet_equipment_standby.csv", standby, STANDBY_FIELDS)
+    common.write_csv_dicts(registers / "booklet_standby_notes.csv", standby_notes_rows, STANDBY_NOTES_FIELDS)
     common.write_csv_dicts(registers / "booklet_zoning_labels.csv", zoning, ZONING_FIELDS)
     common.write_csv_dicts(registers / "booklet_pressure_labels.csv", pressure, PRESSURE_FIELDS)
     common.atomic_write_text(qa / "booklet48_parser_report.md", build_report(results, notes))

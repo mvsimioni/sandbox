@@ -1209,6 +1209,17 @@ def read_lock_state() -> Dict[str, Any]:
     return _read_json_safe(lock_state_path())
 
 
+def _all_immutable(root: Path) -> bool:
+    """Return True when ``lsattr`` shows the immutable flag on every path under ``root`` (and on ``root``)."""
+    proc = _run(["lsattr", "-R", "-a", "-d", str(root)])
+    top = _run(["lsattr", "-d", str(root)])
+    rec = _run(["lsattr", "-R", "-a", str(root)])
+    lines = [l for l in (top.stdout + rec.stdout).splitlines() if l.strip() and not l.endswith(":")]
+    entries = [l.split(None, 1) for l in lines]
+    entries = [e for e in entries if len(e) == 2 and not e[1].rstrip().endswith(("/.", "/.."))]
+    return bool(entries) and all("i" in e[0] for e in entries)
+
+
 def lock_source() -> Dict[str, Any]:
     """Lock ``data/source``: ``chattr -R +i`` first, else ``chmod -R a-w``; record and verify honestly.
 
@@ -1219,6 +1230,11 @@ def lock_source() -> Dict[str, Any]:
     root = common.ensure_dir(source_dir())
     proc = _run(["chattr", "-R", "+i", str(root)])
     failures: List[str] = []
+    if proc.returncode != 0 and _all_immutable(root):
+        # chattr reports EPERM on directories with the filesystem-managed 'I' (indexed)
+        # flag even when they are already immutable; read the flags back instead.
+        _log("chattr returned non-zero but every path carries the immutable flag: " + proc.stderr.strip())
+        proc = subprocess.CompletedProcess(proc.args, 0, proc.stdout, "")
     if proc.returncode == 0:
         method = "chattr"
     else:
