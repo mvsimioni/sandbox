@@ -94,6 +94,17 @@ OTHER_MODULES = {"pdf": "sidecar_pdf", "pptx": "sidecar_pptx", "xlsx": "sidecar_
 PERSONAL_DATA_FIELDS: Tuple[str, ...] = ("gps",)
 """Keys of ``image.json`` that the Markdown writer must leave out."""
 
+OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+"""Signature of an OLE compound file (an Outlook MSG, whatever its extension)."""
+_CONTAINER_SIGNATURES: Tuple[Tuple[bytes, str], ...] = ((OLE_MAGIC, "ole"), (b"PK\x03\x04", "zip"), (b"%PDF", "pdf"),
+                                                        (b"\x89PNG", "png"), (b"\xff\xd8\xff", "jpeg"))
+_SNIFF_BYTES = 4096
+_BINARY_BODY_RATIO = 0.05
+"""Share of replacement or control characters above which a body is reported as binary."""
+HEADER_SANITY_KEYS: Tuple[str, ...] = ("from", "to", "subject", "date", "message_id")
+"""At least one of these must be present for a file to count as an RFC 822 message."""
+ATTACHMENT_ONLY_SOURCE = "none (attachment-only message)"
+
 _NUMERIC_RE = re.compile(r"(?<![A-Za-z0-9_])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|(?<![A-Za-z0-9_])[-+]?\.\d+")
 _EXIF_DATE_RE = re.compile(r"^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})")
 _ATTACH_DIR_RE = re.compile(r"^__attach_version1\.0_#([0-9A-Fa-f]{8})$")

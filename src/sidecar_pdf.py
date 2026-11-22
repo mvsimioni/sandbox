@@ -14,7 +14,9 @@ PyMuPDF (and pdfplumber for tables on text pages) and writes, into ``<dir>``:
                          link and the FreeText default appearance string;
 * ``images.json``        placed images with page-view bbox and pixel size;
 * ``fills.json``         histogram of vector fill colours per page (top 20);
-* ``tables_p<N>_<k>.csv`` and ``tables.json`` (pdfplumber, text pages only);
+* ``tables_p<N>_<k>.csv`` and ``tables.json`` (pdfplumber, text pages only;
+                         the page is handed over with the ``/Rotate`` that makes
+                         its text horizontal and cells are filled from whole words);
 * ``titleblock.json``    strings in the title-block zone of drawing pages and
                          a best-effort parse of number, title, revision, date,
                          scale;
@@ -24,7 +26,9 @@ PyMuPDF (and pdfplumber for tables on text pages) and writes, into ``<dir>``:
 
 The run is idempotent: when the manifest in ``<dir>`` already carries the
 source sha256 (and every listed file exists) nothing is rewritten unless
-``--force`` is given.  All coordinates are PDF points; "page view" means the
+``--force`` is given.  Time budgets use ``SIGALRM`` and are enforced on the main
+thread only; off it the work still runs and the notes say the budget was not
+applied.  All coordinates are PDF points; "page view" means the
 page as displayed, i.e. raw coordinates transformed by ``page.rotation_matrix``.
 Nothing here touches the network.
 """
@@ -38,10 +42,12 @@ import json
 import math
 import re
 import sys
+import tempfile
+import warnings
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 try:  # package import (python -m src.sidecar_pdf, tests)
     from src import census
@@ -112,10 +118,16 @@ DATE_RES: Tuple[re.Pattern[str], ...] = (
 )
 SCALE_RE = re.compile(r"\b1\s*:\s*\d+(?:\s*@\s*A[0-4])?\b|\bN\.?T\.?S\.?\b|\bAS\s+SHOWN\b|\bNOT\s+TO\s+SCALE\b", re.IGNORECASE)
 FIELD_LABEL_RE = re.compile(
-    r"^\s*(DRAWING\s+(?:NO|NUMBER|TITLE)|DWG\.?\s*(?:NO|TITLE)|SHEET|REV(?:ISION)?|DATE|SCALE|DRAWN|CHECKED|"
-    r"APPROVED|DESIGNED|PROJECT|CLIENT|CONSULTANT|CONTRACTOR|STATUS|TITLE|SIZE|FILE)\b[\s:.]*$",
+    r"^\s*(DRAWING\s+(?:NO|NUMBER|TITLE)|DWG\.?\s*(?:NO|TITLE)|DRG\.?\s*(?:NO|TITLE)|SHEET(?:\s+NO)?|"
+    r"REV(?:ISION)?|DATE|SCALE|DRAWN|CHECKED|APPROVED|DESIGNED|PROJECT(?:\s+TITLE)?|JOB\s*(?:NO|NUMBER)|"
+    r"CLIENT|CONSULTANT|CONTRACTOR|STATUS|STAGE|CONTRACT|TITLE|SIZE|FILE|MARK|DESCRIPTION|KEY\s+PLAN)\b[\s:.]*$",
     re.IGNORECASE,
 )
+REVISION_TOKEN_RE = re.compile(r"[A-Z]{1,2}\d{0,2}|P\d{1,2}|\d{1,2}", re.IGNORECASE)
+CROSS_REFERENCE_RE = re.compile(r"\b(?:REFER(?:\s+TO)?|REF\.?|SEE|AS\s+PER|CONT(?:INUED|D)?\.?\s+ON)\b", re.IGNORECASE)
+LABEL_WINDOW: int = 8
+TITLE_MAX_LINES: int = 3
+ALIGN_TOLERANCE_PT: float = 40.0
 NUMERIC_RE = re.compile(r"^[+-]?\d[\d,]*(?:\.\d+)?$")
 UNIT_SUFFIX_RE = re.compile(r"(?:[A-Za-z%°²³µ]+(?:/[A-Za-z0-9²³]+)?|°C)$")
 
@@ -337,11 +349,25 @@ def render_notes_md(notes: Sequence[Dict[str, Any]], source_name: str) -> str:
 # --------------------------------------------------------------------------- #
 # Drawings, images, fills
 # --------------------------------------------------------------------------- #
+def budget_note(what: str) -> Optional[str]:
+    """A page note when the SIGALRM budget cannot be armed (worker thread); ``None`` on the main thread."""
+    if census.budget_enforceable():
+        return None
+    return f"{what}_budget_not_enforced:worker_thread"
+
+
 def collect_drawings(page: Any, budget_s: float) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
-    """``page.get_cdrawings()`` under a wall-clock budget; ``(None, note)`` on timeout or error."""
+    """``page.get_cdrawings()`` under a wall-clock budget; ``(None, note)`` on timeout or error.
+
+    Off the main thread the budget cannot be enforced (``SIGALRM``); the paths
+    are still collected and the note says that the budget was not applied.
+    """
+    note = budget_note("path_count")
     try:
-        with census.time_budget(budget_s, "page_paths"):
-            return list(page.get_cdrawings()), None
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            with census.time_budget(budget_s, "page_paths"):
+                return list(page.get_cdrawings()), note
     except census.BudgetExceeded:
         return None, f"path_count_timeout>{budget_s:g}s"
     except Exception as exc:  # noqa: BLE001 - damaged content stream
@@ -587,50 +613,190 @@ def _table_csv_text(rows: Sequence[Sequence[Any]]) -> str:
     return buffer.getvalue()
 
 
+def _cell_of(word: Dict[str, Any], cells: Sequence[Optional[Sequence[float]]]) -> Optional[int]:
+    """Index of the cell whose box holds the centre of ``word``, or ``None``."""
+    cx = (float(word["x0"]) + float(word["x1"])) / 2.0
+    cy = (float(word["top"]) + float(word["bottom"])) / 2.0
+    for index, cell in enumerate(cells):
+        if cell is not None and cell[0] <= cx < cell[2] and cell[1] <= cy < cell[3]:
+            return index
+    return None
+
+
+def table_rows_from_words(table: Any, words: Sequence[Dict[str, Any]]) -> List[List[str]]:
+    """Fill a pdfplumber table from whole words so a cell edge never splits a token.
+
+    ``table.extract()`` assigns characters to cells, which cuts words such as
+    ``R0C0`` or ``PH-303`` in two when the text strategy derives a column edge
+    from another line.  Here each word goes to the cell holding its centre.
+    Rows without text and columns empty in every row are dropped.
+    """
+    rows: List[List[str]] = []
+    for row in table.rows:
+        cells = list(row.cells)
+        buckets: List[List[Dict[str, Any]]] = [[] for _ in cells]
+        x0, top, x1, bottom = row.bbox
+        for word in words:
+            cy = (float(word["top"]) + float(word["bottom"])) / 2.0
+            if not (top <= cy < bottom):
+                continue
+            index = _cell_of(word, cells)
+            if index is not None:
+                buckets[index].append(word)
+        rows.append([" ".join(w["text"] for w in sorted(bucket, key=lambda w: (round(float(w["top"])), float(w["x0"]))))
+                     for bucket in buckets])
+    rows = [row for row in rows if any(cell for cell in row)]
+    if not rows:
+        return rows
+    width = max(len(row) for row in rows)
+    keep = [c for c in range(width) if any(c < len(row) and row[c] for row in rows)]
+    return [[row[c] if c < len(row) else "" for c in keep] for row in rows]
+
+
 def _plumber_tables(pl_page: Any, strategy: str) -> List[Tuple[Box, List[List[Any]]]]:
     """Tables found by pdfplumber on one page with one strategy: ``[(bbox, rows), ...]``."""
     settings = {"vertical_strategy": strategy, "horizontal_strategy": strategy}
     found: List[Tuple[Box, List[List[Any]]]] = []
+    words: Optional[List[Dict[str, Any]]] = None
     for table in pl_page.find_tables(table_settings=settings):
-        rows = [row for row in table.extract() if any(cell not in (None, "") for cell in row)]
+        if words is None:
+            words = list(pl_page.extract_words(keep_blank_chars=False, use_text_flow=False))
+        rows = table_rows_from_words(table, words)
         if not rows or len(rows) < MIN_TABLE_ROWS or max(len(r) for r in rows) < MIN_TABLE_COLS:
             continue
         found.append((tuple(round(float(v), 3) for v in table.bbox), rows))
     return found
 
 
-def extract_tables(pdf_path: Path, page_numbers: Sequence[int], out_dir: Path,
+def dominant_rotation(words: Iterable[Dict[str, Any]]) -> int:
+    """The most common raw line rotation of a page's words (0 when the page has none)."""
+    counts: Counter = Counter(int(w.get("rotation", 0)) % 360 for w in words)
+    return counts.most_common(1)[0][0] if counts else 0
+
+
+def unrotate_box(box: Sequence[float], rotation: int, width: float, height: float) -> Box:
+    """Map a box seen on a page displayed with ``/Rotate rotation`` back to the un-rotated frame.
+
+    ``width`` and ``height`` are the un-rotated page size; both frames have a
+    top-left origin, so this is the inverse of ``page.rotation_matrix``.
+    """
+    rotation = int(rotation) % 360
+    points: List[Point] = []
+    for vx, vy in ((float(box[0]), float(box[1])), (float(box[2]), float(box[3]))):
+        if rotation == 90:
+            points.append((vy, height - vx))
+        elif rotation == 180:
+            points.append((width - vx, height - vy))
+        elif rotation == 270:
+            points.append((width - vy, vx))
+        else:
+            points.append((vx, vy))
+    (ax, ay), (bx, by) = points
+    return (min(ax, bx), min(ay, by), max(ax, bx), max(ay, by))
+
+
+class _TablePage:
+    """How one text page was handed to pdfplumber and how its boxes map back to the page view."""
+
+    def __init__(self, src_page: Any, number: int, copy_rotation: int) -> None:
+        mediabox = src_page.mediabox
+        cropbox = src_page.cropbox
+        self.number = number
+        self.copy_rotation = int(copy_rotation) % 360
+        self.source_rotation = int(src_page.rotation) % 360
+        self.media_width = float(mediabox.width)
+        self.media_height = float(mediabox.height)
+        # pdfplumber measures from the MediaBox corner, PyMuPDF from the CropBox corner
+        self.offset = (float(cropbox.x0) - float(mediabox.x0), float(cropbox.y0))
+        self.matrix = src_page.rotation_matrix
+
+    def to_page_view(self, bbox: Sequence[float]) -> Box:
+        """A pdfplumber bbox on the copy page -> page-view box of the source page."""
+        raw = unrotate_box(bbox, self.copy_rotation, self.media_width, self.media_height)
+        shifted = (raw[0] - self.offset[0], raw[1] - self.offset[1], raw[2] - self.offset[0], raw[3] - self.offset[1])
+        return view_box(shifted, self.matrix)
+
+
+def _write_table_copy(pdf_path: Path, page_rotations: Mapping[int, Optional[int]], copy_path: Path) -> List[_TablePage]:
+    """Copy the text pages into ``copy_path`` with the /Rotate that makes their text run horizontally.
+
+    pdfplumber lays words out in the displayed frame, so a page whose text is
+    drawn at 90 degrees to its ``/Rotate`` yields one glyph per cell.  Each copy
+    page is rotated by the dominant raw text rotation of the source page instead
+    (``None`` keeps the source rotation), and the returned records map the boxes
+    back to the source page view.
+    """
+    import pymupdf
+
+    pages: List[_TablePage] = []
+    with pymupdf.open(str(pdf_path)) as doc, pymupdf.open() as copy:
+        for number in sorted(page_rotations):
+            src_page = doc[number - 1]
+            rotation = page_rotations[number]
+            rotation = int(src_page.rotation) if rotation is None else int(rotation)
+            copy.insert_pdf(doc, from_page=number - 1, to_page=number - 1, links=False, annots=False)
+            copy[-1].set_rotation(rotation % 360)
+            pages.append(_TablePage(src_page, number, rotation))
+        copy.save(str(copy_path))
+    return pages
+
+
+def _tables_for_page(pl_page: Any, record: _TablePage, out_dir: Path, budget_s: float,
+                     notes: List[str]) -> List[Dict[str, Any]]:
+    """Run both pdfplumber strategies on one copy page and write its ``tables_p<N>_<k>.csv`` files."""
+    entries: List[Dict[str, Any]] = []
+    number = record.number
+    k = 0
+    for strategy in ("lines", "text"):
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                with census.time_budget(budget_s, f"tables_p{number}_{strategy}"):
+                    tables = _plumber_tables(pl_page, strategy)
+        except census.BudgetExceeded:
+            notes.append(f"page {number}: pdfplumber {strategy} strategy exceeded {budget_s:g}s")
+            continue
+        except Exception as exc:  # noqa: BLE001 - pdfplumber parse failure on one page
+            notes.append(f"page {number}: pdfplumber {strategy} failed: {type(exc).__name__}")
+            continue
+        for bbox, rows in tables:
+            k += 1
+            name = f"tables_p{number}_{k}.csv"
+            atomic_write_text(out_dir / name, _table_csv_text(rows))
+            entries.append({
+                "page": number, "file": name, "bbox": round_box(record.to_page_view(bbox)),
+                "bbox_coordinates": "page view (top-left origin)",
+                "rows": len(rows), "cols": max(len(r) for r in rows), "strategy": strategy,
+                "text_rotation": record.copy_rotation, "page_rotation": record.source_rotation,
+            })
+    return entries
+
+
+def extract_tables(pdf_path: Path, text_pages: Union[Mapping[int, Optional[int]], Sequence[int]], out_dir: Path,
                    budget_s: float = DEFAULT_TABLE_BUDGET_S) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """Run pdfplumber on the given 1-based pages and write ``tables_p<N>_<k>.csv`` files."""
+    """Run pdfplumber on the given 1-based text pages and write ``tables_p<N>_<k>.csv`` files.
+
+    ``text_pages`` maps each page number to the raw rotation of its text (see
+    :func:`dominant_rotation`); a plain sequence of page numbers keeps each
+    page's own ``/Rotate``.  Table boxes are returned in the source page view.
+    """
     import pdfplumber
 
+    rotations: Dict[int, Optional[int]] = (dict(text_pages) if isinstance(text_pages, Mapping)
+                                           else {int(n): None for n in text_pages})
     entries: List[Dict[str, Any]] = []
     notes: List[str] = []
-    if not page_numbers:
+    if not rotations:
         return entries, notes
-    with pdfplumber.open(str(pdf_path)) as pdf:
-        for number in page_numbers:
-            pl_page = pdf.pages[number - 1]
-            k = 0
-            for strategy in ("lines", "text"):
-                try:
-                    with census.time_budget(budget_s, f"tables_p{number}_{strategy}"):
-                        tables = _plumber_tables(pl_page, strategy)
-                except census.BudgetExceeded:
-                    notes.append(f"page {number}: pdfplumber {strategy} strategy exceeded {budget_s:g}s")
-                    continue
-                except Exception as exc:  # noqa: BLE001 - pdfplumber parse failure on one page
-                    notes.append(f"page {number}: pdfplumber {strategy} failed: {type(exc).__name__}")
-                    continue
-                for bbox, rows in tables:
-                    k += 1
-                    name = f"tables_p{number}_{k}.csv"
-                    atomic_write_text(out_dir / name, _table_csv_text(rows))
-                    entries.append({
-                        "page": number, "file": name, "bbox": list(bbox),
-                        "bbox_coordinates": "pdfplumber page view (top-left origin)",
-                        "rows": len(rows), "cols": max(len(r) for r in rows), "strategy": strategy,
-                    })
+    note = budget_note("tables")
+    if note:
+        notes.append(note)
+    with tempfile.TemporaryDirectory(prefix="sidecar_pdf_tables_") as tmp:
+        copy_path = Path(tmp) / "text_pages.pdf"
+        records = _write_table_copy(pdf_path, rotations, copy_path)
+        with pdfplumber.open(str(copy_path)) as pdf:
+            for index, record in enumerate(records):
+                entries.extend(_tables_for_page(pdf.pages[index], record, out_dir, budget_s, notes))
     return entries, notes
 
 
@@ -680,67 +846,201 @@ def _first_match(patterns: Sequence[re.Pattern[str]], texts: Sequence[str]) -> O
     return None
 
 
-def _drawing_number(texts: Sequence[str]) -> Optional[str]:
-    """First drawing number in reading order (any of the known code patterns)."""
-    for text in texts:
-        for pattern in DRAWING_NUMBER_RES:
-            match = pattern.search(text)
-            if match:
-                return match.group(0)
-    return None
+def _has_boxes(strings: Sequence[Dict[str, Any]]) -> bool:
+    """True when every string carries a page-view box (real runs; unit tests may pass text only)."""
+    return bool(strings) and all(isinstance(s.get("bbox_view"), (list, tuple)) and len(s["bbox_view"]) == 4
+                                 for s in strings)
 
 
-def _value_after_label(texts: Sequence[str], label: str) -> Optional[str]:
-    """Text following ``label`` on the same line, or the next line when the label stands alone."""
+def _label_hits(strings: Sequence[Dict[str, Any]], label: str) -> List[Tuple[int, str]]:
+    """``(index, remainder on the same line)`` for every string containing ``label``, last occurrence first.
+
+    The title block proper sits at the bottom right of a sheet, so it is the
+    last place a label such as DATE or REV appears; the revision history table
+    above it carries the same labels and is tried only afterwards.
+    """
     pattern = re.compile(r"\b" + label + r"\b[\s:.\-]*(.*)$", re.IGNORECASE)
-    for pos, text in enumerate(texts):
-        match = pattern.search(text)
-        if not match:
+    hits: List[Tuple[int, str]] = []
+    for pos, string in enumerate(strings):
+        match = pattern.search(str(string.get("text", "")))
+        if match:
+            hits.append((pos, match.group(1).strip()))
+    hits.reverse()
+    return hits
+
+
+def _proximity(label_box: Sequence[float], box: Sequence[float]) -> Optional[float]:
+    """Distance score of a value box from its label: below and left-aligned is best; above is rejected."""
+    dy = float(box[1]) - float(label_box[1])
+    dx = abs(float(box[0]) - float(label_box[0]))
+    if dy < -2.0:
+        return None
+    return max(dy, 0.0) + 0.5 * dx
+
+
+def _candidates_near(strings: Sequence[Dict[str, Any]], pos: int, window: int = LABEL_WINDOW) -> List[Dict[str, Any]]:
+    """Value strings near ``strings[pos]``: nearest below/right by geometry when boxes exist, else the following ones."""
+    if not _has_boxes(strings):
+        return list(strings[pos + 1:pos + 1 + window])
+    label_box = strings[pos]["bbox_view"]
+    scored: List[Tuple[float, int, Dict[str, Any]]] = []
+    for index in range(max(0, pos - window // 2), min(len(strings), pos + 1 + 2 * window)):
+        if index == pos:
             continue
-        rest = match.group(1).strip()
+        score = _proximity(label_box, strings[index]["bbox_view"])
+        if score is not None:
+            scored.append((score, index, strings[index]))
+    scored.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in scored]
+
+
+def _value_near_label(strings: Sequence[Dict[str, Any]], label: str,
+                      validate: Callable[[str], Optional[str]]) -> Optional[str]:
+    """The first value that ``validate`` accepts on the label's own line, else nearest to the label."""
+    for pos, rest in _label_hits(strings, label):
         if rest:
-            return rest
-        if pos + 1 < len(texts) and not FIELD_LABEL_RE.match(texts[pos + 1]):
-            return texts[pos + 1].strip()
+            value = validate(rest)
+            if value:
+                return value
+        for candidate in _candidates_near(strings, pos):
+            text = str(candidate.get("text", "")).strip()
+            if not text or FIELD_LABEL_RE.match(text):
+                continue
+            value = validate(text)
+            if value:
+                return value
     return None
 
 
-def _guess_title(texts: Sequence[str], taken: Sequence[Optional[str]]) -> Optional[str]:
-    """Best-effort title: the text after a TITLE label, else the longest wordy line not used elsewhere."""
-    labelled = _value_after_label(texts, r"(?:DRAWING\s+|DWG\.?\s*)?TITLE")
+def _match_drawing_number(text: str) -> Optional[str]:
+    """The drawing number inside ``text`` (first of the known code patterns), or ``None``."""
+    return _first_match(DRAWING_NUMBER_RES, [text])
+
+
+def _match_revision(text: str) -> Optional[str]:
+    """``text`` (its first token) as a revision code such as A, B1, P02 or 3, upper-cased."""
+    token = text.split()[0].rstrip(".,;:") if text.split() else ""
+    return token.upper() if token and REVISION_TOKEN_RE.fullmatch(token) else None
+
+
+def _match_date(text: str) -> Optional[str]:
+    """The first date-like token in ``text``."""
+    return _first_match(DATE_RES, [text])
+
+
+def _match_scale(text: str) -> Optional[str]:
+    """The first scale-like token in ``text``."""
+    match = SCALE_RE.search(text)
+    return match.group(0) if match else None
+
+
+def _first_in_reading_order(texts: Sequence[str]) -> Optional[str]:
+    """First drawing number (any known pattern) in reading order."""
+    for text in texts:
+        value = _match_drawing_number(text)
+        if value:
+            return value
+    return None
+
+
+def _drawing_number(strings: Sequence[Dict[str, Any]]) -> Optional[str]:
+    """The sheet's own drawing number.
+
+    The value next to a DRAWING NO / DWG NO / SHEET NO label wins; otherwise the
+    first match in reading order among the strings that are not cross-references
+    ("REFER AR-IP-31-ZZ-002 FOR ELEVATION"), and finally among all of them.
+    """
+    labelled = _value_near_label(strings, r"(?:DRAWING|DWG\.?|DRG\.?|SHEET)\s*(?:NO|NUMBER)", _match_drawing_number)
+    if labelled:
+        return labelled
+    texts = [str(s.get("text", "")) for s in strings]
+    plain = [t for t in texts if not CROSS_REFERENCE_RE.search(t)]
+    return _first_in_reading_order(plain) or _first_in_reading_order(texts)
+
+
+def _revision(strings: Sequence[Dict[str, Any]]) -> Optional[str]:
+    """Revision code: the value next to a REV / REVISION label, else an inline ``Rev C`` anywhere."""
+    labelled = _value_near_label(strings, r"REV(?:ISION)?", _match_revision)
+    if labelled:
+        return labelled
+    for string in strings:
+        match = REVISION_RE.search(str(string.get("text", "")))
+        if match:
+            return match.group(1).upper()
+    return None
+
+
+def _is_title_line(text: str) -> bool:
+    """A wordy line that is not a label, date, scale, revision or drawing number."""
+    if not text or FIELD_LABEL_RE.match(text):
+        return False
+    if _match_date(text) or _match_scale(text) or REVISION_RE.search(text) or _match_drawing_number(text):
+        return False
+    return any(ch.isalpha() for ch in text)
+
+
+def _lines_below(strings: Sequence[Dict[str, Any]], pos: int, window: int = LABEL_WINDOW) -> List[Dict[str, Any]]:
+    """Strings left-aligned under ``strings[pos]`` in top-down order (reading order when boxes are unknown)."""
+    if not _has_boxes(strings):
+        return list(strings[pos + 1:pos + 1 + window])
+    label_box = strings[pos]["bbox_view"]
+    below: List[Tuple[float, int, Dict[str, Any]]] = []
+    for index in range(max(0, pos - window // 2), min(len(strings), pos + 1 + 2 * window)):
+        box = strings[index]["bbox_view"]
+        dy = float(box[1]) - float(label_box[1])
+        if index != pos and dy > 2.0 and abs(float(box[0]) - float(label_box[0])) <= ALIGN_TOLERANCE_PT:
+            below.append((dy, index, strings[index]))
+    below.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in below]
+
+
+def _title_after_label(strings: Sequence[Dict[str, Any]]) -> Optional[str]:
+    """Title lines under a TITLE / DRAWING TITLE label, joined (continuations need two or more words)."""
+    for pos, rest in _label_hits(strings, r"(?:DRAWING\s+|DWG\.?\s*|DRG\.?\s*)?TITLE"):
+        lines = [rest] if rest and _is_title_line(rest) else []
+        for string in _lines_below(strings, pos)[:TITLE_MAX_LINES]:
+            text = str(string.get("text", "")).strip()
+            if not _is_title_line(text) or (lines and len(text.split()) < 2):
+                break
+            lines.append(text)
+        if lines:
+            return " ".join(lines)
+    return None
+
+
+def _guess_title(strings: Sequence[Dict[str, Any]], taken: Sequence[Optional[str]]) -> Optional[str]:
+    """Best-effort title: the lines after a TITLE label, else the longest wordy line not used elsewhere."""
+    labelled = _title_after_label(strings)
     if labelled:
         return labelled
     used = {t for t in taken if t}
     candidates = []
-    for text in texts:
-        if FIELD_LABEL_RE.match(text) or any(u in text for u in used):
-            continue
-        if DATE_RES[0].search(text) or SCALE_RE.search(text) or REVISION_RE.search(text):
+    for string in strings:
+        text = str(string.get("text", "")).strip()
+        if not _is_title_line(text) or any(u in text for u in used):
             continue
         words = [w for w in text.split() if any(ch.isalpha() for ch in w)]
         if len(words) >= 3:
-            candidates.append(text.strip())
+            candidates.append(text)
     return max(candidates, key=len) if candidates else None
 
 
 def parse_title_block(strings: Sequence[Dict[str, Any]]) -> Dict[str, Optional[str]]:
-    """Best-effort drawing number, title, revision, date and scale from title-block strings."""
-    texts = [s["text"] for s in strings]
-    number = _drawing_number(texts)
-    revision = None
-    for text in texts:
-        match = REVISION_RE.search(text)
-        if match:
-            revision = match.group(1).upper()
-            break
-    if revision is None:
-        after = _value_after_label(texts, "REV(?:ISION)?")
-        if after and re.fullmatch(r"[A-Z]{1,2}\d{0,2}|P\d{1,2}|\d{1,2}", after.split()[0], re.IGNORECASE):
-            revision = after.split()[0].upper()
-    date = _first_match(DATE_RES, texts)
-    scale_match = _first_match((SCALE_RE,), texts)
+    """Best-effort drawing number, title, revision, date and scale from title-block strings.
+
+    Each field prefers the value next to its label (same line, else the nearest
+    string below or to the right when boxes are known, else the following
+    strings); the last occurrence of a label is tried first because the title
+    block proper is the last thing in reading order.  Without a label the field
+    falls back to the first pattern match in reading order.
+    """
+    texts = [str(s.get("text", "")) for s in strings]
+    number = _drawing_number(strings)
+    revision = _revision(strings)
+    date = _value_near_label(strings, "DATE", _match_date) or _first_match(DATE_RES, texts)
+    scale_match = _value_near_label(strings, "SCALE", _match_scale) or _first_match((SCALE_RE,), texts)
     scale = re.sub(r"\s+", "", scale_match) if scale_match and ":" in scale_match else scale_match
-    title = _guess_title(texts, (number, date, scale_match))
+    title = _guess_title(strings, (number, date, scale_match))
     return {"drawing_number": number, "title": title, "revision": revision, "date": date, "scale": scale}
 
 
@@ -784,6 +1084,8 @@ def page_info(page: Any, number: int, words: Sequence[Dict[str, Any]], images: S
         "rotation_matrix": [round(float(v), 6) for v in tuple(page.rotation_matrix)],
         "text_chars": text_chars,
         "words": len(words),
+        "dominant_text_rotation": dominant_rotation(words),
+        "dominant_text_rotation_view": (dominant_rotation(words) - int(page.rotation)) % 360,
         "image_count": len(images),
         "image_coverage_pct": coverage,
         "vector_path_count": -1 if paths is None else paths,
@@ -801,7 +1103,7 @@ def page_info(page: Any, number: int, words: Sequence[Dict[str, Any]], images: S
 # --------------------------------------------------------------------------- #
 def ledger_entry(pdf_path: Path, sha256: str, state_dir: Optional[Path] = None) -> Dict[str, Any]:
     """Find the pull/upload ledger row for this file (by sha256, else by local path)."""
-    state = state_dir or PATHS["state"]
+    state = Path(state_dir) if state_dir else PATHS["state"]
     rows: List[Dict[str, Any]] = []
     for name in ("pull_ledger.jsonl", "upload_ledger.jsonl"):
         rows.extend(r for r in read_jsonl(state / name) if isinstance(r, dict))
@@ -923,7 +1225,7 @@ def build_sidecars(pdf_path: Path, out_dir: Path, max_pages: Optional[int] = Non
         for index in range(limit):
             pages.append(_process_page(doc, doc[index], index + 1, ocgs, path_budget_s))
 
-    text_pages = [p["info"]["page"] for p in pages if p["info"]["is_text_page"]]
+    text_pages = {p["info"]["page"]: p["info"]["dominant_text_rotation"] for p in pages if p["info"]["is_text_page"]}
     tables, table_notes = extract_tables(pdf_path, text_pages, out_dir)
     notes = [n for p in pages for n in p["notes"]]
     ledger = ledger_entry(pdf_path, sha256, state_dir)

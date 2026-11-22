@@ -68,8 +68,10 @@ import select
 import signal
 import struct
 import sys
+import threading
 import time
 import traceback
+import warnings
 import zipfile
 from collections import Counter, defaultdict
 from contextlib import contextmanager
@@ -187,6 +189,11 @@ def _arm_alarm() -> None:
     signal.setitimer(signal.ITIMER_REAL, remaining)
 
 
+def budget_enforceable() -> bool:
+    """True when a :func:`time_budget` can be armed: ``SIGALRM`` only reaches the main thread."""
+    return threading.current_thread() is threading.main_thread()
+
+
 @contextmanager
 def time_budget(seconds: float, label: str = "") -> Iterator[None]:
     """Run the block under a wall-clock budget; raise :class:`BudgetExceeded` when it passes.
@@ -194,13 +201,24 @@ def time_budget(seconds: float, label: str = "") -> Iterator[None]:
     Budgets nest: the alarm always fires for the earliest active deadline and
     the exception carries that deadline, so an inner block re-raises an outer
     block's timeout untouched.  Uses ``SIGALRM`` and therefore only works in the
-    main thread of a process, and only interrupts Python-level code: a single
-    long C call is bounded with :func:`call_with_hard_budget` instead.
+    main thread of a process: off the main thread the block runs unbounded and a
+    ``RuntimeWarning`` is issued (callers check :func:`budget_enforceable` to
+    record that).  The alarm only interrupts Python-level code: a single long C
+    call is bounded with :func:`call_with_hard_budget` instead.
     """
+    if not budget_enforceable():
+        warnings.warn(f"time_budget({label or 'unnamed'}) not enforced outside the main thread",
+                      RuntimeWarning, stacklevel=3)
+        yield
+        return
     deadline = time.monotonic() + max(float(seconds), 0.001)
     entry = (deadline, label)
     _DEADLINES.append(entry)
-    _arm_alarm()
+    try:
+        _arm_alarm()
+    except Exception:
+        _DEADLINES.remove(entry)
+        raise
     try:
         yield
     finally:

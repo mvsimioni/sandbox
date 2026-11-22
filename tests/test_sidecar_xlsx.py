@@ -381,3 +381,152 @@ def test_xls_conversion_failure_is_reported(book: Dict[str, Path], tmp_path: Pat
         sx.run_one(bogus, tmp_path / "out", book["state"], tmp_path)
     assert sx.main(["run", "--xlsx", str(bogus), "--out", str(tmp_path / "out2"), "--no-progress",
                     "--scratch", str(tmp_path)]) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Regressions from the independent review (I-01 to I-05)
+# --------------------------------------------------------------------------- #
+def test_fill_colour_prefers_non_default_and_handles_gradients() -> None:
+    """A pattern fill whose fgColor is openpyxl's default is coloured by bgColor; gradients key on stops."""
+    from openpyxl.styles import GradientFill, PatternFill
+
+    assert sx.fill_colour(PatternFill("solid", fgColor="FFFF0000")) == "rgb:FFFF0000"
+    assert sx.fill_colour(PatternFill(bgColor="FFFFC7CE")) == "rgb:FFFFC7CE"  # Excel's dxf solid fill
+    assert sx.fill_colour(PatternFill("solid", fgColor="00000000", bgColor="FF123456")) == "rgb:FF123456"
+    assert sx.fill_colour(PatternFill()) == "rgb:00000000"  # both default: keep the only key there is
+    assert sx.fill_colour(None) is None
+    gradient = GradientFill(stop=["FFFF0000", "FF0000FF"])
+    assert sx.fill_colour(gradient) == "gradient:rgb:FFFF0000>rgb:FF0000FF"
+    assert sx.fill_kind(gradient) == "linear" and sx.fill_kind(PatternFill()) is None
+
+
+def test_gradient_cell_fill_and_gradient_rule_do_not_abort(tmp_path: Path, book: Dict[str, Path]) -> None:
+    """I-01: a gradient-filled title cell and a gradient dxf rule run through; both are recorded."""
+    from openpyxl import Workbook
+    from openpyxl.formatting.rule import CellIsRule
+    from openpyxl.styles import GradientFill, PatternFill
+    from openpyxl.styles.differential import DifferentialStyle
+    from openpyxl.formatting.rule import Rule
+
+    wb = Workbook()
+    ws = wb.active
+    ws["A1"] = "Title"
+    ws["A1"].fill = GradientFill(stop=["FFFF0000", "FF0000FF"])
+    ws["A2"] = 5
+    ws["A2"].fill = PatternFill("solid", fgColor="FF00FF00")
+    ws.conditional_formatting.add("A2:A5", CellIsRule(operator="greaterThan", formula=["1"],
+                                                      fill=PatternFill(bgColor="FFFFF2CC")))
+    ws.conditional_formatting.add("B1:B5", Rule(type="expression", formula=["TRUE"], dxf=DifferentialStyle(
+        fill=GradientFill(stop=["FFAAAAAA", "FFBBBBBB"]))))
+    src = tmp_path / "gradient.xlsx"
+    wb.save(src)
+    out = tmp_path / "out"
+    manifest = sx.run_one(src, out, book["state"])
+    assert manifest["counts"]["cells_non_empty"] == 2
+    fills = {f["colour"]: f for f in json.loads((out / sx.FILLS_NAME).read_text(encoding="utf-8"))["Sheet"]}
+    assert fills["gradient:rgb:FFFF0000>rgb:FF0000FF"]["fill_type"] == "linear"
+    assert fills["gradient:rgb:FFFF0000>rgb:FF0000FF"]["examples"] == [{"cell": "A1", "value": "Title"}]
+    assert fills["rgb:FF00FF00"]["count"] == 1
+    rules = {cf["sqref"]: cf["rules"][0] for cf in
+             json.loads((out / sx.CONDITIONAL_NAME).read_text(encoding="utf-8"))["Sheet"]}
+    assert rules["A2:A5"]["fill"] == "rgb:FFFFF2CC"  # I-02: bgColor, not the default fgColor
+    assert rules["B1:B5"]["fill"] == "gradient:rgb:FFAAAAAA>rgb:FFBBBBBB"
+
+
+def test_data_table_formula_text() -> None:
+    """I-03: a What-If data table is rendered as Excel shows it, with its range, never as an object repr."""
+    from openpyxl.worksheet.formula import ArrayFormula, DataTableFormula
+
+    column = DataTableFormula(ref="B2:B4", dt2D=False, r1="A1")
+    assert sx.formula_text(column) == "=TABLE(,A1) [dataTable ref=B2:B4]"
+    row = DataTableFormula(ref="B2:D2", dt2D=False, dtr=True, r1="A1")
+    assert sx.formula_text(row) == "=TABLE(A1,) [dataTable ref=B2:D2]"
+    both = DataTableFormula(ref="B2:D4", dt2D=True, r1="A1", r2="A2")
+    assert sx.formula_text(both) == "=TABLE(A1,A2) [dataTable ref=B2:D4]"
+    assert sx.formula_text(ArrayFormula("C1:C2", "=A1*2")) == "=A1*2"
+    assert sx.formula_text("=SUM(A1:A2)") == "=SUM(A1:A2)" and sx.formula_text(12.5) is None
+    assert sx.formula_text("plain") is None
+
+
+def test_data_table_cell_goes_to_formulas_csv(tmp_path: Path, book: Dict[str, Path]) -> None:
+    """I-03 end to end: the data-table cell is a formula row and its cached value is blank, not a repr."""
+    from openpyxl import Workbook
+    from openpyxl.worksheet.formula import DataTableFormula
+
+    wb = Workbook()
+    ws = wb.active
+    ws["A1"] = 5
+    ws["B2"] = DataTableFormula(ref="B2:B4", dt2D=False, r1="A1")
+    src = tmp_path / "datatable.xlsx"
+    wb.save(src)
+    out = tmp_path / "out"
+    manifest = sx.run_one(src, out, book["state"])
+    values = {r["cell"]: r for r in read_csv_dicts(out / "Sheet_values.csv")}
+    assert values["B2"] == {"cell": "B2", "value": "", "type": ""}
+    formulas = {r["cell"]: r["formula"] for r in read_csv_dicts(out / "Sheet_formulas.csv")}
+    assert formulas == {"B2": "=TABLE(,A1) [dataTable ref=B2:B4]"}
+    assert manifest["counts"]["numeric_tokens"] == 1  # only A1; no hex address counted
+
+
+def test_malformed_parts_are_listed_and_fail_a_check(tmp_path: Path, book: Dict[str, Path]) -> None:
+    """I-04: a truncated threaded-comment part and a truncated persons part are reported, not swallowed."""
+    with zipfile.ZipFile(book["threaded"]) as zin:
+        good_tc = zin.read("xl/threadedComments/threadedComment1.xml")
+    bad = tmp_path / "bad.xlsx"
+    rewrite_zip(book["threaded"], bad, {"xl/threadedComments/threadedComment1.xml": good_tc[: len(good_tc) // 2],
+                                        "xl/persons/person.xml": b"<personList><person"}, {})
+    out = tmp_path / "out"
+    manifest = sx.run_one(bad, out, book["state"])
+    wb = json.loads((out / sx.WORKBOOK_NAME).read_text(encoding="utf-8"))
+    expected = ["xl/persons/person.xml", "xl/threadedComments/threadedComment1.xml"]
+    assert wb["threaded_comment_parts"]["unreadable_parts"] == expected
+    assert wb["unreadable_parts"] == expected
+    parsed = _check(manifest, "every package XML part")
+    assert parsed["pass"] is False and "threadedComment1.xml" in parsed["evidence"]
+    assert [r["kind"] for r in read_jsonl(out / sx.COMMENTS_NAME)] == ["legacy", "legacy"]
+    # the healthy workbook reports no unreadable parts and the check passes
+    healthy = _manifest(book["out"])
+    assert _check(healthy, "every package XML part")["pass"] is True
+    assert json.loads((book["out"] / sx.WORKBOOK_NAME).read_text(encoding="utf-8"))["unreadable_parts"] == []
+
+
+def test_stored_cells_only_are_walked(tmp_path: Path, book: Dict[str, Path]) -> None:
+    """I-05: a styled empty cell far down the sheet does not expand the walk to the whole dimension grid."""
+    import time
+    from openpyxl import Workbook, load_workbook
+    from openpyxl.styles import PatternFill
+
+    wb = Workbook()
+    ws = wb.active
+    ws["A1"] = 1
+    ws["B1"].comment = None
+    ws.cell(20000, 26).fill = PatternFill("solid", fgColor="FFFF0000")
+    src = tmp_path / "sparse.xlsx"
+    wb.save(src)
+    loaded = load_workbook(src).active
+    assert [c.coordinate for c in sx.stored_cells(loaded)] == ["A1", "Z20000"]
+    assert loaded.dimensions == "A1:Z20000"
+    out = tmp_path / "out"
+    started = time.monotonic()
+    manifest = sx.run_one(src, out, book["state"])
+    assert time.monotonic() - started < 2.0
+    assert manifest["counts"]["cells_non_empty"] == 1
+    fills = json.loads((out / sx.FILLS_NAME).read_text(encoding="utf-8"))["Sheet"]
+    assert fills == [{"colour": "rgb:FFFF0000", "fill_type": "solid", "count": 1, "with_value": 0,
+                      "examples": [{"cell": "Z20000", "value": ""}]}]
+    assert json.loads((out / sx.FORMATS_NAME).read_text(encoding="utf-8"))["Sheet"] == {
+        "A": {"sampled": 1, "formats": {"General": 1}, "dominant": "General"}}
+
+
+def test_cached_value_does_not_create_cells() -> None:
+    """The cached-value lookup reads the data_only sheet without materialising new cells in it."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws["A1"] = 3
+    probe = Workbook().active
+    probe["C7"] = "=A1"
+    assert sx.cached_value(ws, probe["C7"]) is None
+    assert sorted(ws._cells) == [(1, 1)]  # noqa: SLF001 - the point of the test
+    assert sx.cached_value(ws, probe["A1"]) == 3

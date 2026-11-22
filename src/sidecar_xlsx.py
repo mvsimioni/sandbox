@@ -21,6 +21,13 @@ output directory:
   run; ``keep_vba=True`` is only used to read);
 * ``sidecar_manifest.json``: source hash, files written, counts and checks.
 
+Only the cells a sheet stores are walked (never the full ``dimensions`` grid),
+gradient fills are keyed by their stops, a pattern fill whose ``fgColor`` is
+openpyxl's default is coloured by its ``bgColor`` (how Excel stores every
+conditional-format fill), What-If data tables are written as ``=TABLE(...)``
+and any package XML part that fails to parse is listed in ``workbook.json``
+under ``unreadable_parts`` and fails a check.
+
 A legacy ``.xls`` is first copied to a scratch directory under ``/tmp`` and
 converted to ``.xlsx`` with ``soffice --headless``; the conversion is recorded
 in ``workbook.json``.  The run is idempotent: when the manifest in the output
@@ -71,7 +78,7 @@ except ModuleNotFoundError:  # run as a plain script from inside src/
     from state import Progress  # type: ignore[no-redef]
 
 MODULE_NAME = "sidecar_xlsx"
-MODULE_VERSION = "1.0.0"
+MODULE_VERSION = "1.1.0"
 MANIFEST_NAME = "sidecar_manifest.json"
 WORKBOOK_NAME = "workbook.json"
 MERGED_NAME = "merged.json"
@@ -144,13 +151,38 @@ def value_type(value: Any) -> str:
 
 
 def formula_text(value: Any) -> Optional[str]:
-    """The formula of a cell loaded without ``data_only`` ('' for plain values)."""
+    """The formula of a cell loaded without ``data_only`` (``None`` for plain values).
+
+    Strings starting with ``=`` and ``ArrayFormula`` objects give their text.  A
+    ``DataTableFormula`` (What-If data table, ``<f t="dataTable">``) carries no
+    text, so it is rendered the way Excel displays it, ``=TABLE(row input,
+    column input)``, followed by the table range.
+    """
     if isinstance(value, str) and value.startswith("="):
         return value
-    text = getattr(value, "text", None)  # ArrayFormula / DataTableFormula
+    if _is_data_table(value):
+        return data_table_text(value)
+    text = getattr(value, "text", None)  # ArrayFormula
     if text is not None:
         return str(text) if str(text).startswith("=") else "=" + str(text)
     return None
+
+
+def _is_data_table(value: Any) -> bool:
+    """True for an openpyxl ``DataTableFormula`` (duck-typed: ``ref`` and ``r1`` but no ``text``)."""
+    return hasattr(value, "r1") and hasattr(value, "ref") and not hasattr(value, "text") and not isinstance(value, str)
+
+
+def data_table_text(table: Any) -> str:
+    """Excel's display form of a data table: ``=TABLE(r1,r2)``, ``=TABLE(r1,)`` (row) or ``=TABLE(,r1)`` (column)."""
+    r1, r2 = str(getattr(table, "r1", None) or ""), str(getattr(table, "r2", None) or "")
+    if getattr(table, "dt2D", False):
+        args = f"{r1},{r2}"
+    elif getattr(table, "dtr", False):
+        args = f"{r1},"
+    else:
+        args = f",{r1}"
+    return f"=TABLE({args}) [dataTable ref={getattr(table, 'ref', '') or ''}]"
 
 
 def safe_sheet_stem(name: str, taken: Dict[str, int]) -> str:
@@ -179,13 +211,19 @@ def _attr(element: Any, name: str) -> Optional[str]:
     return None
 
 
-def _parse_xml(data: bytes) -> Optional[Any]:
-    """Parse XML bytes with lxml, returning ``None`` when malformed."""
+def _parse_xml(data: bytes, name: str = "", unreadable: Optional[List[str]] = None) -> Optional[Any]:
+    """Parse XML bytes with lxml, returning ``None`` when malformed.
+
+    When ``unreadable`` is given, the part ``name`` is appended to it on
+    failure so a lost part is reported instead of silently counting as empty.
+    """
     from lxml import etree
 
     try:
         return etree.fromstring(data)
     except etree.XMLSyntaxError:
+        if unreadable is not None and name not in unreadable:
+            unreadable.append(name)
         return None
 
 
@@ -197,11 +235,12 @@ def _resolve_part(base_dir: str, target: str) -> str:
     return posixpath.normpath(posixpath.join(base_dir, target))
 
 
-def _rels(archive: zipfile.ZipFile, rels_name: str, base_dir: str) -> List[Tuple[str, str, str, bool]]:
+def _rels(archive: zipfile.ZipFile, rels_name: str, base_dir: str,
+          unreadable: Optional[List[str]] = None) -> List[Tuple[str, str, str, bool]]:
     """``(rId, type, target, external)`` for every relationship in ``rels_name`` (empty when missing)."""
     if rels_name not in archive.namelist():
         return []
-    root = _parse_xml(archive.read(rels_name))
+    root = _parse_xml(archive.read(rels_name), rels_name, unreadable)
     if root is None:
         return []
     out: List[Tuple[str, str, str, bool]] = []
@@ -228,6 +267,40 @@ def _colour(colour: Any) -> Optional[str]:
     if kind == "indexed":
         return f"indexed:{colour.indexed}"
     return None
+
+
+_DEFAULT_COLOUR = "rgb:00000000"
+"""openpyxl's ``Color()`` default; a pattern fill whose fgColor is this one is coloured by its bgColor."""
+
+
+def fill_colour(fill: Any) -> Optional[str]:
+    """Colour key of a cell or dxf fill, or ``None`` when it has none.
+
+    A ``GradientFill`` has no ``fgColor``/``bgColor``; it is keyed by its
+    stops (``gradient:rgb:FFFF0000>rgb:FF0000FF``).  For a ``PatternFill`` the
+    first colour that is not openpyxl's default wins: Excel stores a dxf solid
+    fill in ``bgColor`` and leaves ``fgColor`` at the default ``00000000``.
+    """
+    if fill is None:
+        return None
+    stops = getattr(fill, "stop", None)
+    if stops is not None and not hasattr(fill, "fgColor"):
+        return "gradient:" + ">".join(_colour(getattr(stop, "color", None)) or "unknown" for stop in stops)
+    candidates = [_colour(getattr(fill, "fgColor", None)), _colour(getattr(fill, "bgColor", None))]
+    for key in candidates:
+        if key is not None and key != _DEFAULT_COLOUR:
+            return key
+    return next((key for key in candidates if key is not None), None)
+
+
+def fill_kind(fill: Any) -> Optional[str]:
+    """``solid``, ``gray125`` ... for pattern fills; ``linear`` or ``path`` for gradients; ``None`` when unfilled."""
+    if fill is None:
+        return None
+    kind = getattr(fill, "fill_type", None) or getattr(fill, "type", None)
+    if kind is None and getattr(fill, "stop", None) is not None and not hasattr(fill, "fgColor"):
+        return "gradient"
+    return kind
 
 
 # --------------------------------------------------------------------------- #
@@ -283,13 +356,14 @@ def convert_xls(xls_path: Path, scratch_root: Optional[Path] = None, binary: Opt
 # --------------------------------------------------------------------------- #
 # Package-level reads (zip)
 # --------------------------------------------------------------------------- #
-def sheet_parts(archive: zipfile.ZipFile) -> List[Tuple[str, str]]:
+def sheet_parts(archive: zipfile.ZipFile, unreadable: Optional[List[str]] = None) -> List[Tuple[str, str]]:
     """``(sheet name, part name)`` in workbook order from ``xl/workbook.xml`` and its rels."""
-    rels = {rid: target for rid, _t, target, ext in _rels(archive, "xl/_rels/workbook.xml.rels", "xl") if not ext}
+    rels = {rid: target for rid, _t, target, ext in _rels(archive, "xl/_rels/workbook.xml.rels", "xl", unreadable)
+            if not ext}
     out: List[Tuple[str, str]] = []
     if "xl/workbook.xml" not in archive.namelist():
         return out
-    root = _parse_xml(archive.read("xl/workbook.xml"))
+    root = _parse_xml(archive.read("xl/workbook.xml"), "xl/workbook.xml", unreadable)
     if root is None:
         return out
     for element in root.iter():
@@ -300,26 +374,26 @@ def sheet_parts(archive: zipfile.ZipFile) -> List[Tuple[str, str]]:
     return out
 
 
-def threaded_parts_by_sheet(archive: zipfile.ZipFile) -> Dict[str, str]:
+def threaded_parts_by_sheet(archive: zipfile.ZipFile, unreadable: Optional[List[str]] = None) -> Dict[str, str]:
     """Map every threaded-comment part to the sheet name whose relationships point at it."""
     mapping: Dict[str, str] = {}
-    for sheet_name, part in sheet_parts(archive):
+    for sheet_name, part in sheet_parts(archive, unreadable):
         if not part:
             continue
         rels_name = posixpath.join(posixpath.dirname(part), "_rels", posixpath.basename(part) + ".rels")
-        for _rid, _type, target, external in _rels(archive, rels_name, posixpath.dirname(part)):
+        for _rid, _type, target, external in _rels(archive, rels_name, posixpath.dirname(part), unreadable):
             if not external and _THREADED_RE.match(target):
                 mapping[target] = sheet_name
     return mapping
 
 
-def read_persons(archive: zipfile.ZipFile) -> Dict[str, Dict[str, str]]:
+def read_persons(archive: zipfile.ZipFile, unreadable: Optional[List[str]] = None) -> Dict[str, Dict[str, str]]:
     """Threaded-comment authors by GUID from ``xl/persons/*.xml``."""
     persons: Dict[str, Dict[str, str]] = {}
     for name in archive.namelist():
         if not _PERSONS_RE.match(name):
             continue
-        root = _parse_xml(archive.read(name))
+        root = _parse_xml(archive.read(name), name, unreadable)
         if root is None:
             continue
         for element in root.iter():
@@ -350,25 +424,33 @@ def _threaded_row(element: Any, part: str, sheet: Optional[str], persons: Dict[s
     }
 
 
-def read_threaded_comments(archive: zipfile.ZipFile) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """All threaded comments in the package and a summary of the parts read."""
-    persons = read_persons(archive)
-    by_sheet = threaded_parts_by_sheet(archive)
+def read_threaded_comments(archive: zipfile.ZipFile,
+                           unreadable: Optional[List[str]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """All threaded comments in the package and a summary of the parts read.
+
+    The summary lists the threaded parts, the number of persons, the parts no
+    sheet links to and ``unreadable_parts``: threaded-comment or person parts
+    whose XML could not be parsed (their comments are lost, so a check fails).
+    """
+    unreadable = [] if unreadable is None else unreadable
+    persons = read_persons(archive, unreadable)
+    by_sheet = threaded_parts_by_sheet(archive, unreadable)
     parts = sorted(n for n in archive.namelist() if _THREADED_RE.match(n))
     rows: List[Dict[str, Any]] = []
     for part in parts:
-        root = _parse_xml(archive.read(part))
+        root = _parse_xml(archive.read(part), part, unreadable)
         if root is None:
             continue
         for element in root.iter():
             if _localname(element) == "threadedComment":
                 rows.append(_threaded_row(element, part, by_sheet.get(part), persons))
     summary = {"threaded_parts": parts, "persons": len(persons),
-               "unlinked_parts": [p for p in parts if p not in by_sheet]}
+               "unlinked_parts": [p for p in parts if p not in by_sheet],
+               "unreadable_parts": sorted(p for p in unreadable if _THREADED_RE.match(p) or _PERSONS_RE.match(p))}
     return rows, summary
 
 
-def count_comment_elements(archive: zipfile.ZipFile) -> Dict[str, int]:
+def count_comment_elements(archive: zipfile.ZipFile, unreadable: Optional[List[str]] = None) -> Dict[str, int]:
     """Independent recount of ``comment`` (legacy) and ``threadedComment`` elements in the package."""
     counts = {"legacy": 0, "threaded": 0, "merge_cells": 0}
     for name in archive.namelist():
@@ -376,7 +458,7 @@ def count_comment_elements(archive: zipfile.ZipFile) -> Dict[str, int]:
             "merge_cells" if _SHEET_PART_RE.match(name) else None
         if key is None:
             continue
-        root = _parse_xml(archive.read(name))
+        root = _parse_xml(archive.read(name), name, unreadable)
         if root is None:
             continue
         wanted = {"legacy": "comment", "threaded": "threadedComment", "merge_cells": "mergeCell"}[key]
@@ -385,20 +467,23 @@ def count_comment_elements(archive: zipfile.ZipFile) -> Dict[str, int]:
 
 
 def package_facts(xlsx_path: Path) -> Dict[str, Any]:
-    """Facts read straight from the zip: VBA part, external link parts, element recounts."""
+    """Facts read straight from the zip: VBA part, external link parts, element recounts, unreadable parts."""
+    unreadable: List[str] = []
     with zipfile.ZipFile(xlsx_path) as archive:
         names = archive.namelist()
-        ext_targets = [t for _r, _t, t, ext in _rels(archive, "xl/_rels/workbook.xml.rels", "xl") if ext]
+        ext_targets = [t for _r, _t, t, ext in _rels(archive, "xl/_rels/workbook.xml.rels", "xl", unreadable) if ext]
         for name in names:
             if name.startswith("xl/externalLinks/_rels/"):
-                ext_targets += [t for _r, _t, t, ext in _rels(archive, name, "xl/externalLinks") if ext]
-        return {
+                ext_targets += [t for _r, _t, t, ext in _rels(archive, name, "xl/externalLinks", unreadable) if ext]
+        facts = {
             "has_vba": VBA_BIN in names,
             "external_link_parts": sorted(n for n in names if n.startswith("xl/externalLinks/") and n.endswith(".xml")),
             "external_targets": ext_targets,
-            "element_counts": count_comment_elements(archive),
-            "threaded": read_threaded_comments(archive),
+            "element_counts": count_comment_elements(archive, unreadable),
+            "threaded": read_threaded_comments(archive, unreadable),
         }
+    facts["unreadable_parts"] = sorted(set(unreadable))
+    return facts
 
 
 # --------------------------------------------------------------------------- #
@@ -488,21 +573,45 @@ class SheetExtract:
     charts: int = 0
 
 
-def extract_cells(ws_formula: Any, ws_value: Any, sheet: SheetExtract) -> None:
+def stored_cells(ws: Any) -> List[Any]:
+    """The cells a sheet actually stores, in row-major order.
+
+    ``ws.iter_rows()`` materialises a cell for every coordinate inside
+    ``ws.dimensions``, so one styled empty cell far down the sheet costs
+    hundreds of thousands of synthetic cells per pass.  openpyxl keeps the
+    stored cells in ``ws._cells`` keyed by ``(row, column)``; that is what the
+    extractors walk, once, falling back to ``iter_rows`` if the attribute is
+    ever missing.
+    """
+    cells = getattr(ws, "_cells", None)
+    if not isinstance(cells, dict):
+        return [cell for row in ws.iter_rows() for cell in row]
+    return [cells[key] for key in sorted(cells)]
+
+
+def cached_value(ws_value: Any, cell: Any) -> Any:
+    """Cached value of ``cell`` from the ``data_only`` workbook without creating cells there."""
+    stored = getattr(ws_value, "_cells", None)
+    if isinstance(stored, dict):
+        twin = stored.get((cell.row, cell.column))
+        return None if twin is None else twin.value
+    return ws_value[cell.coordinate].value
+
+
+def extract_cells(cells: Sequence[Any], ws_value: Any, sheet: SheetExtract) -> None:
     """Fill values, formulas, cached-value gaps and the numeric-token count of a sheet."""
-    for row in ws_formula.iter_rows():
-        for cell in row:
-            raw = cell.value
-            if raw is None:
-                continue
-            formula = formula_text(raw)
-            cached = ws_value[cell.coordinate].value if formula else raw
-            if formula:
-                sheet.formulas.append({"cell": cell.coordinate, "formula": formula})
-                if cached is None:
-                    sheet.cached_missing += 1
-            sheet.values.append({"cell": cell.coordinate, "value": value_text(cached), "type": value_type(cached)})
-            sheet.numeric_tokens += len(numeric_tokens(cached))
+    for cell in cells:
+        raw = cell.value
+        if raw is None:
+            continue
+        formula = formula_text(raw)
+        cached = cached_value(ws_value, cell) if formula else raw
+        if formula:
+            sheet.formulas.append({"cell": cell.coordinate, "formula": formula})
+            if cached is None:
+                sheet.cached_missing += 1
+        sheet.values.append({"cell": cell.coordinate, "value": value_text(cached), "type": value_type(cached)})
+        sheet.numeric_tokens += len(numeric_tokens(cached))
 
 
 def extract_merged(ws: Any, sheet: SheetExtract) -> None:
@@ -529,38 +638,36 @@ def extract_hidden(ws: Any, sheet: SheetExtract) -> None:
     sheet.hidden_cols = sorted(cols, key=lambda c: (len(c), c))
 
 
-def extract_legacy_comments(ws: Any, sheet: SheetExtract) -> None:
+def extract_legacy_comments(cells: Sequence[Any], sheet: SheetExtract) -> None:
     """Legacy notes (openpyxl ``cell.comment``), flagging those that mirror a threaded comment."""
-    for row in ws.iter_rows():
-        for cell in row:
-            note = cell.comment
-            if note is None:
-                continue
-            text = note.text or ""
-            sheet.comments.append({
-                "index": None, "kind": "legacy", "sheet": sheet.name, "cell": cell.coordinate, "part": None,
-                "comment_id": None, "parent_id": None, "author_id": None, "author": note.author or "",
-                "date": "", "text": text, "done": None, "mentions": [],
-                "threaded_shadow": text.lstrip().startswith(_SHADOW_PREFIX),
-            })
+    for cell in cells:
+        note = cell.comment
+        if note is None:
+            continue
+        text = note.text or ""
+        sheet.comments.append({
+            "index": None, "kind": "legacy", "sheet": sheet.name, "cell": cell.coordinate, "part": None,
+            "comment_id": None, "parent_id": None, "author_id": None, "author": note.author or "",
+            "date": "", "text": text, "done": None, "mentions": [],
+            "threaded_shadow": text.lstrip().startswith(_SHADOW_PREFIX),
+        })
 
 
-def extract_formats(ws: Any, sheet: SheetExtract) -> None:
+def extract_formats(cells: Sequence[Any], sheet: SheetExtract) -> None:
     """Number formats per column from the first ``FORMAT_SAMPLE`` non-empty cells of each column."""
     from openpyxl.utils import get_column_letter
 
     per_col: Dict[str, Dict[str, int]] = {}
     seen: Dict[str, int] = {}
-    for row in ws.iter_rows():
-        for cell in row:
-            if cell.value is None:
-                continue
-            letter = get_column_letter(cell.column)
-            if seen.get(letter, 0) >= FORMAT_SAMPLE:
-                continue
-            seen[letter] = seen.get(letter, 0) + 1
-            bucket = per_col.setdefault(letter, {})
-            bucket[cell.number_format] = bucket.get(cell.number_format, 0) + 1
+    for cell in cells:
+        if cell.value is None:
+            continue
+        letter = get_column_letter(cell.column)
+        if seen.get(letter, 0) >= FORMAT_SAMPLE:
+            continue
+        seen[letter] = seen.get(letter, 0) + 1
+        bucket = per_col.setdefault(letter, {})
+        bucket[cell.number_format] = bucket.get(cell.number_format, 0) + 1
     sheet.formats = {
         letter: {"sampled": seen[letter], "formats": counts,
                  "dominant": max(counts.items(), key=lambda kv: kv[1])[0]}
@@ -568,21 +675,23 @@ def extract_formats(ws: Any, sheet: SheetExtract) -> None:
     }
 
 
-def extract_fills(ws: Any, sheet: SheetExtract) -> None:
-    """Fill colours used on the sheet with counts and example cells (fill colour can carry status)."""
+def extract_fills(cells: Sequence[Any], sheet: SheetExtract) -> None:
+    """Fill colours used on the sheet with counts and example cells (fill colour can carry status).
+
+    Pattern and gradient fills are both recorded; see :func:`fill_colour`.
+    """
     fills: Dict[str, Dict[str, Any]] = {}
-    for row in ws.iter_rows():
-        for cell in row:
-            fill = cell.fill
-            if fill is None or not fill.fill_type:
-                continue
-            key = _colour(fill.fgColor) or _colour(fill.bgColor) or "unknown"
-            entry = fills.setdefault(key, {"colour": key, "fill_type": fill.fill_type, "count": 0, "examples": [],
-                                           "with_value": 0})
-            entry["count"] += 1
-            entry["with_value"] += int(cell.value is not None)
-            if len(entry["examples"]) < FILL_EXAMPLES:
-                entry["examples"].append({"cell": cell.coordinate, "value": value_text(cell.value)})
+    for cell in cells:
+        fill = cell.fill
+        kind = fill_kind(fill)
+        if not kind:
+            continue
+        key = fill_colour(fill) or "unknown"
+        entry = fills.setdefault(key, {"colour": key, "fill_type": kind, "count": 0, "examples": [], "with_value": 0})
+        entry["count"] += 1
+        entry["with_value"] += int(cell.value is not None)
+        if len(entry["examples"]) < FILL_EXAMPLES:
+            entry["examples"].append({"cell": cell.coordinate, "value": value_text(cell.value)})
     sheet.fills = sorted(fills.values(), key=lambda e: (-e["count"], e["colour"]))
 
 
@@ -603,9 +712,8 @@ def _rule_record(rule: Any) -> Dict[str, Any]:
     dxf = getattr(rule, "dxf", None)
     fill = font = None
     if dxf is not None:
-        if dxf.fill is not None:
-            fill = _colour(dxf.fill.fgColor) or _colour(dxf.fill.bgColor)
-        if dxf.font is not None and dxf.font.color is not None:
+        fill = fill_colour(getattr(dxf, "fill", None))  # dxf solid fills live in bgColor; gradients in stops
+        if getattr(dxf, "font", None) is not None and dxf.font.color is not None:
             font = _colour(dxf.font.color)
     return {
         "type": rule.type, "operator": rule.operator, "formula": list(rule.formula or []),
@@ -627,12 +735,13 @@ def extract_sheet(index: int, ws_formula: Any, ws_value: Any, stem: str) -> Shee
     sheet = SheetExtract(index=index, name=ws_formula.title, stem=stem, state=ws_formula.sheet_state,
                          dimensions=ws_formula.dimensions, max_row=int(ws_formula.max_row),
                          max_col=int(ws_formula.max_column), frozen_panes=ws_formula.freeze_panes)
-    extract_cells(ws_formula, ws_value, sheet)
+    cells = stored_cells(ws_formula)  # one walk over the stored cells, shared by the four cell-level extractors
+    extract_cells(cells, ws_value, sheet)
     extract_merged(ws_formula, sheet)
     extract_hidden(ws_formula, sheet)
-    extract_legacy_comments(ws_formula, sheet)
-    extract_formats(ws_formula, sheet)
-    extract_fills(ws_formula, sheet)
+    extract_legacy_comments(cells, sheet)
+    extract_formats(cells, sheet)
+    extract_fills(cells, sheet)
     extract_validations(ws_formula, sheet)
     extract_conditional(ws_formula, sheet)
     sheet.images = len(getattr(ws_formula, "_images", []) or [])
@@ -758,6 +867,7 @@ def write_sidecars(out_dir: Path, book: WorkbookExtract, source: Dict[str, Any],
         "sheets": [_sheet_summary(s) for s in book.sheets], "defined_names": book.defined_names,
         "external_links": book.external_links, "has_vba": book.facts["has_vba"], "vba": vba,
         "properties": book.properties, "threaded_comment_parts": book.facts["threaded_summary"],
+        "unreadable_parts": book.facts.get("unreadable_parts", []),
     }
     atomic_write_json(out_dir / WORKBOOK_NAME, workbook)
     atomic_write_json(out_dir / MERGED_NAME, {s.name: s.merged for s in book.sheets})
@@ -783,6 +893,7 @@ def _checks(book: WorkbookExtract, files: List[str], out_dir: Path, vba: Dict[st
             conversion: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Self-checks recorded in the manifest (the Markdown writer copies them into Provenance)."""
     counts = book.facts["element_counts"]
+    unreadable = book.facts.get("unreadable_parts") or []
     legacy = sum(len(s.comments) for s in book.sheets)
     threaded = sum(1 for c in book.comments if c["kind"] == "threaded")
     merged = sum(len(s.merged) for s in book.sheets)
@@ -796,6 +907,8 @@ def _checks(book: WorkbookExtract, files: List[str], out_dir: Path, vba: Dict[st
         {"check": "comment rows equal comment elements in the package",
          "pass": legacy == counts["legacy"] and threaded == counts["threaded"],
          "evidence": f"legacy {legacy}/{counts['legacy']}, threaded {threaded}/{counts['threaded']}"},
+        {"check": "every package XML part read was well formed", "pass": not unreadable,
+         "evidence": ("unreadable: " + ", ".join(unreadable)) if unreadable else "all parts parsed"},
         {"check": "every threaded comment resolved to a sheet",
          "pass": all(c["sheet"] is not None for c in book.comments),
          "evidence": f"{sum(1 for c in book.comments if c['sheet'] is None)} unresolved"},

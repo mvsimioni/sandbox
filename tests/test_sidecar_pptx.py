@@ -395,3 +395,134 @@ def test_plain_deck_without_comment_parts(deck: Dict[str, Path], tmp_path: Path)
     manifest = sp.run_one(deck["plain"], tmp_path / "plain_out", tmp_path)
     assert manifest["counts"]["comment_count"] == 0 and manifest["rel_path"] is None
     assert all(c["pass"] for c in manifest["checks"])
+
+
+# --------------------------------------------------------------------------- #
+# review fixes: pictures by content type, fields and breaks, unreadable parts,
+# duplicate shape ids, coordinate frames in groups
+# --------------------------------------------------------------------------- #
+def _rewrite_zip(src: Path, dst: Path, edit) -> None:
+    """Copy a package, letting ``edit(name, data)`` replace any part's bytes."""
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            zout.writestr(item, edit(item.filename, zin.read(item.filename)))
+
+
+def test_image_ext_from_content_type_then_part_name() -> None:
+    assert sp._image_ext("image/x-emf", "/ppt/media/image1.wmf") == "emf"  # noqa: SLF001
+    assert sp._image_ext("image/png", "/ppt/media/image1.bin") == "png"  # noqa: SLF001
+    assert sp._image_ext("application/octet-stream", "/ppt/media/image2.svg") == "svg"  # noqa: SLF001
+    assert sp._image_ext("", "/ppt/media/blob") == "bin"  # noqa: SLF001
+
+
+def test_unidentifiable_picture_blob_is_exported_with_note(deck: Dict[str, Path], tmp_path: Path) -> None:
+    """A blob Pillow cannot open (EMF, HD Photo, corrupt) keeps its placement, hash and file; the run exits 0."""
+    corrupt = tmp_path / "corrupt.pptx"
+    _rewrite_zip(deck["plain"], corrupt, lambda n, d: b"\x01\x02 not an image" if n.startswith("ppt/media/") else d)
+    out = tmp_path / "out"
+    assert sp.main(["run", "--pptx", str(corrupt), "--out", str(out), "--no-progress"]) == 0
+    pictures = json.loads((out / "pictures.json").read_text(encoding="utf-8"))
+    placed = [i for i in pictures["items"] if i["slide"] is not None]
+    assert len(placed) == 3 and all("error" not in i for i in placed)
+    assert all(i["pixel_width"] is None and i["pixel_note"] for i in placed)
+    assert all(i["content_type"] == "image/png" and i["path"].endswith(".png") for i in placed)
+    assert all((out / i["path"]).is_file() for i in placed)
+    assert (out / placed[0]["path"]).read_bytes() == b"\x01\x02 not an image"
+    manifest = json.loads((out / "sidecar_manifest.json").read_text(encoding="utf-8"))
+    assert all(c["pass"] for c in manifest["checks"]), manifest["checks"]
+
+
+def test_fields_and_line_breaks_in_paragraphs(tmp_path: Path) -> None:
+    from lxml import etree
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    box = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(3), Inches(1))
+    para = box.text_frame.paragraphs[0]
+    para.text = "Rev "
+    fld = etree.SubElement(para._p, f"{{{a_ns}}}fld", id="{B1C2D3E4-0000-0000-0000-000000000002}", type="slidenum")  # noqa: SLF001
+    etree.SubElement(fld, f"{{{a_ns}}}t").text = "3"
+    etree.SubElement(para._p, f"{{{a_ns}}}br")  # noqa: SLF001
+    run = etree.SubElement(para._p, f"{{{a_ns}}}r")  # noqa: SLF001
+    etree.SubElement(run, f"{{{a_ns}}}t").text = "flow 1,250 L/s"
+    deck_path = tmp_path / "fld.pptx"
+    prs.save(str(deck_path))
+    record = sp.extract_deck(deck_path).slides[0]["shapes"][0]
+    assert record["text"] == "Rev 3\nflow 1,250 L/s"
+    assert record["paragraphs"][0]["runs"] == ["Rev ", "3", "flow 1,250 L/s"]
+    assert record["paragraphs"][0]["fields"] == 1 and record["paragraphs"][0]["line_breaks"] == 1
+    assert sp.numeric_tokens(record["text"]) == ["3", "1250"]
+
+
+def test_malformed_author_part_is_recorded_and_fails_a_check(deck: Dict[str, Path], tmp_path: Path) -> None:
+    bad = tmp_path / "bad_authors.pptx"
+    _rewrite_zip(deck["pptx"], bad, lambda n, d: d[: len(d) // 2] if n == "ppt/commentAuthors.xml" else d)
+    rows, summary = sp.read_comments(bad)
+    assert [e["part"] for e in summary["unreadable_parts"]] == ["ppt/commentAuthors.xml"]
+    assert len(rows) == 3 and next(r for r in rows if r["kind"] == "legacy")["author"] == ""
+    manifest = sp.run_one(bad, tmp_path / "out", tmp_path)
+    by_name = {c["check"]: c for c in manifest["checks"]}
+    parsed = by_name["every comment, author, presentation and relationship part parsed"]
+    assert parsed["pass"] is False and "commentAuthors.xml" in parsed["evidence"]
+    assert manifest["comment_parts"]["unreadable_parts"] == summary["unreadable_parts"]
+    # a clean deck carries no unreadable_parts entry and the check passes
+    clean = json.loads((deck["out"] / "sidecar_manifest.json").read_text(encoding="utf-8"))
+    assert "unreadable_parts" not in clean["comment_parts"]
+    assert next(c for c in clean["checks"] if c["check"] == parsed["check"])["pass"] is True
+
+
+def test_duplicate_shape_ids_are_reported(tmp_path: Path) -> None:
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    slide.shapes.add_table(1, 1, Inches(0.5), Inches(0.5), Inches(2), Inches(1)).table.cell(0, 0).text = "FIRST 1"
+    slide.shapes.add_table(1, 1, Inches(0.5), Inches(2.5), Inches(2), Inches(1)).table.cell(0, 0).text = "SECOND 2"
+    slide.shapes[1]._element.nvGraphicFramePr.cNvPr.id = slide.shapes[0].shape_id  # noqa: SLF001
+    deck_path = tmp_path / "dup.pptx"
+    prs.save(str(deck_path))
+    out = tmp_path / "out"
+    manifest = sp.run_one(deck_path, out, tmp_path)
+    assert manifest["duplicate_shape_ids"] == [{"slide": 1, "shape_id": slide.shapes[0].shape_id, "count": 2}]
+    assert manifest["counts"]["duplicate_shape_ids"] == 1 and manifest["counts"]["table_count"] == 2
+    tables = json.loads((out / "tables.json").read_text(encoding="utf-8"))["tables"]
+    assert [t["path"] for t in tables] == ["tables_s1_1.csv", "tables_s1_2.csv"]
+    assert [t["numeric_tokens"] for t in tables] == [1, 1]
+    assert (out / "tables_s1_1.csv").read_text(encoding="utf-8").strip() == "FIRST 1"
+    assert (out / "tables_s1_2.csv").read_text(encoding="utf-8").strip() == "SECOND 2"
+    assert all(c["pass"] for c in manifest["checks"]), manifest["checks"]
+
+
+@pytest.mark.parametrize("flip_h", [False, True])
+def test_group_rotation_and_flip_compose_into_children(tmp_path: Path, flip_h: bool) -> None:
+    """A group of 2 x 1 in at (1, 1) in rotated 90 degrees (and optionally mirrored) about its centre."""
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    group = slide.shapes.add_group_shape()
+    group.shapes.add_textbox(Inches(1), Inches(1), Inches(1), Inches(0.5)).text_frame.text = "a"
+    group.shapes.add_textbox(Inches(2), Inches(1.5), Inches(1), Inches(0.5)).text_frame.text = "b"
+    group.shapes[0].rotation = 10
+    xfrm = group._element.grpSpPr.xfrm  # noqa: SLF001
+    xfrm.rot, xfrm.flipH = 90.0, flip_h
+    deck_path = tmp_path / "rot_group.pptx"
+    prs.save(str(deck_path))
+    top, a, b = sp.extract_deck(deck_path).slides[0]["shapes"]
+    assert top["emu_frame"] == "slide" and top["emu_slide"] == top["emu"] and top["rotation_slide"] == 90.0
+    assert top["flip_h"] is flip_h and top["flip_h_slide"] is flip_h and top["flip_v_slide"] is False
+    assert a["emu_frame"] == b["emu_frame"] == "group"
+    assert a["emu"] == {"left": 914400.0, "top": 914400.0, "width": 914400.0, "height": 457200.0}  # stored, child space
+    # child centres rotate about the group centre (2 in, 1.5 in); sizes keep their magnitude
+    assert a["pt"] == {"left": 126.0, "top": 126.0 if flip_h else 54.0, "width": 72.0, "height": 36.0}
+    assert b["pt"] == {"left": 90.0, "top": 54.0 if flip_h else 126.0, "width": 72.0, "height": 36.0}
+    assert a["emu_slide"]["left"] == 1600200.0 and a["emu_slide"]["width"] == 914400.0
+    assert a["emu_slide"]["left"] / sp.EMU_PER_PT == a["pt"]["left"]
+    # the child's own 10 degrees compose with the group's 90 (mirroring reverses the sense)
+    assert a["rotation"] == 10.0 and a["rotation_slide"] == (80.0 if flip_h else 100.0)
+    assert b["rotation_slide"] == 90.0 and a["flip_h_slide"] is flip_h and a["flip_h"] is False

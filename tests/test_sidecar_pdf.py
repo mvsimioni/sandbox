@@ -384,3 +384,180 @@ def test_cli_subprocess(fixture_pdf, tmp_path: Path) -> None:
     assert "written" in result.stdout
     assert "--pdf" in subprocess.run([sys.executable, "-m", "src.sidecar_pdf", "run", "--help"],
                                      cwd=PROJECT_ROOT, capture_output=True, text=True, check=False).stdout
+
+
+# --------------------------------------------------------------------------- #
+# Fixes from the independent review (rotated-page tables, labelled title block, worker threads)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_unrotate_box_inverts_pymupdf_rotation_matrix(rotation: int) -> None:
+    doc = pymupdf.open()
+    page = doc.new_page(width=400, height=300)
+    page.set_rotation(rotation)
+    raw = (30.0, 40.0, 120.0, 90.0)
+    view = pymupdf.Rect(raw) * page.rotation_matrix
+    back = sidecar_pdf.unrotate_box((view.x0, view.y0, view.x1, view.y1), rotation, 400, 300)
+    assert back == pytest.approx(raw)
+    doc.close()
+
+
+def _rotated_table_pdf(path: Path, rotation: int) -> None:
+    """A4 text page with prose and a five-column text table, a CropBox offset and ``/Rotate rotation``."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    for i in range(6):
+        page.insert_text((50, 60 + i * 14), f"Paragraph {i} of the design narrative for the pharmacy level {i + 1}.",
+                         fontsize=10)
+    header = ["Room", "Area m2", "Supply L/s", "Pressure Pa", "Load kW"]
+    rows = [["PH-301", "24.5", "180", "+15", "2.4"], ["PH-302", "18.0", "120", "-5", "1.8"],
+            ["PH-303", "32.75", "1,200", "0", "4.1"], ["PH-304", "12.0", "95", "+10", "0.9"]]
+    xs = [60, 160, 260, 360, 460]
+    for ci, cell in enumerate(header):
+        page.insert_text((xs[ci], 300), cell, fontsize=10)
+    for ri, row in enumerate(rows):
+        for ci, cell in enumerate(row):
+            page.insert_text((xs[ci], 320 + ri * 18), cell, fontsize=10)
+    page.set_cropbox(pymupdf.Rect(20, 30, 575, 800))
+    if rotation:
+        page.set_rotation(rotation)
+    doc.save(str(path))
+    doc.close()
+
+
+@pytest.mark.parametrize("rotation", [90, 270])
+def test_tables_follow_the_text_direction_on_rotated_pages(tmp_path: Path, rotation: int) -> None:
+    pdf = tmp_path / "rot_table.pdf"
+    _rotated_table_pdf(pdf, rotation)
+    out = tmp_path / "out"
+    manifest = sidecar_pdf.build_sidecars(pdf, out, state_dir=tmp_path)
+    info = json.loads((out / "page_info.json").read_text(encoding="utf-8"))["pages"][0]
+    assert info["is_text_page"] and info["rotation"] == rotation
+    assert info["dominant_text_rotation"] == 0 and info["dominant_text_rotation_view"] == (0 - rotation) % 360
+    width, height = info["width_pt"], info["height_pt"]
+    assert (width, height) == (770.0, 555.0)
+    tables = json.loads((out / "tables.json").read_text(encoding="utf-8"))
+    assert tables and manifest["counts"]["tables"] == len(tables)
+    best = max(tables, key=lambda t: t["rows"] * t["cols"])
+    assert best["text_rotation"] == 0 and best["page_rotation"] == rotation
+    text = (out / best["file"]).read_text(encoding="utf-8")
+    assert "PH-303" in text and "1,200" in text and "32.75" in text
+    cells = [cell for line in text.splitlines() for cell in line.split(",")]
+    assert "PH-303" in cells  # a whole word, not split by a column edge
+    # the table box is in the page view of the source page: it must hold the word boxes of its cells
+    words = read_jsonl(out / "words.jsonl")
+    for token in ("PH-303", "Room", "0.9"):
+        box = next(w["bbox_view"] for w in words if w["text"] == token)
+        assert all(0 <= v <= max(width, height) for v in box)
+        x0, y0, x1, y1 = best["bbox"]
+        assert x0 - 1 <= box[0] and box[2] <= x1 + 1 and y0 - 1 <= box[1] and box[3] <= y1 + 1, (token, box, best["bbox"])
+
+
+def test_table_rows_from_words_keeps_tokens_whole_and_drops_empty_columns() -> None:
+    class _Row:
+        def __init__(self, top: float, cells: List) -> None:
+            self.bbox = (0.0, top, 100.0, top + 10.0)
+            self.cells = cells
+
+    class _Table:
+        rows = [_Row(0.0, [(0.0, 0.0, 30.0, 10.0), (30.0, 0.0, 60.0, 10.0), (60.0, 0.0, 100.0, 10.0)]),
+                _Row(10.0, [(0.0, 10.0, 30.0, 20.0), None, (60.0, 10.0, 100.0, 20.0)]),
+                _Row(20.0, [(0.0, 20.0, 30.0, 30.0), (30.0, 20.0, 60.0, 30.0), (60.0, 20.0, 100.0, 30.0)])]
+
+    words = [{"text": "PH-301", "x0": 20.0, "x1": 45.0, "top": 1.0, "bottom": 9.0},  # straddles the 30 pt edge
+             {"text": "180", "x0": 70.0, "x1": 80.0, "top": 1.0, "bottom": 9.0},
+             {"text": "PH-302", "x0": 5.0, "x1": 25.0, "top": 11.0, "bottom": 19.0},
+             {"text": "120", "x0": 70.0, "x1": 80.0, "top": 11.0, "bottom": 19.0}]
+    rows = sidecar_pdf.table_rows_from_words(_Table(), words)
+    assert rows == [["", "PH-301", "180"], ["PH-302", "", "120"]]
+    assert sidecar_pdf.table_rows_from_words(_Table(), []) == []
+
+
+def test_title_block_prefers_the_value_next_to_the_label_text_only() -> None:
+    strings = [{"text": t} for t in [
+        "REFER AR-IP-31-ZZ-002 FOR ELEVATION", "DRAWING TITLE", "01-ZONE PLANS", "4TH STOREY (IP)", "DD.A.01.V",
+        "DRAWING NO.", "REV.", "JOB NO.", "A", "TENDER CORRIGENDUM 6", "AR-IP-01-04-001", "SCALE 1 : 250",
+    ]]
+    parsed = sidecar_pdf.parse_title_block(strings)
+    assert parsed == {"drawing_number": "AR-IP-01-04-001", "title": "01-ZONE PLANS 4TH STOREY (IP)",
+                      "revision": "A", "date": None, "scale": "1:250"}
+
+
+def test_title_block_uses_geometry_and_the_last_label_when_boxes_are_known() -> None:
+    def s(text: str, x: float, y: float) -> dict:
+        return {"text": text, "bbox_view": [x, y, x + 6.0 * len(text), y + 8.0], "rotation": 0}
+
+    strings = [
+        # revision history table (first in reading order): its DATE / REV headers must not win
+        s("DATE", 3057, 37), s("REV", 3094, 37), s("DESCRIPTION", 3199, 37),
+        s("14/03/25", 3056, 48), s("-", 3100, 48), s("ISSUED FOR TENDER", 3116, 48),
+        s("27/06/25", 3056, 64), s("A.3", 3099, 64), s("CHANGE OF LAYOUT", 3116, 64),
+        s("REFER AR-IP-31-ZZ-002 FOR ELEVATION", 2700, 900),
+        # title block proper
+        s("DRAWING TITLE", 3050, 2084), s("+123.0", 2780, 2090), s("01-ZONE PLANS", 3050, 2096),
+        s("4TH STOREY (IP)", 3050, 2115), s("DD.A.01.V", 3050, 2133),
+        s("SCALE", 3050, 2198), s("DATE", 3121, 2198), s("1 : 250", 3050, 2209), s("12/03/25", 3121, 2209),
+        s("STAGE", 3050, 2226), s("TD", 3050, 2237),
+        s("DRAWING NO.", 3121, 2254), s("REV.", 3298, 2254), s("JOB NO.", 3050, 2255),
+        s("A", 3298, 2266), s("SG22A.0057", 3050, 2267), s("AR-IP-01-04-001", 3121, 2267),
+    ]
+    parsed = sidecar_pdf.parse_title_block(strings)
+    assert parsed == {"drawing_number": "AR-IP-01-04-001", "title": "01-ZONE PLANS 4TH STOREY (IP)",
+                      "revision": "A", "date": "12/03/25", "scale": "1:250"}
+
+
+def test_drawing_number_fallback_skips_cross_references_in_reading_order() -> None:
+    assert sidecar_pdf.parse_title_block([{"text": "SEE HS-BH-77 FOR DETAILS"}, {"text": "IP-BH-00042"}])["drawing_number"] == "IP-BH-00042"
+    assert sidecar_pdf.parse_title_block([{"text": "REFER IP-BH-00001"}])["drawing_number"] == "IP-BH-00001"
+    assert sidecar_pdf.parse_title_block([{"text": "HS-BH-5 and AR-IP-01-02-003"}])["drawing_number"] == "HS-BH-5"
+
+
+def test_worker_thread_runs_unbounded_and_records_it(tmp_path: Path) -> None:
+    import threading
+    import warnings
+
+    from src import census
+
+    pdf = tmp_path / "t.pdf"
+    _rotated_table_pdf(pdf, 0)
+    result: Dict[str, object] = {}
+
+    def work() -> None:
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                with census.time_budget(0.01, "probe"):
+                    pass
+                result["warned"] = any(issubclass(w.category, RuntimeWarning) for w in caught)
+            result["manifest"] = sidecar_pdf.build_sidecars(pdf, tmp_path / "out", state_dir=str(tmp_path))
+        except Exception as exc:  # noqa: BLE001 - surfaced by the assertions below
+            result["error"] = repr(exc)
+
+    thread = threading.Thread(target=work)
+    thread.start()
+    thread.join(timeout=120)
+    assert "error" not in result, result.get("error")
+    assert result["warned"] is True
+    assert census._DEADLINES == []
+    manifest = result["manifest"]
+    info = json.loads((tmp_path / "out" / "page_info.json").read_text(encoding="utf-8"))["pages"][0]
+    assert info["vector_path_count"] >= 0 and info["page_class"] == "text" and info["is_text_page"]
+    assert "path_count_budget_not_enforced:worker_thread" in info["notes"]
+    assert manifest["counts"]["tables"] >= 1
+    assert "tables_budget_not_enforced:worker_thread" in manifest["notes"]
+    # the same file on the main thread carries no such note
+    main_manifest = sidecar_pdf.build_sidecars(pdf, tmp_path / "out_main", state_dir=tmp_path)
+    main_info = json.loads((tmp_path / "out_main" / "page_info.json").read_text(encoding="utf-8"))["pages"][0]
+    assert main_info["notes"] == [] and not any("not_enforced" in n for n in main_manifest["notes"])
+
+
+def test_time_budget_does_not_leak_a_deadline_when_arming_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src import census
+
+    def broken() -> None:
+        raise ValueError("signal only works in main thread")
+
+    monkeypatch.setattr(census, "_arm_alarm", broken)
+    with pytest.raises(ValueError):
+        with census.time_budget(1.0, "probe"):
+            pass
+    assert census._DEADLINES == []

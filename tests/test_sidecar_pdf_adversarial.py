@@ -254,8 +254,6 @@ def test_tables_on_rotated_text_page_bbox_is_page_view(tmp_path: Path) -> None:
         assert (out / t["file"]).is_file()
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: on a /Rotate 90 text page pdfplumber sees vertical glyphs and the "
-                                       "table CSVs hold one character per cell (R5,R4,... / C,C,C / ne,ne,ne)")
 def test_tables_on_rotated_text_page_keep_cells_intact(tmp_path: Path) -> None:
     out = _rotated_table_run(tmp_path)
     tables = json.loads((out / "tables.json").read_text())
@@ -327,8 +325,6 @@ def test_widget_and_link_are_outside_annotation_count(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # 9. Known defects (strict xfail: flip to XPASS when fixed)
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=True, reason="BUG: first drawing-number-like string wins, even a cross-reference; "
-                                       "the value next to the DRAWING NO label is ignored")
 def test_title_block_prefers_labelled_drawing_number() -> None:
     # Mirrors the real Template zoning sheet: an elevation cross-reference appears before the label.
     strings = [{"text": t} for t in [
@@ -381,8 +377,6 @@ def test_error_annotation_rows_are_surfaced(tmp_path: Path, monkeypatch: pytest.
     assert any("annotation" in n and "error" in n.lower() for n in manifest["notes"])
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: in a worker thread the SIGALRM budget raises ValueError, which is "
-                                       "swallowed; every page is then classed vector_drawing with -1 paths")
 def test_worker_thread_does_not_silently_degrade(tmp_path: Path) -> None:
     pdf = tmp_path / "t.pdf"
     doc = pymupdf.open()

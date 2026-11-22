@@ -139,7 +139,8 @@ def test_workbook_with_zero_comments_cli(tmp_path: Path) -> None:
     assert check(manifest, "comment rows equal")["evidence"] == "legacy 0/0, threaded 0/0"
     assert all(c["pass"] for c in manifest["checks"])
     assert load_json(out, sx.WORKBOOK_NAME)["threaded_comment_parts"] == {"threaded_parts": [], "persons": 0,
-                                                                            "unlinked_parts": []}
+                                                                            "unlinked_parts": [],
+                                                                            "unreadable_parts": []}
 
 
 def test_hidden_column_group_is_expanded(tmp_path: Path) -> None:
@@ -188,9 +189,8 @@ def test_cell_error_literal_and_type_codes() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Confirmed defects (strict xfail; each names its issue id)
+# Defects fixed after the review (I-01 to I-05): now ordinary regression tests
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(strict=True, reason="I-01: GradientFill has no fgColor; extract_fills raises and the run dies")
 def test_gradient_fill_does_not_abort_run(tmp_path: Path) -> None:
     from openpyxl import Workbook
     from openpyxl.styles import GradientFill
@@ -209,7 +209,6 @@ def test_gradient_fill_does_not_abort_run(tmp_path: Path) -> None:
     assert manifest["counts"]["cells_non_empty"] == 1
 
 
-@pytest.mark.xfail(strict=True, reason="I-02: dxf solid fills are stored in bgColor; fgColor default 00000000 wins")
 def test_conditional_format_fill_colour_from_bgcolor(tmp_path: Path) -> None:
     from openpyxl import Workbook
     from openpyxl.formatting.rule import CellIsRule
@@ -232,7 +231,6 @@ def test_conditional_format_fill_colour_from_bgcolor(tmp_path: Path) -> None:
     assert rule["fill"] == "rgb:FFFFC7CE"
 
 
-@pytest.mark.xfail(strict=True, reason="I-03: DataTableFormula has no .text; its repr is written as the cell value")
 def test_data_table_formula_is_not_written_as_object_repr(tmp_path: Path) -> None:
     from openpyxl import Workbook
     from openpyxl.worksheet.formula import DataTableFormula
@@ -251,7 +249,6 @@ def test_data_table_formula_is_not_written_as_object_repr(tmp_path: Path) -> Non
     assert "B2" in formulas
 
 
-@pytest.mark.xfail(strict=True, reason="I-04: a malformed threadedComments part is parsed to None and dropped; checks pass")
 def test_malformed_threaded_part_is_reported(tmp_path: Path) -> None:
     from openpyxl import Workbook
 
@@ -270,7 +267,6 @@ def test_malformed_threaded_part_is_reported(tmp_path: Path) -> None:
     assert not all(c["pass"] for c in manifest["checks"]), "a lost comment part must fail a check"
 
 
-@pytest.mark.xfail(strict=True, reason="I-05: five iter_rows passes over the full dimension; one styled cell at Z20000 costs seconds")
 def test_sparse_styled_cell_does_not_blow_up_runtime(tmp_path: Path) -> None:
     from openpyxl import Workbook
     from openpyxl.styles import PatternFill
@@ -289,6 +285,9 @@ def test_sparse_styled_cell_does_not_blow_up_runtime(tmp_path: Path) -> None:
     assert elapsed < 2.0, f"two stored cells took {elapsed:.1f}s (520k synthetic cells per pass)"
 
 
+# --------------------------------------------------------------------------- #
+# Confirmed defects still open (strict xfail; each names its issue id)
+# --------------------------------------------------------------------------- #
 @pytest.mark.xfail(strict=True, reason="I-06: a changed source reuses the out dir and leaves the old sheet CSVs on disk")
 def test_source_changed_in_place_removes_stale_files(tmp_path: Path) -> None:
     from openpyxl import Workbook
