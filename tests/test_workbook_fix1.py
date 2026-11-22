@@ -145,7 +145,7 @@ def test_separation_is_recorded_on_flags_and_in_the_csv(oa_dept):
     rows = update_csv(oa_dept["rc"], out)
     assert len(rows) == 1
     r = next(csv.DictReader(out.open(encoding="utf-8")))
-    assert r["room_no"] == "M1" and r["rule_outcome"] == "SEPARATE" and r["approval"] == "PENDING Marcus"
+    assert r["room_no"] == "M1" and r["rule_outcome"] == "SEPARATE" and r["approval"] == "PENDING approval"
     assert float(r["ahu_oa_after_lps"]) < float(r["ahu_oa_before_lps"]) and float(r["coil_after_kw"]) < float(r["coil_before_kw"])
     assert r["fcu_oa_source"] == "OAF-1" and r["flag_id"].startswith("F-")
     # a second build of the same department replaces its rows
@@ -159,7 +159,7 @@ def test_fcu_capacity_is_tested_with_the_added_air(oa_dept):
     fans = {r[0]: r for r in _rows(oa_dept["rc"], "Fans") if r[0]}
     ahu_after = dict(zip(AHU_KEYS, [r for r in _rows(oa_dept["rc"], "AHU") if r[0] == "AHU-T1"][1]))
     # required airflow of the outdoor-air fan = AHU outdoor air after separation + the separated room's outdoor air
-    assert fans["OAF-1"][3] == pytest.approx(ahu_after["oa_rule"] + fcu["oa"], rel=1e-9)
+    assert fans["OAF-1"][4] == pytest.approx(ahu_after["oa_rule"] + fcu["oa"], rel=1e-9)
 
 
 def test_mot_specified_room_is_not_resized_and_offset_is_reported(tmp_path):

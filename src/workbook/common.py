@@ -97,3 +97,24 @@ def group_cols(ws, lay: Layout, first_key: str, last_key: str, collapsed: bool =
         dim = ws.column_dimensions[get_column_letter(ix)]
         dim.outline_level = 1
         dim.hidden = collapsed
+
+
+def tender_remark(tender: str, calc: str, red: str, redp: str, src: str, what: str = "airflow", zero: str = "", lead: str = '""') -> str:
+    """Remarks formula of the D-013 columns, built from the cells of the same row.
+
+    Tender airflow is information only: it is never a target or a cap. A calculated value below it is a reduction, not a failure;
+    a calculated value above it is flagged VERIFY (D-012).
+
+    `lead` is an Excel text expression put before the list of causes: a cause that the cells prove, for example a missing ceiling
+    height (then every air-change airflow of the room is 0), is named first, so that the reduction is not put down to other causes."""
+    causes = ("Causes to examine: area basis, air-change or thermal criteria, duct leakage of "
+              "\"&TEXT(DuctLeakage,\"0%\")&\" against 15 % on the tender schematics, outdoor-air rule.")
+    zero_b = f'IF({calc}=0,"Calculated airflow is 0 L/s. "&IF({lead}="","{zero}",{lead}),' if zero else ""
+    lead_sp = f'IF({lead}="","",{lead}&" ")'
+    zero_e = ")" if zero else ""
+    return (f'=IF({tender}="","No tender {what} found.",{zero_b}'
+            f'IF({calc}>{tender},"VERIFY: calculated "&TEXT({calc},"#,##0")&" L/s is above tender "&TEXT({tender},"#,##0")&" L/s (+"'
+            f'&TEXT({calc}/{tender}-1,"0.0%")&") ("&{src}&").",'
+            f'IF({calc}={tender},"Calculated "&TEXT({calc},"#,##0")&" L/s equals tender ("&{src}&").",'
+            f'"Reduced "&TEXT({tender},"#,##0")&" to "&TEXT({calc},"#,##0")&" L/s (−"&TEXT({redp},"0.0%")&", −"&TEXT({red},"#,##0")'
+            f'&" L/s) against tender ("&{src}&"). "&{lead_sp}&"{causes}"))){zero_e}')

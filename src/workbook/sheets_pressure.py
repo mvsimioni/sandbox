@@ -1,4 +1,4 @@
-"""Pressure tab: Marcus's pressure-offset method with live formulas (Section 8.3)."""
+"""Pressure tab: the project pressure-offset method with live formulas."""
 
 from __future__ import annotations
 
@@ -46,10 +46,10 @@ def write_pressure(ctx: Ctx) -> None:
     ws = ctx.wb["Pressure"]
     PS, PL, PU = ctx.lay["PS"], ctx.lay["PL"], ctx.lay["PU"]
     RI, CR, AF = ctx.lay["RI"], ctx.lay["CR"], ctx.lay["AF"]
-    title_block(ws, "Pressure", "Project method for rooms with a pressure target (Section 8.3). Q = limit × surface × "
-                "(ΔP ÷ reference)^n for the envelope; Q = Cd × A × √(2 ΔP ÷ ρ) × 3600 for door gaps. "
-                "Air flows from high to low pressure; the offset needed is air in − air out (negative room) or air out − air in "
-                "(positive room). Spaces without a set pressure are solved in fixed Newton steps in the grouped helper columns.", ctx)
+    title_block(ws, "Pressure", "Project method for rooms with a pressure target. Envelope: Q = limit × surface × (ΔP ÷ reference)^n. "
+                "Door gaps: Q = Cd × A × √(2 ΔP ÷ ρ) × 3600. Air flows from high to low pressure. "
+                "Offset needed for a negative room = air in − air out. Offset needed for a positive room = air out − air in. "
+                "Spaces without a set pressure are solved in fixed Newton steps in the grouped helper columns.", ctx)
     # ---- node table headers
     spec = [(k, *PS_HEAD[k]) for k in PS.keys if k in PS_HEAD]
     write_headers(ws, PS, spec, 4, {"node": "SPACE", "set": "SET PRESSURE", "perim": "GEOMETRY", "supply": "MECHANICAL AIR",
@@ -280,9 +280,9 @@ def _write_suites(ctx: Ctx, ws) -> None:
 
 
 def _write_known_answers(ctx: Ctx, ws) -> None:
-    """Known-answer cases of Section 8.3 as live formulas, with the brief's expected results beside them."""
+    """Known-answer cases as live formulas, with the expected results beside them."""
     first = ctx.ka_first
-    put(ws, f"A{first - 4}", "Known-answer test (Section 8.3): the method reproduces these to within 0.2 m³/h", "Section")
+    put(ws, f"A{first - 4}", "Known-answer test: the method reproduces these to within 0.2 m³/h", "Section")
     cols = {"A": ("Case", 14), "C": ("Check", 28), "E": ("Computed", 10), "F": ("Expected", 10), "G": ("Tolerance", 9), "H": ("Result", 9),
             "I": ("Input 1", 9), "J": ("Input 2", 9), "K": ("Input 3", 9), "L": ("Code", 5), "M": ("Source ID", 11)}
     for c, (h, w) in cols.items():

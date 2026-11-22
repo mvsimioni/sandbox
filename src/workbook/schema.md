@@ -70,3 +70,27 @@ the outdoor-air rule 5 % and 5 percentage points, check tolerances) has a defaul
 * A room whose `criteria.code` is `S` (MOT theatre) is fixed: specified supply, outdoor air and exhaust stand, and Airflow and Pressure report the offset needed beside the specified one (VERIFY on Checks if it is short). Such a room is listed for Marcus, never separated.
 * Every room the rule separates (CONFIRM) or lists (VERIFY) has a live row on Flags with status OPEN, and `python3 -m src.workbook build` writes it to `out/zoning/zoning_change_proposals.csv` (rows keyed by department; `--no-proposals` skips it).
 * Coil duty reference condition: the first supply room of the AHU, as the example's AHU Summary takes the first space type.
+
+
+## Round 2 additions
+
+* Room: `dpa_area_m2` (group `dpa_area`; the design area is the DPA designed area when above 0, else the SOA area; selector `DPA` added), `occupancy_basis` (`RDS` or `DENSITY DEFAULT`; the latter rounds area x density up to a whole person, shows the occupancy in the named style `Assumption-Occupancy` and writes the note of the project configuration into the Remarks column; `occupancy_use` names the room use), `gaps{}` (text for one flag per gap: `ahu`, `terminal`, `criteria`, `door`, `area`, `height`, `occupancy`).
+* `ahus[]`: `sched_supply_lps` is the tender airflow (Equipment Schedule, else the tender schematic, set by the input; the generator falls back to `schematic_supply_lps`), `tender_source_text`, `list_without_rooms`. `fans[]`: `tender_source_text`. Room `schematic`: `source_text`. Tender values are information only.
+* AHU, FCU, Fans and Airflow Comparison carry Tender airflow, Calculated airflow, Reduction (L/s), Reduction (%) and a Remarks formula. A calculated value above tender is VERIFY, never FAIL.
+* `python3 -m src.workbook master --inputs <dir> --out <xlsx>`: department workbooks (.xlsx) or summaries (.json: `department{number,name}`, `ahus[{tag,type,rooms,area_m2,room_supply_lps,outdoor_air_lps,tender_lps,tender_source,tender_source_id}]`). `python3 -m src.workbook common --out <xlsx>` builds the common-areas workbook. `python3 -m src.workbook check --xlsx <file>` recalculates and scans.
+* The project `revision.by`, `checked` and `approved` stay blank until the configuration gives them; the revision date is the build date.
+
+
+## Fix round 1 additions
+
+* Room `gaps{}` keys added: `plan` (no plan room accepted: none matches, or the only candidate failed the area or grid test; one flag for the missing AHU and measured area together), `area_diff` (a measured area that replaces the design area, or an open-plan region whose area is not used; one flag per room), `occupancy_note` (RDS text that says intermittent, or gives shifts). `occupancy_basis` may be `NOT SET`: the 0 people is a placeholder, shown on a yellow fill.
+* `fans[]`: `serves2` (a second AHU that the same return fan serves). A fan whose required airflow is 0 shows the status NOT CALCULATED, never PASS.
+* Plan-room matching: name, storey, area within a factor of two of the design area, and the grid span of the department; a room that is a tag of an open-plan region takes the zoning of the region and never its area.
+* Occupancy from the RDS follows `parse_occupancy` (sum of upper bounds, a fraction rounded up, clock times ignored); the room count of an `RDS` basis is rounded up on Room Information.
+* The note column of Room Information is headed `Remarks`.
+
+## Fix round 2 additions
+
+* AHU tab: `n` (Rooms) and `area` (Area) count every room of the unit; `area_sup` is the area of the rooms with a supply above 0, `vol` the volume of those rooms, `noh` the number of rooms with no ceiling height. A unit with no room at all has the Remarks "No room on Room Information is served by this unit". A unit with rooms and a supply of 0 shows the reduction against tender and names the missing ceiling height first.
+* Master summary: Department Rows carry `rooms_no_height` (summary JSON key, read from the AHU tab column `noh`), and AHU Master shows it with the same Remarks sentence.
+* Room use for the default occupancy: `process_area` (7 p/100 m²) is a use key in `occupancy.density_default.per_100m2`.

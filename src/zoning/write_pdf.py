@@ -23,7 +23,7 @@ from shapely.geometry import Polygon
 from . import zones as zn
 
 FILL_OPACITY = 0.35
-AUTHOR = "AIGH IP ACMV pipeline (Claude)"
+AUTHOR = "AIGH IP ACMV design team"
 LEGEND_LAYER = "Legend"
 ROOMS_LAYER = "Rooms (measured)"
 
@@ -314,11 +314,11 @@ INDEX_PAGE_SIZE = (842.0, 1191.0)    # A3 portrait, pt
 def _zone_contents_multi(z: zn.Zone, st: dict, key: str, label: str) -> str:
     """/Contents of a zone annotation on a storey page: departments, storey served, plant level, area, room count, sources."""
     lines = [
-        "AHU zone %s" % z.tag if z.kind == "AHU" else "%s zone (rooms classed %s, no AHU named)" % (z.kind, z.tag),
+        "AHU zone %s" % z.tag if z.kind == "AHU" else "%s zone (rooms of class %s, no AHU named)" % (z.kind, z.tag),
         "Departments: %s" % z.departments,
         "Storey served: %s (%s)" % (key, label),
         "Plant level: %s" % (z.plant_level or "not stated"),
-        "Area: %.1f m2 (sum of %d assigned rooms); zone polygons drawn %.1f m2 (page-view measure)" % (st["area_m2"], st["n_rooms"], st["poly_m2"]),
+        "Area: %.1f m2 (sum of %d rooms); area drawn on this sheet %.1f m2" % (st["area_m2"], st["n_rooms"], st["poly_m2"]),
         "Room count: %d" % st["n_rooms"],
         "Lowest room confidence: %.2f" % st.get("min_conf", 0.0),
         "Sources: %s" % " | ".join(z.refs),
@@ -400,7 +400,7 @@ def write_multi_zoning_pdf(src_pdf: Path, specs: Sequence[dict], out_pdf: Path, 
                                      fontsize=14, fontname="hebo", text_color=(0, 0, 0), rotate=90)
         _style_annot(doc, tt, "legend-title-%s" % sp["key"], "Legend title", sp["legend_title"], legend_oc, None, (0, 0, 0), 1.0, None)
         un = sp.get("unclassified", {})
-        note = "%d of %d rooms not classified (no information, %.0f m2): not filled. Sheet %s." % (un.get("unclassified_rooms", 0), un.get("n_rooms", 0), un.get("unclassified_area_m2", 0.0), sp["drawing"])
+        note = "%d of %d rooms have no information (%.0f m2) and are not filled. Sheet %s." % (un.get("unclassified_rooms", 0), un.get("n_rooms", 0), un.get("unclassified_area_m2", 0.0), sp["drawing"])
         nt = page.add_freetext_annot(_unrot_rect((bx0 + pad, by0 + pad / 2 + 28, bx1 - pad, by0 + pad / 2 + 52), page), note, fontsize=11, fontname="helv",
                                      text_color=(0, 0, 0), rotate=90)
         _style_annot(doc, nt, "legend-note-%s" % sp["key"], "Legend note", note, legend_oc, None, (0, 0, 0), 1.0, None)
@@ -436,14 +436,14 @@ def write_multi_zoning_pdf(src_pdf: Path, specs: Sequence[dict], out_pdf: Path, 
         manifest_pages.append(pm)
     # ---- index pages (first): AHUs by storey ------------------------------------------------------------
     def index_lines(first_pdf_page: Dict[str, int]):
-        L = [(title, 16, "hebo", 0, 20), ("Index of zones by storey. Every zone is a filled Polygon annotation (opacity 0.35) on a layer named after its AHU or class.", 8, "helv", 0, 14),
-             ("Storey pages are the source sheets unchanged. Room outlines: layer 'Rooms (measured)', off by default.", 8, "helv", 0, 22)]
+        L = [(title, 16, "hebo", 0, 20), ("Index of AHU zones by storey. Each zone is a filled shape (opacity 0.35) on a layer with the name of its AHU or class.", 8, "helv", 0, 14),
+             ("The storey pages are the tender plans, unchanged. Room outlines are on the layer 'Rooms (measured)' (off).", 8, "helv", 0, 22)]
         for sp in specs:
             rows = [r for r in index_rows if r[0] == sp["key"]]
             un = sp.get("unclassified", {})
             L.append(("%s  %s  (%s)  PDF page %d" % (sp["key"], sp["label"], sp["drawing"], first_pdf_page[sp["key"]]), 10, "hebo", 0, 13))
             if not rows:
-                L.append(("no zones (no room classified)", 8, "helv", 16, 12))
+                L.append(("no zones (no room has a class)", 8, "helv", 16, 12))
             for _, tag, kind, nr, area in rows:
                 L.append(("%-46s %-6s rooms %4d   %9.1f m2" % (tag, kind, nr, area), 8, "cour", 16, 12))
             L.append(("no information (not filled): %d rooms, %.1f m2" % (un.get("unclassified_rooms", 0), un.get("unclassified_area_m2", 0.0)), 8, "helv", 16, 20))
@@ -467,6 +467,7 @@ def write_multi_zoning_pdf(src_pdf: Path, specs: Sequence[dict], out_pdf: Path, 
     page_map = [(o + (n_index - 1), s, k) for (o, s, k) in page_map]
     out_pdf = Path(out_pdf)
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
+    doc.set_metadata({"title": title, "author": AUTHOR, "subject": "AHU zoning", "creator": "", "producer": "", "keywords": ""})
     doc.save(str(out_pdf), garbage=0, deflate=True)
     doc.close()
     return {"pages": manifest_pages, "layers": layers, "page_map": page_map, "colours": colours,

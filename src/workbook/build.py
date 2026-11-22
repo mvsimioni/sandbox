@@ -81,6 +81,20 @@ def _prepare(ctx: Ctx) -> None:
         t = r.get("ahu")
         if not blank(t) and t not in [a["tag"] for a in ahus]:
             ahus.append(dict(info.get(t, {}), tag=t))
+    listed = {a["tag"] for a in ahus}
+    for a in d.get("ahus", []):                       # units of the input that no room of the workbook carries are listed, with no calculation
+        if a.get("list_without_rooms") and a["tag"] not in listed:
+            ahus.append(dict(a))
+            listed.add(a["tag"])
+    # Tender airflow of each AHU (D-013): the Equipment Schedule value, else the tender air-side schematic value; information only
+    for a in ahus:
+        if blank(a.get("sched_supply_lps")) and not blank(a.get("schematic_supply_lps")):
+            a["sched_supply_lps"] = a["schematic_supply_lps"]
+            a["sched_code"] = a.get("schematic_code", "D")
+            a["sched_source"] = a.get("schematic_source", "")
+            a.setdefault("tender_source_text", "tender air-side schematic")
+        elif not blank(a.get("sched_supply_lps")):
+            a.setdefault("tender_source_text", "tender equipment schedule")
     ctx.ahus = ahus
     ctx.fans = list(d.get("fans", []))
     terminals = list(d.get("terminals", []))
@@ -141,6 +155,7 @@ def build_workbook(data: Union[Dict[str, Any], Path, str], out: Optional[Path] =
     SB.write_flags(ctx, rows)
     SB.write_basis_tail(ctx)
     wb.properties.creator = str((data.get("project", {}).get("revision") or {}).get("by") or "")
+    wb.properties.lastModifiedBy = wb.properties.creator
     wb.properties.title = f"{ctx.project}: {data['department'].get('name', '')} thermal load calculation"
     if out is not None:
         Path(out).parent.mkdir(parents=True, exist_ok=True)

@@ -44,6 +44,7 @@ from . import linework as lw
 from . import rooms_raster as rr
 from . import rooms_vector as rv
 from . import write_pdf as wp
+from . import text_clean as tc
 from . import zones as zn
 
 BG_PDF = "data/source/Basis/Arch Combined Tender .pdf"
@@ -971,6 +972,23 @@ def colour_for(tag_key: str, used: Optional[Dict[str, str]] = None) -> str:
     return zn.avoid_pure_red("#%02X%02X%02X" % (int(r * 255), int(g * 255), int(b * 255)))
 
 
+_SCHED_PLANT: Dict[str, str] = {}
+
+
+def schedule_plant_level(tag: str) -> str:
+    """Plant level of a unit from the Equipment Schedule (Corr 5) when the tag does not give it (basement tags); empty when not scheduled."""
+    if not _SCHED_PLANT:
+        for r in common.read_csv_dicts(common.resolve_paths()["registers"] / "ahu_schedule.csv"):
+            lvl = (r.get("plant_level_from_tag") or "").strip()
+            if lvl:
+                _SCHED_PLANT.setdefault(r["tag_normalised"].strip(), ("L%d" % int(lvl)) if lvl.isdigit() else lvl)
+    t = tag.strip()
+    for cand in (t, t.replace("A/B", "A"), t.replace("A/B", "B"), t.rstrip("AB/")):
+        if cand in _SCHED_PLANT:
+            return _SCHED_PLANT[cand]
+    return ""
+
+
 def build_page_zones(key: str, info: dict, P: dict, k2: float) -> Tuple[List[zn.Zone], dict, List[dict], dict]:
     """Zones (union of the room polygons per AHU / class) of a storey from its assignment table; returns zones, stats, room annotations, summary.
 
@@ -992,7 +1010,7 @@ def build_page_zones(key: str, info: dict, P: dict, k2: float) -> Tuple[List[zn.
         cls = (a["class"] or "").strip() or "no information"
         conf = float(a["confidence"] or 0.0)
         rooms_ann.append({"room_id": a["room_id"], "polygon": poly,
-                          "contents": "%s | %s | %.1f m2 | class: %s (%.0f%%) | A/B: %s" % (a["room_id"], pr["room_tag"], area, cls, 100 * conf, pr["method_agreement"])})
+                          "contents": "Room %s | tag %s | %.1f m2 | class: %s | confidence %.0f%%" % (a["room_id"], pr["room_tag"], area, cls, 100 * conf)})
         if cls.lower() in ("no information", "review: partial cover") or cls.lower().startswith("review"):
             unclassified["n"] += 1
             unclassified["area"] += area
@@ -1004,7 +1022,7 @@ def build_page_zones(key: str, info: dict, P: dict, k2: float) -> Tuple[List[zn.
         g["area"] += area
         g["n"] += 1
         if a.get("department"):
-            g["depts"].add(a["department"])
+            g["depts"].add(tc.clean_dept(a["department"]))
         g["src"].add(a["sources"])
         g["confs"].append(conf)
     zones, stats = [], {}
@@ -1019,13 +1037,15 @@ def build_page_zones(key: str, info: dict, P: dict, k2: float) -> Tuple[List[zn.
                 parts.extend(zn.simple_parts(part))
         is_class = zk in CLASS_COLOURS
         plant, served = ("", "") if is_class else zn.parse_tag_levels(tags[0])
+        plant_txt = ("L%s" % plant) if plant else ""
+        if not is_class and not plant_txt:
+            plant_txt = schedule_plant_level(tags[0])
         depts = "; ".join(sorted(g["depts"]))
         if not depts:
-            depts = "not stated (class from the printed mode label only)" if is_class else "not stated in the assignment table"
-        z = zn.Zone(key=zk, kind=zk if is_class else "AHU", source="zone assignment table", tag=disp, tag_basis="assignment table zone_assignment_%s.csv" % key,
+            depts = "not stated (class from the mode label on the plan)" if is_class else "no information (no department stated in the source documents)"
+        z = zn.Zone(key=zk, kind=zk if is_class else "AHU", source="zone assignment table", tag=disp, tag_basis="AHU tag from the source documents cited",
                     polygons_pv=parts, draw_polygons_pv=parts, fill_hex=colour_for(zk), departments=depts,
-                    storey_served=key, plant_level=plant and ("L%s" % plant), refs=sorted(g["src"])[:3] + ["out/registers/zone_assignment_%s.csv" % key,
-                                                                                                         "out/registers/room_polygons_%s.csv" % key])
+                    storey_served=key, plant_level=plant_txt, refs=tc.top_citations(g["src"], 4))
         zones.append(z)
         stats[z.key] = {"area_m2": g["area"], "poly_m2": sum(q.area for q in parts) * k2, "n_rooms": g["n"], "min_conf": min(g["confs"]) if g["confs"] else 0.0}
     return zones, stats, rooms_ann, {"unclassified_rooms": unclassified["n"], "unclassified_area_m2": unclassified["area"], "n_rooms": len(arows), "rooms_no_polygon": no_polygon}
@@ -1054,9 +1074,9 @@ def stage_pdf(storeys: Sequence[str]) -> dict:
                 area_warnings.append("%s zone %s: polygon %.1f m2 vs rooms %.1f m2" % (key, zk, st_["poly_m2"], st_["area_m2"]))
         specs.append({"key": key, "label": info["storey_label"], "drawing": info["drawing"], "page_index": info["page0"], "zones": zones, "zone_stats": stats,
                       "rooms": rooms_ann, "unclassified": summ,
-                      "legend_title": "AHU zoning, %s (%s): AHU assignment from the stub table, class from the printed mode label only" % (info["storey_label"], info["drawing"]),
-                      "sheet_note": "Zones: union of measured room polygons per class or AHU. Fill opacity 0.35. Layers per AHU or class; room outlines on 'Rooms (measured)' (off). "
-                                    "%d rooms not classified (no information), %.0f m2, not filled; %d tags have no polygon (leaked region or no closed region)." % (
+                      "legend_title": "AHU zoning, %s (%s): AHU zones and ventilation classes" % (info["storey_label"], info["drawing"]),
+                      "sheet_note": "Each zone is the sum of the rooms that one AHU or one class serves. Fill opacity 0.35. Each AHU or class has its own layer. Room outlines are on the layer 'Rooms (measured)' (off). "
+                                    "%d rooms have no information and are not filled (%.0f m2). %d room tags have no closed area on the plan and are not drawn." % (
                           summ["unclassified_rooms"], summ["unclassified_area_m2"], summ["rooms_no_polygon"])})
         summaries[key] = summ
     out = out_pdf_path(storeys)

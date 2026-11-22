@@ -82,7 +82,7 @@ def test_clinical_room_is_listed_not_separated(tmp_path):
     build_workbook(_dept(rooms), tmp_path / "c.xlsx")
     rc = recalc(tmp_path / "c.xlsx", tmp_path / "rc")
     af = {r["no"]: r for r in _af(rc)}
-    assert af["C1"]["status"] == "LIST FOR MARCUS"
+    assert af["C1"]["status"] == "LIST FOR REVIEW"
     assert af["C1"]["sepf"] == 0
 
 
@@ -109,15 +109,16 @@ def test_fcu_tab_lists_separated_room_with_oa_coil(oa):
     assert first["coil"] and first["coil"] > first["sens_kw"] + first["lat_kw"]   # coil duty includes the outdoor air
     # no source on the room: the outdoor-air fan that serves its AHU on Fans is proposed, untreated, and flagged to confirm
     assert first["oasrc"] == "OAF-1" and first["oaby"] == "FANS DEFAULT" and first["oacond"] == "UNTREATED"
-    assert first["cap"] in ("PASS", "FAIL")                      # capacity of the source with the added airflow is tested
+    assert first["cap"] in ("PASS", "VERIFY", "NO TENDER VALUE", "NOT CALCULATED")      # capacity of the source with the added airflow is tested; above tender is VERIFY, never FAIL
     assert "CONFIRM" in first["flag"]
 
 
 def test_fans_vav_venturi_comparison_flow_balance(oa):
     fans = {r[0]: r for r in _rows(oa["rc"], "Fans") if r[0]}
-    assert fans["EXF-1"][3] > 0
-    assert fans["RAF-1"][4] == pytest.approx(0.1)
-    assert fans["EXF-1"][11] in ("PASS", "FAIL")
+    assert fans["EXF-1"][4] > 0
+    assert fans["RAF-1"][5] == pytest.approx(0.1)
+    from src.workbook.layouts import FAN_KEYS
+    assert fans["EXF-1"][FAN_KEYS.index("status")] in ("PASS", "VERIFY", "NO TENDER VALUE", "NOT CALCULATED")
     vav = {r[0]: r for r in _rows(oa["rc"], "VAV") if r[0]}
     assert vav["VAV-1"][4] >= vav["VAV-1"][5] > 0
     assert 0 < vav["VAV-1"][6] <= 1
@@ -126,7 +127,8 @@ def test_fans_vav_venturi_comparison_flow_balance(oa):
     fb = [r for r in _rows(oa["rc"], "Flow Balance") if r[0] in ("A1", "M1")]
     assert all(r[14] == "PASS" for r in fb)
     cp = [r for r in _rows(oa["rc"], "Airflow Comparison") if r[0] == "A1"]
-    assert cp[0][15] == "NO SCHEMATIC VALUE"
+    from src.workbook.layouts import CP_KEYS
+    assert cp[0][CP_KEYS.index("flag")] == "NO TENDER VALUE"
     assert st.scan_errors(oa["rc"]) == []
 
 

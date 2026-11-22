@@ -35,7 +35,8 @@ def _ahu(rc, key):
 
 
 def test_reva_totals(reva):
-    assert _ahu(reva["rc"], "area") == pytest.approx(451.5, rel=0.005)
+    assert _ahu(reva["rc"], "area_sup") == pytest.approx(451.5, rel=0.005)
+    assert _ahu(reva["rc"], "area") == pytest.approx(455.8, rel=0.005)     # every room of the unit, the exhaust-only toilet included
     assert _ahu(reva["rc"], "sa_room") == pytest.approx(2760, rel=0.005)
     assert _ahu(reva["rc"], "oa_ms") == pytest.approx(779.6, rel=0.005)
     assert _ahu(reva["rc"], "sens") == pytest.approx(32.47, rel=0.005)

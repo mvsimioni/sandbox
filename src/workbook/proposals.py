@@ -53,7 +53,7 @@ def read_proposals(rc: Path) -> List[Dict[str, Any]]:
     for r in _rows(af):
         no = r[hdr["Room number"]]
         status = r[hdr["Outdoor-air rule"]]
-        if not no or status not in ("SEPARATE", "LIST FOR MARCUS"):
+        if not no or status not in ("SEPARATE", "LIST FOR REVIEW"):
             continue
         ahu = r[hdr["AHU or system"]]
         b, a, f = before.get(ahu, {}), after.get(ahu, {}), fcu.get(no, {})
@@ -72,8 +72,8 @@ def read_proposals(rc: Path) -> List[Dict[str, Any]]:
             coil_before_kw=b.get("coil"), coil_after_kw=a.get("coil") if sep else b.get("coil"),
             fcu_coil_kw=f.get("coil") if sep else "", fcu_oa_source=src if sep else "",
             fcu_oa_source_chosen_by=f.get("oaby") if sep else "", fcu_oa_arrives=f.get("oacond") if sep else "",
-            source_capacity=f.get("cap") if sep else "", flag_id=flag_id.get(no, ""), approval="PENDING Marcus",
-            remark=(f.get("flag") or "") if sep else "listed for Marcus; not separated automatically"))
+            source_capacity=f.get("cap") if sep else "", flag_id=flag_id.get(no, ""), approval="PENDING approval",
+            remark=(f.get("flag") or "") if sep else "listed for review; not separated automatically"))
     return out
 
 

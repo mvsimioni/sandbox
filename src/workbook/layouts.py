@@ -31,15 +31,17 @@ def ri_spec() -> Spec:
     s += trip("oasrc", "Outdoor-air source (FCU)", "", 16) + trip("oacond", "Outdoor air to FCU", "", 11)
     s += trip("sptype", "Space type", "", 20)
     s += trip("cond", "Room condition", "", 10)
-    s += trip("soa", "SOA or DPA area", "m²", 9)
+    s += trip("dpa", "DPA designed area", "m²", 9)
+    s += trip("soa", "SOA area (or area label on the drawing)", "m²", 9)
     s += trip("meas", "Measured area", "m²", 9)
     s += trip("sel", "Area-used selector", "", 10)
-    s += [("area", "Area used", "m²", 9), ("diff", "SOA − measured", "%", 8), ("agree", "Areas agree", "", 8)]
+    s += [("base", "Design area: DPA, else SOA", "m²", 9), ("area", "Area used", "m²", 9), ("diff", "Design − measured", "%", 8),
+          ("agree", "Areas agree", "", 8)]
     s += trip("h", "Ceiling height", "m", 8)
     s += [("vol", "Volume", "m³", 9)]
     s += trip("pfix", "Occupancy, stated", "persons", 9)
     s += trip("dens", "Occupancy density", "persons / 100 m²", 10)
-    s += [("people", "Occupancy used", "persons", 9)]
+    s += [("obasis", "Occupancy source", "", 15), ("people", "Occupancy used", "persons", 9)]
     s += trip("iof", "Intermittent occupancy factor", "–", 10)
     s += trip("act", "Activity", "", 16)
     s += trip("hours", "Operation time", "h / day", 10)
@@ -49,7 +51,7 @@ def ri_spec() -> Spec:
     s += trip("eql", "Equipment, latent", "W", 9)
     s += [("glz", "Glazing (Envelope)", "m²", 9), ("wall", "External wall (Envelope)", "m²", 9),
           ("roof", "Roof (Envelope)", "m²", 9), ("face", "Face, azimuth, shading (Envelope)", "", 30),
-          ("remark", "Remark on the source reference", "", 60)]
+          ("remark", "Remarks", "", 60)]
     return s
 
 
@@ -217,20 +219,22 @@ def build_layouts(ctx: Ctx) -> None:
     ctx.lay["SO"] = Layout("Sources", ["id", "doc", "issue", "page", "loc", "text", "method", "conf"], 7, len(ctx.sources))
 
 
-AHU_KEYS = ["ahu", "type", "n", "area", "vol", "sa_room", "leak", "sa_ahu", "oa_sum", "crit", "frac", "oa_rule",
+AHU_KEYS = ["ahu", "type", "n", "area", "area_sup", "vol", "noh", "sa_room", "leak", "sa_ahu", "oa_sum", "crit", "frac", "oa_rule",
             "vou", "vps", "xs", "zd", "ev", "vot", "oa_ms", "ret", "exh", "relief",
             "sens", "lat", "rt", "rh", "oa_sens", "oa_lat", "fan", "coil_s", "coil_l", "coil", "wm2",
             "oa_sens_ms", "oa_lat_ms", "coil_s_ms", "coil_l_ms", "coil_ms", "req_t", "sched", "sched_oa",
-            "sched_c", "sched_s"]
+            "sched_c", "sched_s", "tsrc", "red", "redp", "rem"]
 FCU_KEYS = ["k", "no", "name", "ahu", "why", "area", "sens_kw", "lat_kw", "supply", "oa", "oasrc", "oaby", "oacond", "oa_t", "oa_h",
-            "oa_sens", "oa_lat", "coil_s", "coil_l", "coil", "cap_sched", "cap_drawn", "cap", "flag"]
-FAN_KEYS = ["tag", "type", "serves", "req", "leak", "drawn", "sched", "margin", "code", "src", "remark", "status", "pk_p", "pk_o"]
+            "oa_sens", "oa_lat", "coil_s", "coil_l", "coil", "cap_sched", "cap_drawn", "cap", "flag",
+            "tender", "tsrc", "calc", "red", "redp", "rem"]
+FAN_KEYS = ["tag", "type", "serves", "serves2", "req", "leak", "drawn", "sched", "tsrc", "red", "redp", "code", "src", "remark", "status",
+            "rem", "pk_p", "pk_o"]
 VAV_KEYS = ["tag", "type", "rooms", "n", "max", "min", "turn", "code", "src", "remark"]
 VEN_KEYS = ["tag", "room", "role", "d1", "d2", "off", "design", "tight", "ratio", "status", "code", "src", "remark"]
 FB_KEYS = ["no", "name", "ahu", "supply", "oa", "exhaust", "ret", "extract", "leak_in", "leak_out", "inn", "out", "net",
            "close", "status", "ach"]
 FB2_KEYS = ["ahu", "supply", "oa", "exhaust", "ret", "relief", "net_ach", "area", "vol", "sum_net", "close", "status", "note"]
 CP_KEYS = ["no", "name", "ahu", "calc_s", "sch_s", "d_s", "dp_s", "calc_r", "sch_r", "d_r", "calc_e", "sch_e", "d_e",
-           "pa_calc", "pa_sch", "flag", "code", "src", "remark"]
-CP2_KEYS = ["ahu", "calc", "sch", "d", "dp", "sched", "d_sched", "flag", "code", "src", "remark"]
+           "pa_calc", "pa_sch", "flag", "code", "src", "tsrc", "remark"]
+CP2_KEYS = ["ahu", "calc", "sched", "tsrc", "d_sched", "dp_sched", "sch", "d", "dp", "flag", "code", "src", "remark"]
 CP3_KEYS = ["label", "flow", "m3h", "ach", "oa", "diff", "pct", "code", "src", "remark"]

@@ -11,7 +11,7 @@ from .common import (band_rows, cf_formula, cf_text, expand, group_cols, list_va
 from .ctx import Ctx
 from .layouts import (ENG, ENG_FIRST, FIRST, OA_ROUNDS, af_spec, cr_spec, en_spec, ri_spec)
 from .model import blank, prov_of
-from .styles import CODE_STYLES, put, setup_sheet, tag_variant
+from .styles import CODE_STYLES, OCC_NAME, put, setup_sheet, tag_variant
 
 X = lambda v: None if blank(v) else v
 
@@ -21,11 +21,39 @@ def _setup(ws, ctx: Ctx, lay, ncols_print: int, last_row: int, print_rows: str, 
                 last_col=ncols_print, last_row=last_row, tab_colour=colour, freeze=freeze)
 
 
+def xl_str(text: str) -> str:
+    """A text as an Excel string expression: quotes doubled, literals cut below the 255-character limit and joined."""
+    text = str(text or "")
+    parts = [text[i:i + 200] for i in range(0, len(text), 200)] or [""]
+    return "&".join('"' + p.replace('"', '""') + '"' for p in parts)
+
+
+def _density_remark(ctx: Ctx, r: Dict[str, Any], g, rem: Any) -> str:
+    """Remarks cell of a room whose occupancy is the default density: the note of the project input, built from the cells."""
+    import re as _re
+    from .conf import occupancy_cfg
+    tpl = str(occupancy_cfg().get("remarks_template") or
+              "Occupancy assumed: {density} p/100 m2 x {area} m2 = {people} (ASHRAE 62.1 Table 6.2.2.1, {use}). No RDS value. To confirm.")
+    tpl = tpl.replace("m2", "m²")
+    use = str(r.get("occupancy_use") or "use not mapped")
+    pieces, pos = [], 0
+    for m in _re.finditer(r"\{(\w+)\}", tpl):
+        pieces.append(xl_str(tpl[pos:m.start()]))
+        key = m.group(1)
+        pieces.append({"density": f'TEXT({g("dens")},"0")', "area": f'TEXT({g("area")},"0.0")', "people": f'TEXT({g("people")},"0")',
+                       "use": xl_str(use)}.get(key, '""'))
+        pos = m.end()
+    pieces.append(xl_str(tpl[pos:]))
+    if not blank(rem):
+        pieces.append(xl_str(" " + str(rem)))
+    return "=" + "&".join(pieces)
+
+
 def _val(ctx: Ctx, ws, ref: str, v: Any, code: str, *, fmt=None, kind="num", cref: str = None, sref: str = None, src: str = "",
-         label: str = "", room: str = "") -> None:
+         label: str = "", room: str = "", style: str = None) -> None:
     """Input value with the group's shared code and source cells."""
     has = not blank(v)
-    style = CODE_STYLES[code][0] if (has and code) else "Input"
+    style = style if (style and has) else (CODE_STYLES[code][0] if (has and code) else "Input")
     if kind == "tag":
         style = tag_variant(style)
     c = put(ws, ref, v if has else None, style, fmt)
@@ -53,7 +81,7 @@ def write_room_information(ctx: Ctx) -> None:
     title_block(ws, "Room Information", "One row per room. Inputs carry a code (D document, M measured, S specified, "
                 "A assumption) and a source ID that links to Sources. Unknown values stay blank and are listed on Flags.", ctx)
     write_headers(ws, L, spec, 4, {"no": "ROOM", "ahu": "SYSTEM (approved zoning)", "sptype": "SPACE TYPE AND CONDITION",
-                                   "soa": "AREA", "h": "HEIGHT", "pfix": "OCCUPANCY AND OPERATION", "light": "GAINS",
+                                   "dpa": "AREA", "h": "HEIGHT", "pfix": "OCCUPANCY AND OPERATION", "light": "GAINS",
                                    "glz": "FENESTRATION (from Envelope)", "remark": "SOURCE REMARK"})
     for i, r in enumerate(ctx.rooms):
         row = L.row(i)
@@ -76,6 +104,7 @@ def write_room_information(ctx: Ctx) -> None:
             _prov_cells(ctx, ws, g(k + "_c"), g(k + "_s"), zc, zs, has_f)
         # single-value groups
         simple = [("sptype", "space_type", "space_type", "text", None), ("cond", "room_condition", "space_type", "text", None),
+                  ("dpa", "dpa_area_m2", "dpa_area", "num", "d1"),
                   ("soa", "soa_area_m2", "soa_area", "num", "d1"), ("meas", "measured_area_m2", "measured_area", "num", "d1"),
                   ("sel", "area_selector", "area_selector", "text", None), ("h", "ceiling_height_m", "ceiling_height", "num", "d2"),
                   ("pfix", "occupancy_people", "occupancy_people", "num", "d1"),
@@ -84,6 +113,7 @@ def write_room_information(ctx: Ctx) -> None:
                   ("light", "lighting_w_m2", "lighting", "num", "d1"), ("power", "small_power_w_m2", "small_power", "num", "d1"),
                   ("eqs", "equipment_sensible_w", "equipment_sensible", "num", "d0"),
                   ("eql", "equipment_latent_w", "equipment_latent", "num", "d0")]
+        density_default = r.get("occupancy_basis") == "DENSITY DEFAULT"
         for k, f, grp, kind, fmt in simple:
             v = r.get(f)
             if k == "sel" and blank(v):
@@ -93,20 +123,25 @@ def write_room_information(ctx: Ctx) -> None:
                 code_s, src_s = prov_of(r, "space_type", True)
             else:
                 code_s, src_s = prov_of(r, grp, not blank(v))
+            style = OCC_NAME if (k == "dens" and density_default and not blank(v)) else None
             _val(ctx, ws, g(k), v, code_s, fmt=fmt, kind=kind, cref=g(k + "_c"), sref=g(k + "_s"), src=src_s,
-                 label=f, room=n)
+                 label=f, room=n, style=style)
             _prov_cells(ctx, ws, g(k + "_c"), g(k + "_s"), code_s, src_s, not blank(v))
         # calculated
-        soa, meas, sel = g("soa"), g("meas"), g("sel")
-        agree = (f'=IF(OR({soa}="",{meas}=""),"",IF(OR(ABS({soa}-{meas})<=AreaTolM2,ABS({soa}-{meas})<=AreaTolPct*{soa}),'
+        dpa, soa, meas, sel, base = g("dpa"), g("soa"), g("meas"), g("sel"), g("base")
+        agree = (f'=IF(OR({base}="",{meas}=""),"",IF(OR(ABS({base}-{meas})<=AreaTolM2,ABS({base}-{meas})<=AreaTolPct*{base}),'
                  f'"YES","NO"))')
-        area = (f'=ROUND(IF({sel}="SOA",{soa},IF({sel}="MEASURED",{meas},IF({sel}="LARGER",MAX({soa},{meas}),'
-                f'IF({meas}="",{soa},IF({soa}="",{meas},IF({g("agree")}="YES",{soa},{meas})))))),AreaDecimals)')
-        for k, f, st, fmt in (("area", area, "Calc", "d1"),
-                              ("diff", f'=IF(AND({soa}<>"",{meas}<>"",{soa}<>0),({soa}-{meas})/{soa},"")', "Calc", "pct1"),
+        base_f = (f'=IF({dpa}="",IF({soa}="","",ROUND({soa},AreaDecimals)),IF({dpa}>0,ROUND({dpa},AreaDecimals),'
+                  f'IF({soa}="","",ROUND({soa},AreaDecimals))))')
+        area = (f'=ROUND(IF({sel}="SOA",{soa},IF({sel}="DPA",{dpa},IF({sel}="MEASURED",{meas},IF({sel}="LARGER",MAX({base},{meas}),'
+                f'IF({meas}="",IF({base}="",0,{base}),IF({base}="",{meas},IF({g("agree")}="YES",{base},{meas}))))))),AreaDecimals)')
+        people = (f'=IF({g("pfix")}<>"",IF({g("obasis")}="RDS",ROUNDUP({g("pfix")},0),{g("pfix")}),IF({g("obasis")}="DENSITY DEFAULT",ROUNDUP({g("area")}*{g("dens")}/PercentBase,0),'
+                  f'{g("area")}*{g("dens")}/PercentBase))')
+        for k, f, st, fmt in (("base", base_f, "Calc", "d1"), ("area", area, "Calc", "d1"),
+                              ("diff", f'=IF(AND({base}<>"",{meas}<>"",{base}<>0),({base}-{meas})/{base},"")', "Calc", "pct1"),
                               ("agree", agree, "Calc", None),
                               ("vol", f"={g('area')}*{g('h')}", "Calc", "d1"),
-                              ("people", f'=IF({g("pfix")}<>"",{g("pfix")},{g("area")}*{g("dens")}/PercentBase)', "Calc", "d1"),
+                              ("people", people, OCC_NAME if density_default else "Calc", "d1"),
                               ("glz", f"=SUMIFS([EN.glz],[EN.room],{g('no')})", "Link", "d1"),
                               ("wall", f"=SUMIFS([EN.wall],[EN.room],{g('no')})", "Link", "d1"),
                               ("roof", f"=SUMIFS([EN.roof],[EN.room],{g('no')})", "Link", "d1"),
@@ -118,7 +153,15 @@ def write_room_information(ctx: Ctx) -> None:
             c = put(ws, g(k), f, st, fmt)
             if k in ("agree", "face"):
                 c.alignment = Alignment(horizontal="left" if k == "face" else "center", vertical="center")
-        put(ws, g("remark"), r.get("remark"), "Note")
+        ob = r.get("occupancy_basis")
+        put(ws, g("obasis"), ob, "Text")
+        if density_default:
+            ctx.coded.append(dict(sheet=ws.title, cell=g("people"), code_cell=g("dens_c"), src_cell=g("dens_s"), code="A"))
+        rem = r.get("remark")
+        if density_default:
+            put(ws, g("remark"), _density_remark(ctx, r, g, rem), "Note")
+        else:
+            put(ws, g("remark"), rem, "Note")
     last = L.last
     list_validation(ws, f"{L.col('sptype')}{L.first}:{L.col('sptype')}{last}", "ListSpaceType")
     list_validation(ws, f"{L.col('cond')}{L.first}:{L.col('cond')}{last}", "ListCondition")
@@ -128,6 +171,9 @@ def write_room_information(ctx: Ctx) -> None:
     list_validation(ws, f"{L.col('oacond')}{L.first}:{L.col('oacond')}{last}", "ListOACond")
     band_rows(ws, f"A{L.first}:{L.col('remark')}{last}")
     cf_text(ws, f"{L.col('agree')}{L.first}:{L.col('agree')}{last}", f"{L.col('agree')}{L.first}", "NO")
+    # occupancy that no RDS value and no room use gives: the 0 is a placeholder, shown on a yellow fill so it is not read as a value
+    for k in ("obasis", "people"):
+        cf_formula(ws, f"{L.col(k)}{L.first}:{L.col(k)}{last}", f'${L.col("obasis")}{L.first}="NOT SET"', bold=True, fill="FFFFF2CC")
     _setup(ws, ctx, L, L.idx["remark"], last, "4:6", f"{L.col('name')}{L.first}", "FF1F4E79")
 
 
@@ -352,7 +398,7 @@ def write_airflow(ctx: Ctx) -> None:
     L = ctx.lay["AF"]
     title_block(ws, "Airflow", "Both cases for every room: air-change airflow and thermal-load airflow; the larger governs, "
                 "not less than exhaust and pressure require. Extract = supply + offset (negative room) or supply − offset "
-                "(positive room). The last columns apply the outdoor-air rule for small rooms (Section 8.2) in rounds.", ctx)
+                "(positive room). The last columns apply the outdoor-air rule for small rooms in rounds.", ctx)
     spec = af_spec()
     bands = {"no": "ROOM", "ac": "AIRFLOW CASES", "ex_min": "EXHAUST AND PRESSURE", "supply": "RESULT", "oa_air": "OUTDOOR AIR",
              "terminal": "SYSTEM KEYS", "in1": "OUTDOOR-AIR RULE, ROUND BY ROUND", "status": "OUTCOME"}
@@ -400,7 +446,7 @@ def write_airflow(ctx: Ctx) -> None:
             put(ws, g(f"sep{rr}"), f'=IF({g("clin")}="YES",0,{g(f"trg{rr}")})', "Calc", "d0")
             put(ws, g(f"lst{rr}"), f'=IF({g("clin")}="YES",{g(f"trg{rr}")},0)', "Calc", "d0")
         sums = lambda p: "+".join(g(f"{p}{x}") for x in range(1, OA_ROUNDS + 1))
-        put(ws, g("status"), f'=IF({sums("sep")}>0,"SEPARATE",IF({sums("lst")}>0,"LIST FOR MARCUS",""))', "Calc").alignment = \
+        put(ws, g("status"), f'=IF({sums("sep")}>0,"SEPARATE",IF({sums("lst")}>0,"LIST FOR REVIEW",""))', "Calc").alignment = \
             Alignment(horizontal="left")
         put(ws, g("sepf"), f"=MIN(1,{sums('sep')})", "Calc", "d0")
         put(ws, g("cmark0"), f'=IF(AND({g("in1")}=1,{g("frac")}>0,{g("frac")}={g("max1")}),{g("ahu")},"")', "CalcTag")
@@ -413,8 +459,8 @@ def write_airflow(ctx: Ctx) -> None:
             ctx, f'=IF(AND({g("sepf")}=0,{g("supply")}>0,COUNTIFS({L.upto("ahu", i)},{g("ahu")},{L.upto("supply", i)},">0",{L.upto("sepf", i)},0)=1),{g("ahu")},"")',
             L, i), "CalcTag")
         put(ws, g("fcu"), f'=IF(OR({g("systype")}="FCU",{g("sepf")}=1),1,0)', "Calc", "d0")
-        put(ws, g("flgrank"), f'=IF(OR({g("status")}="SEPARATE",{g("status")}="LIST FOR MARCUS"),'
-                              f'COUNTIF({L.upto("status", i)},"SEPARATE")+COUNTIF({L.upto("status", i)},"LIST FOR MARCUS"),0)', "Calc", "d0")
+        put(ws, g("flgrank"), f'=IF(OR({g("status")}="SEPARATE",{g("status")}="LIST FOR REVIEW"),'
+                              f'COUNTIF({L.upto("status", i)},"SEPARATE")+COUNTIF({L.upto("status", i)},"LIST FOR REVIEW"),0)', "Calc", "d0")
         put(ws, g("fcurank"), f'=IF({g("fcu")}=1,SUM({L.upto("fcu", i)}),0)', "Calc", "d0")
     last = L.last
     band_rows(ws, f"A{L.first}:{L.col('ok')}{last}")

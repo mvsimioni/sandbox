@@ -119,7 +119,12 @@ def read_constants(data: Dict[str, Any]) -> Dict[str, Any]:
 def select_area(room: Dict[str, Any], c: Dict[str, Any]) -> Tuple[float, str]:
     """Area used (rounded to 0.1 m2) and the basis; brief 8.3 and Section 11 item 18."""
     soa, meas = _num(room.get("soa_area_m2")), _num(room.get("measured_area_m2"))
+    dpa = _num(room.get("dpa_area_m2"))
     sel = str(room.get("area_selector") or "AUTO").upper()
+    if sel == "DPA" and dpa is not None:
+        return round(dpa, 1), "DPA"
+    if dpa is not None and dpa > 0:
+        soa = dpa                                    # the design area: DPA designed area, else SOA
     if soa is None and meas is None:
         raise RecomputeError(f"room {room.get('number')}: no area")
     if soa is None:
@@ -158,11 +163,15 @@ def room_loads(room: Dict[str, Any], c: Dict[str, Any], tables: Dict[str, Any]) 
     defaults = tables["defaults"].get(st_name, {})
 
     people = _num(room.get("occupancy_people"))
+    if people is not None and str(room.get("occupancy_basis") or "").upper() == "RDS":
+        people = float(math.ceil(round(people, 9)))          # RDS count (D-016): a fraction of a person is rounded up
     if people is None:
         dens = _num(room.get("occupancy_per_100m2"))
         if dens is None:
             dens = _num(defaults.get("density_per_100m2"))
         people = (dens or 0.0) * area / 100.0
+        if str(room.get("occupancy_basis") or "").upper() == "DENSITY DEFAULT":
+            people = float(math.ceil(round(people, 9)))      # default density (D-017): rounded up to a whole person
     iof = _num(room.get("iof"))
     iof = 1.0 if iof is None else iof
     act_name = room.get("activity")

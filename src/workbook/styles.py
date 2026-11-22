@@ -24,6 +24,13 @@ FILL_FAIL = "FFF4C7C3"
 FILL_HEAD = "FFF0F2F5"
 FILL_BAND = "FFF7F7F7"
 
+try:
+    from .conf import occupancy_style as _occ_style
+    OCC_STYLE = _occ_style()
+except Exception:                                                  # configuration unreadable: built-in values
+    OCC_STYLE = dict(font_colour="FFC00000", named_style="Assumption-Occupancy", code="A")
+OCC_NAME = OCC_STYLE["named_style"]
+
 HAIR = Side(style="hair", color="FF808080")
 THIN = Side(style="thin", color="FF404040")
 
@@ -41,7 +48,7 @@ CODE_STYLES: Dict[str, tuple] = {
 # styles allowed for a code letter (tag and total variants)
 CODE_ALLOWED: Dict[str, set] = {
     "D": {"Input", "InputTag"}, "M": {"Input", "InputTag"}, "S": {"Specified", "SpecifiedTag"},
-    "A": {"Assumption", "AssumptionTag"}, "C": {"Calc", "CalcTag"}, "L": {"Link", "LinkTag"},
+    "A": {"Assumption", "AssumptionTag", OCC_NAME}, "C": {"Calc", "CalcTag"}, "L": {"Link", "LinkTag"},
     "R": {"Result", "Total", "ResultTag"}, "K": {"Check"},
 }
 
@@ -100,6 +107,7 @@ def install_styles(wb) -> None:
         _ns("SpecifiedTag", _font(color=BLUE, name=MONO), fill=FILL_SPEC, align=left),
         _ns("Assumption", _font(color=BLUE), fill=FILL_ASSUME, align=right),
         _ns("AssumptionTag", _font(color=BLUE, name=MONO), fill=FILL_ASSUME, align=left),
+        _ns(OCC_STYLE["named_style"], _font(color=OCC_STYLE["font_colour"]), fill=FILL_ASSUME, align=right),
         _ns("Calc", _font(), align=right),
         _ns("CalcTag", _font(name=MONO), align=left),
         _ns("Link", _font(color=GREEN), align=right),

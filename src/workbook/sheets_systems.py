@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 
 from openpyxl.styles import Alignment
 
-from .common import band_rows, cf_formula, cf_text, expand, group_cols, list_validation, title_block, write_headers
+from .common import band_rows, cf_formula, cf_text, expand, group_cols, list_validation, tender_remark, title_block, write_headers
 from .ctx import Ctx
 from .model import blank
 from .sheets_rooms import _prov_cells, _setup, _val
@@ -46,15 +46,17 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
         ws[g("ahu")].alignment = Alignment(horizontal="left")
         _hl(ws, g("type"), a.get("type") if not after else f"={ctx.lay['AH'].local('type', t)}", "Text" if not after else "Link", left=True)
         sup = f',{AF.rng("supply")},">0"'
-        put(ws, g("n"), f"=COUNTIFS({crit}{inc}{sup})", "Calc", "d0")
-        put(ws, g("area"), f"=SUMIFS({AF.rng('area')},{crit}{inc}{sup})", "Calc", "d1")
+        put(ws, g("n"), f"=COUNTIFS({crit}{inc})", "Calc", "d0")
+        put(ws, g("area"), f"=SUMIFS({AF.rng('area')},{crit}{inc})", "Calc", "d1")
+        put(ws, g("area_sup"), f"=SUMIFS({AF.rng('area')},{crit}{inc}{sup})", "Calc", "d1")
         put(ws, g("vol"), f"=SUMIFS({AF.rng('vol')},{crit}{inc}{sup})", "Calc", "d1")
+        put(ws, g("noh"), f'=COUNTIFS({crit}{inc},{ctx.lay["RI"].rng("h")},"")', "Calc", "d0")
         put(ws, g("sa_room"), f"=SUMIFS({AF.rng('supply')},{crit}{inc})", "Result", "d1")
         put(ws, g("leak"), "=DuctLeakage", "Link", "pct1")
         put(ws, g("sa_ahu"), f"={g('sa_room')}*(1+{g('leak')})", "Result", "d1")
         put(ws, g("oa_sum"), f"=SUMIFS({AF.rng('oa')},{crit}{inc})", "Calc", "d1")
         put(ws, g("frac"), f"=_xlfn.MAXIFS({AF.rng('frac')},{crit}{inc})", "Calc", "pct1")
-        _hl(ws, g("crit"), f'=IF({g("sa_room")}>0,INDEX({AF.rng("name")},MATCH({key},{AF.rng(cm)},0)),"–")', "Calc", left=True)
+        _hl(ws, g("crit"), f'=IF({g("frac")}>0,INDEX({AF.rng("name")},MATCH({key},{AF.rng(cm)},0)),"–")', "Calc", left=True)
         put(ws, g("oa_rule"), f"={g('frac')}*{g('sa_ahu')}", "Result", "d1")
         put(ws, g("vou"), f"={g('oa_sum')}", "Calc", "d1")
         put(ws, g("vps"), f"={g('sa_room')}", "Calc", "d1")
@@ -78,7 +80,7 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
             put(ws, g("coil_l" + suffix), f"={g('lat')}+{g('oa_lat' + suffix)}", "Calc", "d2")
             put(ws, g("coil" + suffix), f"={g('coil_s' + suffix)}+{g('coil_l' + suffix)}", "Result", "d2")
         put(ws, g("fan"), f"={g('sa_ahu')}/LperM3*FanPressure/FanEfficiency/WperkW", "Calc", "d2")
-        put(ws, g("wm2"), f"=IF({g('area')}>0,{g('coil')}*WperkW/{g('area')},0)", "Calc", "d1")
+        put(ws, g("wm2"), f"=IF({g('area_sup')}>0,{g('coil')}*WperkW/{g('area_sup')},0)", "Calc", "d1")
         put(ws, g("req_t"), f"=IF({g('sa_room')}>0,SUMPRODUCT(({AF.rng('ahu')}={key}){mask}*{AF.rng('supply')}*{AF.rng('troom')})/{g('sa_room')}-{g('sens')}*WperkW/(AirSensibleFactor*{g('sa_room')}),0)", "Calc", "d1")
         if not after:
             sc, ss = a.get("sched_code", "D"), a.get("sched_source", "")
@@ -90,16 +92,47 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
             _val(ctx, ws, g("sched_oa"), a.get("sched_oa_lps"), sc, fmt="d0", cref=g("sched_c"), sref=g("sched_s"), src=ss,
                  label="scheduled OA", room=a["tag"])
             _prov_cells(ctx, ws, g("sched_c"), g("sched_s"), sc, ss, has)
+            put(ws, g("tsrc"), a.get("tender_source_text") if has else None, "Text")
+        else:
+            A = ctx.lay["AH"]
+            put(ws, g("sched"), f'=IF({A.local("sched", t)}="","",{A.local("sched", t)})', "Link", "d0")
+            put(ws, g("tsrc"), f'=IF({A.local("tsrc", t)}="","",{A.local("tsrc", t)})', "Link")
+        put(ws, g("red"), f'=IF(OR({g("sched")}="",{g("n")}=0),"",{g("sched")}-{g("sa_ahu")})', "Calc", "d0")
+        put(ws, g("redp"), f'=IF(OR({g("red")}="",{g("sched")}=0),"",{g("red")}/{g("sched")})', "Calc", "pct1")
+        inner = tender_remark(g("sched"), g("sa_ahu"), g("red"), g("redp"), f'IF({g("tsrc")}="","tender airflow",{g("tsrc")})',
+                              lead=height_lead(ctx, n=g("n"), noh=g("noh")))[1:]
+        put(ws, g("rem"), f'=IF({g("n")}=0,"No room on Room Information is served by this unit: no calculation.",{inner})', "Note")
+
+
+def height_lead(ctx: Ctx, *, ahu: str = None, room: str = None, fan_tag: str = None, n: str = None, noh: str = None) -> str:
+    """Excel text expression: names a missing ceiling height as the main cause of a reduction (volume, and with it the air-change
+    airflow, is 0 for a room with no ceiling height). Empty text when every room that the row covers has a height."""
+    RI = ctx.lay["RI"]
+    if room is not None:
+        miss = f'COUNTIFS({RI.rng("no")},{room},{RI.rng("h")},"")'
+        return f'IF({miss}>0,"Main cause: ceiling height is not set for this room, so its air-change airflow is 0 L/s.","")'
+    if n is not None:
+        miss, every = noh, n
+    elif fan_tag is not None:
+        miss = f'(COUNTIFS({RI.rng("ahu")},{ahu},{RI.rng("h")},"")+COUNTIFS({RI.rng("exfan")},{fan_tag},{RI.rng("h")},""))'
+        every = f'(COUNTIFS({RI.rng("ahu")},{ahu})+COUNTIFS({RI.rng("exfan")},{fan_tag}))'
+    else:
+        miss = f'COUNTIFS({RI.rng("ahu")},{ahu},{RI.rng("h")},"")'
+        every = f'COUNTIFS({RI.rng("ahu")},{ahu})'
+    return (f'IF({miss}>0,"Main cause: ceiling height is not set for "&{miss}&" of "&{every}&" room(s) that this unit serves, '
+            f'so their air-change airflow is 0 L/s.","")')
 
 
 def write_ahu(ctx: Ctx) -> None:
     ws = ctx.wb["AHU"]
     L, L2 = ctx.lay["AH"], ctx.lay["AH2"]
     title_block(ws, "AHU", "Airflow totalisation and coil duty per AHU. Supply = room supply + duct leakage (named cell). Outdoor air "
-                "= the outdoor-air fraction of the highest-standard room × AHU supply (rule); the plain sum and the multiple-space "
-                "value of the example are shown beside it. Table B repeats the AHU without the rooms the outdoor-air rule separates.", ctx)
-    heads = [H("ahu", "AHU or system", "", 24), H("type", "Type", "", 9), H("n", "Rooms", "no.", 6), H("area", "Area", "m" + U, 9),
-             H("vol", "Volume", "m³", 9), H("sa_room", "Room supply", "L/s", 10), H("leak", "Duct leakage", "%", 8),
+                "= the outdoor-air fraction of the highest-standard room × AHU supply (rule). The plain sum and the multiple-space "
+                "value of the example are shown beside it. Rooms and Area count every room on the unit. Table B repeats the AHU without "
+                "the rooms the outdoor-air rule separates.", ctx)
+    heads = [H("ahu", "AHU or system", "", 24), H("type", "Type", "", 9), H("n", "Rooms on this unit", "no.", 8), H("area", "Area of these rooms", "m" + U, 9),
+             H("area_sup", "Area of rooms with supply", "m" + U, 9), H("vol", "Volume of rooms with supply", "m³", 9),
+             H("noh", "Rooms with no ceiling height", "no.", 9), H("sa_room", "Room supply", "L/s", 10), H("leak", "Duct leakage", "%", 8),
              H("sa_ahu", "AHU supply airflow", "L/s", 10), H("oa_sum", "Sum of room outdoor air", "L/s", 10),
              H("crit", "Highest-standard room (sets the fraction)", "", 28), H("frac", "Highest room outdoor-air fraction", "–", 9),
              H("oa_rule", "AHU outdoor air = fraction × supply", "L/s", 11), H("vou", "Vou (sum of Voc)", "L/s", 9),
@@ -114,10 +147,12 @@ def write_ahu(ctx: Ctx) -> None:
              H("oa_sens_ms", "Outdoor air sensible, example basis", "kW", 10), H("oa_lat_ms", "Outdoor air latent, example basis", "kW", 10),
              H("coil_s_ms", "Coil sensible, example basis", "kW", 10), H("coil_l_ms", "Coil latent, example basis", "kW", 10),
              H("coil_ms", "Coil duty, example basis", "kW", 10),
-             H("req_t", "Supply temperature required by the sensible load", "°C", 10), H("sched", "Scheduled supply", "L/s", 9),
-             H("sched_oa", "Scheduled outdoor air", "L/s", 9), H("sched_c", "Code", "", 5), H("sched_s", "Source ID", "", 11)]
+             H("req_t", "Supply temperature required by the sensible load", "°C", 10), H("sched", "Tender airflow (supply)", "L/s", 10),
+             H("sched_oa", "Tender outdoor airflow", "L/s", 10), H("sched_c", "Code", "", 5), H("sched_s", "Source ID", "", 11),
+             H("tsrc", "Tender source", "", 30), H("red", "Reduction = tender − calculated supply", "L/s", 11),
+             H("redp", "Reduction = (tender − calculated) ÷ tender", "%", 11), H("rem", "Remarks", "", 70)]
     bands = {"ahu": "A. AS ZONED: AIRFLOW", "frac": "OUTDOOR AIR", "vou": "MULTIPLE SPACE (example)", "ret": "RETURN, EXHAUST, RELIEF",
-             "sens": "COIL DUTY", "oa_sens_ms": "COIL DUTY ON THE EXAMPLE'S OUTDOOR-AIR BASIS", "req_t": "CHECKS AND SCHEDULE"}
+             "sens": "COIL DUTY", "oa_sens_ms": "COIL DUTY ON THE EXAMPLE'S OUTDOOR-AIR BASIS", "req_t": "CHECKS", "sched": "TENDER AIRFLOW AND REDUCTION"}
     write_headers(ws, L, heads, 4, bands)
     _ahu_table(ctx, ws, L, False)
     # second table
@@ -134,24 +169,27 @@ def write_ahu(ctx: Ctx) -> None:
             continue
         tr = LL.last + 1
         put(ws, f"A{tr}", "TOTAL", "ResultTag")
-        for k in ("n", "area", "vol", "sa_room", "sa_ahu", "oa_sum", "oa_rule", "oa_ms", "ret", "exh", "relief", "sens", "lat",
+        for k in ("n", "noh", "area", "area_sup", "vol", "sa_room", "sa_ahu", "oa_sum", "oa_rule", "oa_ms", "ret", "exh", "relief", "sens", "lat",
                   "oa_sens", "oa_lat", "fan", "coil_s", "coil_l", "coil", "coil_ms", "coil_s_ms", "coil_l_ms",
                   "oa_sens_ms", "oa_lat_ms"):
             put(ws, f"{LL.col(k)}{tr}", f"=SUM({LL.col(k)}{LL.first}:{LL.col(k)}{LL.last})", "Total",
-                "d0" if k == "n" else ("d1" if k in ("area", "vol", "sa_room", "sa_ahu", "oa_sum", "oa_rule", "oa_ms", "ret", "exh", "relief") else "d2"))
+                "d0" if k in ("n", "noh") else ("d1" if k in ("area", "area_sup", "vol", "sa_room", "sa_ahu", "oa_sum", "oa_rule", "oa_ms", "ret", "exh", "relief") else "d2"))
     ctx.ahu_total_row = L.last + 1
     ctx.ahu2_total_row = L2.last + 1
     if ctx.ahus:
         cf_formula(ws, f"{L.col('req_t')}{L.first}:{L.col('req_t')}{L.last}",
                    f"AND({L.col('req_t')}{L.first}<SupplyTemp,{L.col('sa_room')}{L.first}>0)")
         cf_formula(ws, f"{L.col('sched')}{L.first}:{L.col('sched')}{L.last}",
-                   f'AND({L.col("sched")}{L.first}<>"",{L.col("sched")}{L.first}<{L.col("sa_ahu")}{L.first})')
+                   f'AND({L.col("sched")}{L.first}<>"",{L.col("sched")}{L.first}<{L.col("sa_ahu")}{L.first})', bold=False, fill="FFFFF2CC")
     list_validation(ws, f"{L.col('type')}{L.first}:{L.col('type')}{L.last}", "ListSystemType")
-    band_rows(ws, f"A{L.first}:{L.col('sched_s')}{L.last}")
-    band_rows(ws, f"A{L2.first}:{L2.col('sched_s')}{L2.last}")
+    band_rows(ws, f"A{L.first}:{L.col('rem')}{L.last}")
+    band_rows(ws, f"A{L2.first}:{L2.col('rem')}{L2.last}")
+    if ctx.ahus:
+        cf_formula(ws, f"{L.col('red')}{L.first}:{L.col('red')}{L.last}", f'AND({L.col("red")}{L.first}<>"",{L.col("red")}{L.first}<0)', bold=False, fill="FFFFF2CC")
+        cf_formula(ws, f"{L2.col('red')}{L2.first}:{L2.col('red')}{L2.last}", f'AND({L2.col("red")}{L2.first}<>"",{L2.col("red")}{L2.first}<0)', bold=False, fill="FFFFF2CC")
     group_cols(ws, L, "vou", "vot")
     group_cols(ws, L, "oa_sens_ms", "coil_ms")
-    _setup(ws, ctx, L, L.idx["sched_s"], ctx.ahu2_total_row, "4:6", f"{L.col('crit')}{L.first}", "FF00B050")
+    _setup(ws, ctx, L, L.idx["rem"], ctx.ahu2_total_row, "4:6", f"{L.col('crit')}{L.first}", "FF00B050")
     ws.freeze_panes = f"B{L.first}"
 
 
@@ -161,9 +199,10 @@ def write_fcu(ctx: Ctx) -> None:
     L = ctx.lay["FC"]
     AF, FN = ctx.lay["AF"], ctx.lay["FN"]
     title_block(ws, "FCU", "Rooms on fan coil units: rooms whose system type is FCU, and rooms separated by the outdoor-air rule. "
-                "The coil covers the room load plus outdoor air as it arrives: untreated air from an outdoor-air fan, or treated air from "
-                "a PAHU at its off-coil condition. The outdoor-air source is the room's own input, else the PAHU (or outdoor-air fan) that "
-                "serves the room's AHU on Fans; the capacity columns test that unit with the added airflow. Blank rows are unused list positions.", ctx)
+                "The coil covers the room load plus outdoor air as it arrives. That air is untreated from an outdoor-air fan, "
+                "or treated from a PAHU at its off-coil condition. The outdoor-air source is the room's own input. Otherwise it is the PAHU "
+                "(or outdoor-air fan) that serves the room's AHU on Fans. The capacity columns test that unit with the added airflow. "
+                "Blank rows are unused list positions.", ctx)
     heads = [H("k", "No.", "", 5), H("no", "Room number", "", 14), H("name", "Room name", "", 26), H("ahu", "Original AHU or system", "", 24),
              H("why", "Reason", "", 12), H("area", "Area", "m" + U, 8), H("sens_kw", "Room sensible", "kW", 9),
              H("lat_kw", "Room latent", "kW", 9), H("supply", "Room supply", "L/s", 9), H("oa", "Outdoor air", "L/s", 9),
@@ -173,9 +212,12 @@ def write_fcu(ctx: Ctx) -> None:
              H("oa_sens", "Outdoor air sensible", "kW", 9), H("oa_lat", "Outdoor air latent", "kW", 9),
              H("coil_s", "Coil sensible", "kW", 9), H("coil_l", "Coil latent", "kW", 9), H("coil", "FCU coil duty", "kW", 10),
              H("cap_sched", "Source unit, scheduled", "L/s", 10), H("cap_drawn", "Source unit, drawn with the added air", "L/s", 11),
-             H("cap", "Source capacity", "", 12), H("flag", "Flag", "", 44)]
+             H("cap", "Source capacity", "", 12), H("flag", "Flag", "", 44),
+             H("tender", "Tender airflow of the unit", "L/s", 10), H("tsrc", "Tender source", "", 28),
+             H("calc", "Calculated airflow of the unit", "L/s", 10), H("red", "Reduction = tender − calculated", "L/s", 10),
+             H("redp", "Reduction = (tender − calculated) ÷ tender", "%", 11), H("rem", "Remarks", "", 70)]
     write_headers(ws, L, heads, 4, {"k": "ROOM", "area": "LOAD", "oasrc": "OUTDOOR AIR", "oa_sens": "COIL", "cap_sched": "CAPACITY OF THE SOURCE",
-                                    "flag": "FLAG"})
+                                    "flag": "FLAG", "tender": "TENDER AIRFLOW AND REDUCTION"})
     ri = ctx.lay["RI"]
     for t in range(ctx.n_fcu_rows):
         g = lambda k: L.local(k, t)
@@ -222,17 +264,32 @@ def write_fcu(ctx: Ctx) -> None:
             put(ws, g("cap_sched"), None, "Link", "d0")
             put(ws, g("cap_drawn"), None, "Link", "d1")
             put(ws, g("cap"), f'=IF({g("no")}="","","NOT SET")', "Check")
-        _hl(ws, g("flag"), (f'=IF({g("no")}="","",IF({g("oasrc")}="not set","OUTDOOR-AIR SOURCE NOT SET: CHOOSE FROM ZONING; COIL ON UNTREATED AIR UNTIL THEN",'
+        _hl(ws, g("flag"), (f'=IF({g("no")}="","",IF({g("oasrc")}="not set","OUTDOOR-AIR SOURCE NOT SET; COIL ON UNTREATED AIR UNTIL THE SOURCE IS GIVEN",'
                             f'IF(AND({g("oacond")}="TREATED",PAHUOffT=""),"PAHU OFF-COIL CONDITION NOT SET",'
-                            f'IF({g("cap")}="FAIL","SOURCE UNIT TOO SMALL WITH THE ADDED AIR",IF({g("oaby")}="FANS DEFAULT","SOURCE TAKEN FROM FANS: CONFIRM","")))))'),
+                            f'IF({g("cap")}="VERIFY","SOURCE UNIT MAY BE TOO SMALL WITH THE ADDED AIR",IF({g("oaby")}="FANS DEFAULT","SOURCE TAKEN FROM FANS: CONFIRM","")))))'),
             "Calc", left=True)
+        AH = ctx.lay["AH"]
+        mt = f"MATCH({g('ahu')},{AH.rng('ahu')},0)"
+        sysrow = f'{g("why")}="SYSTEM TYPE"'
+        put(ws, g("tender"), (f'=IF({g("no")}="","",IF({sysrow},IF(ISNUMBER({mt}),IF(INDEX({AH.rng("sched")},{mt})>0,'
+                              f'INDEX({AH.rng("sched")},{mt}),""),""),""))'), "Link", "d0")
+        _hl(ws, g("tsrc"), (f'=IF({g("tender")}="","",INDEX({AH.rng("tsrc")},{mt}))'), "Link", left=True)
+        put(ws, g("calc"), (f'=IF({g("no")}="","",IF({sysrow},IF(ISNUMBER({mt}),INDEX({AH.rng("sa_ahu")},{mt}),{g("supply")}),'
+                            f'{g("supply")}*(1+DuctLeakage)))'), "Link", "d0")
+        put(ws, g("red"), f'=IF({g("tender")}="","",{g("tender")}-{g("calc")})', "Calc", "d0")
+        put(ws, g("redp"), f'=IF({g("tender")}="","",IF({g("tender")}=0,"",{g("red")}/{g("tender")}))', "Calc", "pct1")
+        put(ws, g("rem"), tender_remark(g("tender"), g("calc"), g("red"), g("redp"), f'IF({g("tsrc")}="","tender airflow",{g("tsrc")})',
+                                        "airflow", "No room served by this unit needs it under its criteria.",
+                                        lead=height_lead(ctx, room=g("no"))), "Note")
     if ctx.n_fcu_rows:
-        band_rows(ws, f"A{L.first}:{L.col('flag')}{L.last}")
+        band_rows(ws, f"A{L.first}:{L.col('rem')}{L.last}")
+        cf_formula(ws, f"{L.col('red')}{L.first}:{L.col('red')}{L.last}", f'AND({L.col("red")}{L.first}<>"",{L.col("red")}{L.first}<0)', bold=False, fill="FFFFF2CC")
         cf_formula(ws, f"{L.col('flag')}{L.first}:{L.col('flag')}{L.last}", f'{L.col("flag")}{L.first}<>""')
-        cf_text(ws, f"{L.col('cap')}{L.first}:{L.col('cap')}{L.last}", f"{L.col('cap')}{L.first}", "FAIL")
-    put(ws, f"A{L.last + 2}", "Source capacity: the PAHU or outdoor-air fan on Fans carries the separated room's outdoor air on top of its AHU's; "
-        "its status there is the test. The FCU itself is a new system: its selection follows the approved zoning change (Gate 3a).", "Note")
-    _setup(ws, ctx, L, L.idx["flag"], L.last + 2, "4:6", f"{L.col('name')}{L.first}", "FF00B050")
+        cf_text(ws, f"{L.col('cap')}{L.first}:{L.col('cap')}{L.last}", f"{L.col('cap')}{L.first}", "VERIFY", fill="FFFFF2CC")
+    put(ws, f"A{L.last + 2}", "Source capacity: the PAHU or outdoor-air fan on Fans carries the outdoor air of the separated room on top of its AHU's. "
+        "Its status there is the test. The FCU itself is a new unit. Select it after the zoning change is approved. "
+        "Unit values repeat on each room of the same unit. Do not add them.", "Note")
+    _setup(ws, ctx, L, L.idx["rem"], L.last + 2, "4:6", f"{L.col('name')}{L.first}", "FF00B050")
 
 
 # --------------------------------------------------------------------------- #
@@ -241,41 +298,52 @@ def write_fans(ctx: Ctx) -> None:
     L, AF, AH = ctx.lay["FN"], ctx.lay["AF"], ctx.lay["AH"]
     AH2, FC = ctx.lay["AH2"], ctx.lay["FC"]
     title_block(ws, "Fans", "Return, exhaust and isolation-exhaust fans, outdoor-air fans and PAHUs: required airflow from the balance, "
-                "duct leakage, drawn duty and margin against the scheduled duty. Airflow only: fan pressure is not calculated here.", ctx)
-    heads = [H("tag", "Fan tag", "", 24), H("type", "Type", "", 16), H("serves", "Serves (AHU tag, or fan tag for exhaust)", "", 26),
-             H("req", "Required airflow", "L/s", 10), H("leak", "Duct leakage", "%", 8), H("drawn", "Drawn duty", "L/s", 10),
-             H("sched", "Scheduled duty", "L/s", 10), H("margin", "Margin of schedule over drawn duty", "%", 10),
-             H("code", "Code", "", 5), H("src", "Source ID", "", 11), H("remark", "Remark", "", 40), H("status", "Status", "", 11),
+                "duct leakage and drawn duty against the tender airflow. Airflow only: fan pressure is not calculated here.", ctx)
+    heads = [H("tag", "Fan tag", "", 24), H("type", "Type", "", 16), H("serves", "Serves (AHU tag, or fan tag for exhaust)", "", 26), H("serves2", "Also serves (second AHU)", "", 22),
+             H("req", "Required airflow", "L/s", 10), H("leak", "Duct leakage", "%", 8), H("drawn", "Calculated airflow, drawn duty", "L/s", 11),
+             H("sched", "Tender airflow", "L/s", 10), H("tsrc", "Tender source", "", 28),
+             H("red", "Reduction = tender − calculated", "L/s", 11), H("redp", "Reduction = (tender − calculated) ÷ tender", "%", 11),
+             H("code", "Code", "", 5), H("src", "Source ID", "", 11), H("remark", "Remark", "", 30), H("status", "Status", "", 11),
+             H("rem", "Remarks", "", 70),
              H("pk_p", "First PAHU of the AHU (FCU source)", "", 16), H("pk_o", "First outdoor-air fan of the AHU (FCU source)", "", 16)]
-    write_headers(ws, L, heads, 4, {"tag": "FAN", "req": "AIRFLOW", "sched": "SCHEDULE", "pk_p": "FCU OUTDOOR-AIR SOURCE"})
+    write_headers(ws, L, heads, 4, {"tag": "FAN", "req": "AIRFLOW", "sched": "TENDER AIRFLOW AND REDUCTION", "pk_p": "FCU OUTDOOR-AIR SOURCE"})
     for t, f in enumerate(ctx.fans):
         g = lambda k: L.local(k, t)
         code, src = f.get("code", "D"), f.get("source", "")
         if blank(src):
             raise ValueError(f"fan {f['tag']} has no source id")
         for k, fld, kind, fmt in (("tag", "tag", "tag", None), ("type", "type", "text", None), ("serves", "serves", "tag", None),
-                                  ("sched", "scheduled_lps", "num", "d0")):
+                                  ("serves2", "serves2", "tag", None), ("sched", "scheduled_lps", "num", "d0")):
             _val(ctx, ws, g(k), f.get(fld), code, fmt=fmt, kind=kind, cref=g("code"), sref=g("src"), src=src, label=f"fan {fld}",
                  room=f["tag"])
         _prov_cells(ctx, ws, g("code"), g("src"), code, src, True)
         # outdoor air of the AHU after the outdoor-air rule, plus the outdoor air of FCU rooms that draw on this unit
-        oa_ahu = (f"INDEX({AH2.rng('oa_rule')},MATCH({g('serves')},{AH2.rng('ahu')},0))"
+        def oa_of(tagref: str) -> str:
+            m = f"MATCH({tagref},{AH2.rng('ahu')},0)"
+            return f"IF(ISNUMBER({m}),INDEX({AH2.rng('oa_rule')},{m}),0)"
+        oa_ahu = (f"{oa_of(g('serves'))}+IF({g('serves2')}<>\"\",{oa_of(g('serves2'))},0)"
                   f"+SUMIFS({FC.rng('oa')},{FC.rng('oasrc')},{g('tag')})")
-        put(ws, g("req"), (f'=IF({g("type")}="RETURN",SUMIFS({AF.rng("ret")},{AF.rng("ahu")},{g("serves")}),'
+        ret_of = lambda tagref: f"SUMIFS({AF.rng('ret')},{AF.rng('ahu')},{tagref})"
+        put(ws, g("req"), (f'=IF({g("type")}="RETURN",{ret_of(g("serves"))}+IF({g("serves2")}<>"",{ret_of(g("serves2"))},0),'
                            f'IF(OR({g("type")}="OUTDOOR AIR",{g("type")}="PAHU"),{oa_ahu},'
                            f'IF(OR({g("type")}="EXHAUST",{g("type")}="ISOLATION EXHAUST"),SUMIFS({AF.rng("exhaust")},{AF.rng("exfan")},{g("tag")}),0)))'),
             "Calc", "d1")
         put(ws, g("leak"), "=DuctLeakage", "Link", "pct1")
         put(ws, g("drawn"), f"={g('req')}*(1+{g('leak')})", "Result", "d1")
-        put(ws, g("margin"), f'=IF(AND({g("sched")}<>"",{g("drawn")}>0),{g("sched")}/{g("drawn")}-1,"")', "Calc", "pct1")
-        put(ws, g("status"), f'=IF({g("sched")}="","NO SCHEDULE",IF({g("sched")}>={g("drawn")},"PASS","FAIL"))', "Check")
+        put(ws, g("tsrc"), f.get("tender_source_text") if not blank(f.get("scheduled_lps")) else None, "Text")
+        put(ws, g("red"), f'=IF({g("sched")}="","",{g("sched")}-{g("drawn")})', "Calc", "d0")
+        put(ws, g("redp"), f'=IF(OR({g("sched")}="",{g("sched")}=0),"",{g("red")}/{g("sched")})', "Calc", "pct1")
+        put(ws, g("status"), f'=IF({g("sched")}="","NO TENDER VALUE",IF({g("req")}=0,"NOT CALCULATED",IF({g("sched")}>={g("drawn")},"PASS","VERIFY")))', "Check")
+        put(ws, g("rem"), tender_remark(g("sched"), g("drawn"), g("red"), g("redp"), f'IF({g("tsrc")}="","tender airflow",{g("tsrc")})',
+                                        "airflow", "No room of this workbook is tied to this fan, or no room tied to it needs the airflow. It is not calculated.",
+                                        lead=height_lead(ctx, ahu=g("serves"), fan_tag=g("tag"))), "Note")
         put(ws, g("remark"), f.get("remark"), "Note")
         put(ws, g("pk_p"), f'=IF(AND({g("type")}="PAHU",COUNTIFS({L.upto("type", t)},"PAHU",{L.upto("serves", t)},{g("serves")})=1),{g("serves")},"")', "CalcTag")
         put(ws, g("pk_o"), f'=IF(AND({g("type")}="OUTDOOR AIR",COUNTIFS({L.upto("type", t)},"OUTDOOR AIR",{L.upto("serves", t)},{g("serves")})=1),{g("serves")},"")', "CalcTag")
     if ctx.fans:
         list_validation(ws, f"{L.col('type')}{L.first}:{L.col('type')}{L.last}", "ListFanType")
         band_rows(ws, f"A{L.first}:{L.col('status')}{L.last}")
-        cf_text(ws, f"{L.col('status')}{L.first}:{L.col('status')}{L.last}", f"{L.col('status')}{L.first}", "FAIL")
+        cf_text(ws, f"{L.col('status')}{L.first}:{L.col('status')}{L.last}", f"{L.col('status')}{L.first}", "VERIFY", fill="FFFFF2CC")
     _setup(ws, ctx, L, L.idx["pk_o"], L.last, "4:6", f"{L.col('tag')}{L.first}", "FF00B050")
 
 
@@ -311,8 +379,9 @@ def write_vav(ctx: Ctx) -> None:
 def write_venturi(ctx: Ctx) -> None:
     ws = ctx.wb["Venturi Valves"]
     L, AF, PS = ctx.lay["VN"], ctx.lay["AF"], ctx.lay["PS"]
-    title_block(ws, "Venturi Valves", "One row per valve: design airflow, and from Pressure the offset needed, the design offset as the top "
-                "of the valve's range and the offset of a tighter room (1.0 m³/h per m²), so that the range covers both ends.", ctx)
+    title_block(ws, "Venturi Valves", "One row per valve. It gives the design airflow. From Pressure it gives the offset needed. "
+                "It gives the design offset as the top of the valve's range. It also gives the offset of a tighter room (1.0 m³/h per m²). "
+                "The range covers both ends.", ctx)
     heads = [H("tag", "Valve tag", "", 18), H("room", "Room number", "", 14), H("role", "Supply or exhaust", "", 10),
              H("d1", "Design airflow, normal mode", "L/s", 10), H("d2", "Design airflow, second mode", "L/s", 10),
              H("off", "Offset needed", "m³/h", 9), H("design", "Design offset: top of range", "m³/h", 10),
@@ -407,16 +476,19 @@ def write_flow_balance(ctx: Ctx) -> None:
 def write_comparison(ctx: Ctx) -> None:
     ws = ctx.wb["Airflow Comparison"]
     L, L2, L3, AF, AH, CR = ctx.lay["CP"], ctx.lay["CP2"], ctx.lay["CP3"], ctx.lay["AF"], ctx.lay["AH"], ctx.lay["CR"]
-    title_block(ws, "Airflow Comparison", "Calculated airflows against the working-drawing and tender schematics, room by room and AHU by AHU, "
-                "and the reference rows of the example. Update rule: where this workbook needs more air than the drawing by more than 5 % "
-                "or 10 L/s the mark-up shows the increase; where it needs less the drawn value stays and the margin is recorded.", ctx)
+    title_block(ws, "Airflow Comparison", "Calculated airflows against the tender documents, room by room and AHU by AHU, and the reference rows. "
+                "Tender airflows are information only: they are never a target or a limit. A calculated value below tender is a reduction, "
+                "not a failure. A calculated value above tender is marked VERIFY.", ctx)
     heads = [H("no", "Room number", "", 14), H("name", "Room name", "", 26), H("ahu", "AHU or system", "", 22),
-             H("calc_s", "Supply, calculated", "L/s", 9), H("sch_s", "Supply, schematic", "L/s", 9), H("d_s", "Difference", "L/s", 8),
-             H("dp_s", "Difference", "%", 8), H("calc_r", "Return, calculated", "L/s", 9), H("sch_r", "Return, schematic", "L/s", 9),
-             H("d_r", "Difference", "L/s", 8), H("calc_e", "Exhaust, calculated", "L/s", 9), H("sch_e", "Exhaust, schematic", "L/s", 9),
-             H("d_e", "Difference", "L/s", 8), H("pa_calc", "Pressure target used", "Pa", 8), H("pa_sch", "Pressure on schematic", "Pa", 8),
-             H("flag", "Mark-up rule", "", 26), H("code", "Code", "", 5), H("src", "Source ID", "", 11), H("remark", "Remark", "", 34)]
-    write_headers(ws, L, heads, 4, {"no": "ROOM", "calc_s": "SUPPLY", "calc_r": "RETURN", "calc_e": "EXHAUST", "pa_calc": "PRESSURE", "flag": "RULE"})
+             H("calc_s", "Calculated supply", "L/s", 9), H("sch_s", "Tender supply (schematic)", "L/s", 10),
+             H("d_s", "Reduction = tender − calculated", "L/s", 11),
+             H("dp_s", "Reduction = (tender − calculated) ÷ tender", "%", 11), H("calc_r", "Return, calculated", "L/s", 9),
+             H("sch_r", "Return, tender schematic", "L/s", 9),
+             H("d_r", "Return: calculated − tender", "L/s", 9), H("calc_e", "Exhaust, calculated", "L/s", 9), H("sch_e", "Exhaust, tender schematic", "L/s", 9),
+             H("d_e", "Exhaust: calculated − tender", "L/s", 9), H("pa_calc", "Pressure target used", "Pa", 8), H("pa_sch", "Pressure on tender schematic", "Pa", 9),
+             H("flag", "Against tender", "", 26), H("code", "Code", "", 5), H("src", "Source ID", "", 11),
+             H("tsrc", "Tender source", "", 28), H("remark", "Remarks", "", 70)]
+    write_headers(ws, L, heads, 4, {"no": "ROOM", "calc_s": "SUPPLY", "calc_r": "RETURN", "calc_e": "EXHAUST", "pa_calc": "PRESSURE", "flag": "RESULT"})
     for i, r in enumerate(ctx.rooms):
         g = lambda k: L.local(k, i)
         sc = r.get("schematic") or {}
@@ -427,27 +499,32 @@ def write_comparison(ctx: Ctx) -> None:
         _hl(ws, g("no"), f"={AF.addr('no', i)}", "LinkTag", left=True)
         _hl(ws, g("name"), f"={AF.addr('name', i)}", "Link", left=True)
         _hl(ws, g("ahu"), f"={AF.addr('ahu', i)}", "LinkTag", left=True)
-        for k, s in (("calc_s", "supply"), ("calc_r", "ret"), ("calc_e", "exhaust")):
-            put(ws, g(k), f"={AF.addr(s, i)}", "Link", "d1")
+        for k, s_ in (("calc_s", "supply"), ("calc_r", "ret"), ("calc_e", "exhaust")):
+            put(ws, g(k), f"={AF.addr(s_, i)}", "Link", "d1")
         for k, fld in (("sch_s", "supply_lps"), ("sch_r", "return_lps"), ("sch_e", "exhaust_lps"), ("pa_sch", "pressure_pa")):
             _val(ctx, ws, g(k), sc.get(fld), code, fmt="d1", cref=g("code"), sref=g("src"), src=src, label=f"schematic {fld}", room=r["number"])
         _prov_cells(ctx, ws, g("code"), g("src"), code, src, has)
-        put(ws, g("d_s"), f'=IF({g("sch_s")}="","",{g("calc_s")}-{g("sch_s")})', "Calc", "d1")
+        put(ws, g("tsrc"), sc.get("source_text") if has else None, "Text")
+        put(ws, g("d_s"), f'=IF({g("sch_s")}="","",{g("sch_s")}-{g("calc_s")})', "Calc", "d1")
         put(ws, g("dp_s"), f'=IF(OR({g("sch_s")}="",{g("sch_s")}=0),"",{g("d_s")}/{g("sch_s")})', "Calc", "pct1")
         put(ws, g("d_r"), f'=IF({g("sch_r")}="","",{g("calc_r")}-{g("sch_r")})', "Calc", "d1")
         put(ws, g("d_e"), f'=IF({g("sch_e")}="","",{g("calc_e")}-{g("sch_e")})', "Calc", "d1")
         put(ws, g("pa_calc"), f"={CR.addr('pa', i)}", "Link", "d1")
-        _hl(ws, g("flag"), (f'=IF({g("sch_s")}="","NO SCHEMATIC VALUE",IF(OR({g("dp_s")}>SchedTolPct,{g("d_s")}>SchedTolLps),'
-                            f'"INCREASE ON MARK-UP",IF({g("d_s")}<0,"DRAWN VALUE STAYS; MARGIN RECORDED","AGREES")))'), "Calc", left=True)
-        put(ws, g("remark"), sc.get("remark"), "Note")
+        _hl(ws, g("flag"), (f'=IF({g("sch_s")}="","NO TENDER VALUE",IF({g("d_s")}<0,"VERIFY: ABOVE TENDER",IF({g("d_s")}=0,"EQUALS TENDER",'
+                            f'"REDUCTION AGAINST TENDER")))'), "Calc", left=True)
+        put(ws, g("remark"), tender_remark(g("sch_s"), g("calc_s"), g("d_s"), g("dp_s"),
+                                           f'IF({g("tsrc")}="","tender schematic",{g("tsrc")})', "schematic supply",
+                                           lead=height_lead(ctx, room=g("no"))), "Note")
     band_rows(ws, f"A{L.first}:{L.col('remark')}{L.last}")
-    cf_text(ws, f"{L.col('flag')}{L.first}:{L.col('flag')}{L.last}", f"{L.col('flag')}{L.first}", "INCREASE ON MARK-UP", fill="FFFFF2CC")
+    cf_formula(ws, f"{L.col('flag')}{L.first}:{L.col('flag')}{L.last}", f'LEFT({L.col("flag")}{L.first},6)="VERIFY"', bold=False, fill="FFFFF2CC")
     # AHU table
     put(ws, f"A{L2.first - 4}", "By AHU", "Section")
-    heads2 = [H("ahu", "AHU or system", "", 22), H("calc", "AHU supply, calculated", "L/s", 9), H("sch", "AHU duty, schematic or schedule", "L/s", 9),
-              H("d", "Difference", "L/s", 8), H("dp", "Difference", "%", 8), H("sched", "Scheduled duty (AHU tab)", "L/s", 9),
-              H("d_sched", "Calculated − scheduled", "L/s", 9), H("flag", "Mark-up rule", "", 26), H("code", "Code", "", 5),
-              H("src", "Source ID", "", 11), H("remark", "Remark", "", 34)]
+    heads2 = [H("ahu", "AHU or system", "", 22), H("calc", "Calculated airflow, AHU supply", "L/s", 10),
+              H("sched", "Tender airflow (AHU tab)", "L/s", 10), H("tsrc", "Tender source", "", 28),
+              H("d_sched", "Reduction = tender − calculated", "L/s", 11), H("dp_sched", "Reduction = (tender − calculated) ÷ tender", "%", 11),
+              H("sch", "Tender schematic AHU airflow", "L/s", 10), H("d", "Calculated − tender schematic", "L/s", 10),
+              H("dp", "Calculated ÷ tender schematic − 1", "%", 10), H("flag", "Against tender", "", 26), H("code", "Code", "", 5),
+              H("src", "Source ID", "", 11), H("remark", "Remarks", "", 70)]
     for k, h, u, w in heads2:
         _hl(ws, f"{L2.col(k)}{L2.first - 2}", h, "Header")
         _hl(ws, f"{L2.col(k)}{L2.first - 1}", u or None, "Unit")
@@ -462,13 +539,19 @@ def write_comparison(ctx: Ctx) -> None:
             raise ValueError(f"AHU {a['tag']}: schematic duty has no source id")
         _val(ctx, ws, g("sch"), a.get("schematic_supply_lps"), sc, fmt="d0", cref=g("code"), sref=g("src"), src=ss, label="schematic duty", room=a["tag"])
         _prov_cells(ctx, ws, g("code"), g("src"), sc, ss, has)
+        put(ws, g("sched"), f'=IF({AH.addr("sched", t)}="","",{AH.addr("sched", t)})', "Link", "d0")
+        put(ws, g("tsrc"), f'=IF({AH.addr("tsrc", t)}="","",{AH.addr("tsrc", t)})', "Link")
+        put(ws, g("d_sched"), f'=IF({g("sched")}="","",{g("sched")}-{g("calc")})', "Calc", "d1")
+        put(ws, g("dp_sched"), f'=IF(OR({g("sched")}="",{g("sched")}=0),"",{g("d_sched")}/{g("sched")})', "Calc", "pct1")
         put(ws, g("d"), f'=IF({g("sch")}="","",{g("calc")}-{g("sch")})', "Calc", "d1")
         put(ws, g("dp"), f'=IF(OR({g("sch")}="",{g("sch")}=0),"",{g("d")}/{g("sch")})', "Calc", "pct1")
-        put(ws, g("sched"), f'=IF({AH.addr("sched", t)}="","",{AH.addr("sched", t)})', "Link", "d0")
-        put(ws, g("d_sched"), f'=IF({g("sched")}="","",{g("calc")}-{g("sched")})', "Calc", "d1")
-        _hl(ws, g("flag"), (f'=IF({g("sch")}="","NO SCHEMATIC VALUE",IF(OR({g("dp")}>SchedTolPct,{g("d")}>SchedTolLps),'
-                            f'"INCREASE ON MARK-UP",IF({g("d")}<0,"DRAWN VALUE STAYS; MARGIN RECORDED","AGREES")))'), "Calc", left=True)
-        put(ws, g("remark"), a.get("schematic_remark"), "Note")
+        _hl(ws, g("flag"), (f'=IF({g("sched")}="","NO TENDER VALUE",IF({g("d_sched")}<0,"VERIFY: ABOVE TENDER",IF({g("d_sched")}=0,"EQUALS TENDER",'
+                            f'"REDUCTION AGAINST TENDER")))'), "Calc", left=True)
+        put(ws, g("remark"), tender_remark(g("sched"), g("calc"), g("d_sched"), g("dp_sched"),
+                                           f'IF({g("tsrc")}="","tender airflow",{g("tsrc")})',
+                                           lead=height_lead(ctx, ahu=g("ahu"))), "Note")
+    if ctx.ahus:
+        cf_formula(ws, f"{L2.col('flag')}{L2.first}:{L2.col('flag')}{L2.last}", f'LEFT({L2.col("flag")}{L2.first},6)="VERIFY"', bold=False, fill="FFFFF2CC")
     # reference rows
     put(ws, f"A{L3.first - 4}", "Reference rows (information only; not adopted)", "Section")
     heads3 = [H("label", "Reference", "", 22), H("flow", "Airflow", "L/s", 9), H("m3h", "Airflow", "m³/h", 9), H("ach", "Air changes on this workbook's volume", "ACH", 10),

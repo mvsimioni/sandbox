@@ -18,13 +18,13 @@ import openpyxl
 from .build import build_workbook
 from .recalc import recalc, to_pdf
 from .reva import REVA_NAME, REVA_PATH, build_reva_input
-from .layouts import AHU_KEYS, ENG
+from .layouts import AHU_KEYS, CP_KEYS, ENG, FAN_KEYS
 from .styles import CODE_ALLOWED
 
 ERROR_VALUES = {"#N/A", "#NAME?", "#VALUE!", "#REF!", "#DIV/0!", "#NUM!", "#NULL!", "Err:502", "Err:504", "Err:508", "Err:511",
                 "Err:522", "Err:523"}
 ALLOWED_FUNCS = {"SUM", "SUMIFS", "SUMIF", "SUMPRODUCT", "COUNTIF", "COUNTIFS", "COUNT", "COUNTA", "IF", "AND", "OR", "MAX", "MIN", "ABS", "SIGN",
-                 "SQRT", "ROUND", "ROUNDUP", "TEXT", "INDEX", "MATCH", "ISNUMBER", "ISERROR", "SEARCH", "ROW", "ROWS", "COLUMN", "_XLFN.MAXIFS"}
+                 "SQRT", "ROUND", "ROUNDUP", "TEXT", "INDEX", "MATCH", "ISNUMBER", "ISTEXT", "NOT", "ISERROR", "SEARCH", "ROW", "ROWS", "COLUMN", "_XLFN.MAXIFS"}
 ALLOWED_LITERALS = {"0", "1", "2"}
 TOL_PCT = 0.5
 
@@ -72,6 +72,60 @@ def scan_formulas(path: Path) -> Dict[str, Any]:
     return dict(n_formula=n_formula, funcs=funcs, bad_funcs=bad_funcs, literals=literals, iferror=iferror, external=external)
 
 
+INTERNAL_PATTERNS = [r"config/", r"out/(qa|registers|zoning|loads|sidecar)", r"\.(csv|md|py|json|yaml)\b", r"\bSection \d+(\.\d+)?\b",
+                     r"\bbrief\b", r"\bGate \w+", r"\bTask \d", r"template_spec", r"\bD-0\d\d\b"]
+
+
+def language_scan(path: Path, root: Path = Path(".")) -> List[Tuple[str, str, str]]:
+    """Forbidden terms of the project configuration (deliverable language) and references to internal files or processes, in the
+    text of every cell (text cells, the literals of formulas and the recalculated values), the sheet names, the defined names and the
+    document properties. Whole words, any case; 'AI' is matched in capitals only."""
+    from .conf import forbidden_terms
+    terms = forbidden_terms(root)
+    pats = []
+    for t in terms:
+        rx = re.compile(r"\b" + re.escape(t) + r"(s|es)?\b", 0 if t == "AI" else re.I)
+        pats.append((t, rx))
+    internal = [re.compile(p, re.I) for p in INTERNAL_PATTERNS]
+    hits: List[Tuple[str, str, str]] = []
+
+    def check(where: str, cell: str, text: str) -> None:
+        for t, rx in pats:
+            m = rx.search(text)
+            if m:
+                hits.append((where, cell, f"forbidden term '{t}': ...{text[max(0, m.start() - 25):m.end() + 25]}..."))
+        for rx in internal:
+            m = rx.search(text)
+            if m:
+                hits.append((where, cell, f"internal reference '{m.group(0)}': ...{text[max(0, m.start() - 25):m.end() + 25]}..."))
+
+    wbf = openpyxl.load_workbook(path)
+    wbv = openpyxl.load_workbook(path, data_only=True)
+    for ws in wbf:
+        check("sheet name", ws.title, ws.title)
+        wv = wbv[ws.title]
+        for row in ws.iter_rows():
+            for c in row:
+                v = c.value
+                if isinstance(v, str):
+                    if v.startswith("="):
+                        for lit in re.findall(r'"((?:[^"]|"")*)"', v):
+                            check(ws.title, c.coordinate, lit.replace('""', '"'))
+                        cv = wv[c.coordinate].value
+                        if isinstance(cv, str):
+                            check(ws.title, c.coordinate, cv)
+                    else:
+                        check(ws.title, c.coordinate, v)
+    for name in wbf.defined_names:
+        check("defined name", name, name)
+    p = wbf.properties
+    for k in ("creator", "title", "subject", "description", "keywords", "lastModifiedBy"):
+        v = getattr(p, k, None)
+        if v:
+            check("properties", k, str(v))
+    return hits
+
+
 def style_proof(ctx, path: Path) -> Dict[str, Any]:
     """Every coded cell has a named style and a code letter; every input source ID resolves; fonts and merges."""
     wb = openpyxl.load_workbook(path)
@@ -116,9 +170,9 @@ def style_proof(ctx, path: Path) -> Dict[str, Any]:
 def ka_input() -> Dict[str, Any]:
     """Department of three rooms carrying the known-answer suites of Section 8.3 through the real Pressure tables."""
     base = build_reva_input()
-    src = dict(id="KA-8.3", document="Brief Section 8.3, known-answer table", issue="Rev D", page="8.3", location="known-answer test",
+    src = dict(id="KA-8.3", document="Project pressure-offset method, known-answer table", issue="project method", page="known answers", location="known-answer test",
                text_as_read="room 1.88 x 2.94 x 3.0 m; room 3.97 x 4.83 x 3.0 m; ensuite 37.5 m2 surface; doors 15, 10, 20 cm2; shaft door 10.2 m3/h",
-               method="transcribed from the brief", confidence="high")
+               method="transcribed from the project method", confidence="high")
     d = copy.deepcopy(base)
     d["sources"].append(src)
     d["project"] = dict(d["project"], name="Known-answer pressure suites (synthetic test)",
@@ -221,7 +275,7 @@ def compare_reva(rc: Path, root: Path) -> Dict[str, Any]:
 
     ah = gen["AHU"]
     pick = lambda key: ah.cell(row=7, column=AHU_KEYS.index(key) + 1).value
-    add("Area of the supply rooms (m2)", pick("area"), hl["E3"].value)
+    add("Area of the supply rooms (m2)", pick("area_sup"), hl["E3"].value)
     add("Room supply airflow (L/s)", pick("sa_room"), hl["H3"].value)
     add("Outdoor air, multiple-space value Vot (L/s)", pick("vot"), ahs["AA8"].value)
     add("Outdoor air on the example's basis, max(sum, Vot) (L/s)", pick("oa_ms"), ahs["I8"].value)
@@ -372,6 +426,104 @@ def print_proof(xlsx: Path, pdf: Path) -> Dict[str, Any]:
     return dict(problems=problems, sheets=sheets)
 
 
+def d013_check(base: Dict[str, Any], work: Path) -> Dict[str, Any]:
+    """Rev A input with tender airflows on its AHU, a fan, one room and one FCU unit; the recalculated reduction columns and
+    remarks must equal the values worked by hand. Tender values never change a calculated value."""
+    d = copy.deepcopy(base)
+    d["sources"].append(dict(id="TND-1", document="Tender equipment schedule, test row", issue="Corr 5", page="p1", location="row 1",
+                             text_as_read="supply 3500 L/s", method="test", confidence="high"))
+    tag = d["rooms"][0]["ahu"]
+    ahu = next((a for a in d.get("ahus", []) if a["tag"] == tag), None)
+    if ahu is None:
+        ahu = dict(tag=tag, type="AHU")
+        d.setdefault("ahus", []).append(ahu)
+    ahu.update(sched_supply_lps=3500.0, sched_code="D", sched_source="TND-1", tender_source_text="tender equipment schedule Corr 5, test row")
+    d["fans"] = [dict(tag="RAF-T1", type="RETURN", serves=tag, scheduled_lps=3000.0, code="D", source="TND-1",
+                      tender_source_text="tender equipment schedule Corr 5, test fan row")]
+    r0 = d["rooms"][0]
+    d["rooms"][0] = dict(r0, schematic=dict(supply_lps=1000.0, source="TND-1", code="D", source_text="tender schematic, test room"))
+    out = work / "d013.xlsx"
+    build_workbook(d, out)
+    rc = recalc(out, work / "rc")
+    wb = openpyxl.load_workbook(rc, data_only=True)
+    fails: List[str] = []
+    ah = wb["AHU"]
+    idx = {k: i + 1 for i, k in enumerate(AHU_KEYS)}
+    row = 7 + [a["tag"] for a in _ahus_in_order(d)].index(tag)
+    sa, tn = ah.cell(row=row, column=idx["sa_ahu"]).value, ah.cell(row=row, column=idx["sched"]).value
+    red, redp, rem = (ah.cell(row=row, column=idx[k]).value for k in ("red", "redp", "rem"))
+    if abs(tn - 3500.0) > 1e-9 or abs(red - (3500.0 - sa)) > 1e-6 or abs(redp - (3500.0 - sa) / 3500.0) > 1e-9:
+        fails.append(f"AHU reduction {tn} {sa} {red} {redp}")
+    want = f"Reduced 3,500 to {sa:,.0f} L/s"
+    if not (isinstance(rem, str) and (rem.startswith(want) or rem.startswith("VERIFY"))):
+        fails.append(f"AHU remarks {rem!r}")
+    if abs(sa - 3036.0) > 1e-6:
+        fails.append(f"tender changed the calculated AHU supply: {sa}")
+    cp = wb["Airflow Comparison"]
+    if "tender" not in str(cp.cell(row=7, column=CP_KEYS.index("remark") + 1).value).lower():
+        fails.append("room remarks on Airflow Comparison")
+    fn = wb["Fans"]
+    fr = [fn.cell(row=7, column=FAN_KEYS.index(k) + 1).value for k in ("sched", "drawn", "red", "redp", "rem")]
+    if fr[2] is None or abs(fr[2] - (fr[0] - fr[1])) > 1e-6 or not str(fr[4]).startswith(("Reduced", "VERIFY")):
+        fails.append(f"Fans reduction {fr}")
+    return dict(ahu_remarks=rem, fan_row=fr, fails=fails, errors=len(scan_errors(rc)))
+
+
+def _ahus_in_order(d: Dict[str, Any]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for r in d["rooms"]:
+        t = r.get("ahu")
+        if t and t not in [a["tag"] for a in out]:
+            out.append(dict(tag=t))
+    return out
+
+
+def occupancy_check(base: Dict[str, Any], work: Path) -> Dict[str, Any]:
+    """Default density (D-017): one room with no RDS value gets area x density rounded up, red text in the named style, and the note
+    in Remarks; a room with an RDS value of zero stays zero. The recomputation must agree with the workbook."""
+    import math
+    d = copy.deepcopy(base)
+    d["sources"].append(dict(id="OCC-T", document="ASHRAE Standard 62.1, Table 6.2.2.1", issue="test", page="Table 6.2.2.1", location="test row",
+                             text_as_read="test density", method="test", confidence="high"))
+    d["sources"].append(dict(id="RDS-T", document="RDS, test room", issue="test", page="occupancy field", location="test", text_as_read="Occupancy: n/a",
+                             method="test", confidence="high"))
+    r0, r1 = d["rooms"][0], d["rooms"][1]
+    r0.update(occupancy_people=None, occupancy_per_100m2=7.0, occupancy_basis="DENSITY DEFAULT", occupancy_use="office", remark="test room")
+    r0["prov"] = dict(r0["prov"], occupancy_density=["A", "OCC-T"])
+    r0.pop("occupancy_people", None)
+    r1.update(occupancy_people=0.0, occupancy_basis="RDS", occupancy_per_100m2=None)
+    r1["prov"] = dict(r1["prov"], occupancy_people=["D", "RDS-T"])
+    out = work / "occ.xlsx"
+    ctx = build_workbook(d, out)
+    rc = recalc(out, work / "rc")
+    wb = openpyxl.load_workbook(rc, data_only=True)
+    ri = wb["Room Information"]
+    hdr = {h: i for i, h in enumerate(c.value for c in ri[5]) if h}
+    fails: List[str] = []
+    row0 = next(r for r in ri.iter_rows(min_row=7, values_only=True) if r[0] == r0["number"])
+    row1 = next(r for r in ri.iter_rows(min_row=7, values_only=True) if r[0] == r1["number"])
+    area0 = row0[hdr["Area used"]]
+    want = math.ceil(round(area0 * 7.0 / 100.0, 9))
+    if row0[hdr["Occupancy used"]] != want:
+        fails.append(f"occupancy {row0[hdr['Occupancy used']]} expected {want} (area {area0})")
+    if row1[hdr["Occupancy used"]] != 0:
+        fails.append(f"RDS zero became {row1[hdr['Occupancy used']]}")
+    note = str(row0[hdr["Remarks"]])
+    if not note.startswith("Occupancy assumed: 7 p/100 m² x") or "To confirm." not in note:
+        fails.append(f"remarks note {note[:80]!r}")
+    wf = openpyxl.load_workbook(out)
+    cell = wf["Room Information"].cell(row=7, column=hdr["Occupancy used"] + 1)
+    from .styles import OCC_NAME, OCC_STYLE
+    if cell.style != OCC_NAME or (cell.font.color is None or cell.font.color.rgb != OCC_STYLE["font_colour"]):
+        fails.append(f"occupancy cell style {cell.style}")
+    for x in compare_recompute(d, rc):
+        if not x["ok"]:
+            fails.append(f"recomputation {x['item']}: {x['workbook']} vs {x['recomputed']}")
+    sp = style_proof(ctx, out)
+    fails += sp["problems"][:3]
+    return dict(people=row0[hdr["Occupancy used"]], expected=want, note=note, fails=fails)
+
+
 def run(work: Optional[Path] = None, report: Optional[Path] = None) -> int:
     root = Path(".").resolve()
     work = work or Path(tempfile.mkdtemp(prefix="wbself_"))
@@ -429,6 +581,21 @@ def run(work: Optional[Path] = None, report: Optional[Path] = None) -> int:
     for k in ("problems", "stray_font", "unnamed"):
         if results["style"][k]:
             fails.append(f"style proof {k}: {results['style'][k][:3]}")
+    # (4b) deliverable language: forbidden terms and internal references in every cell text
+    lang = {"reva_rebuild": language_scan(rc, root), "known_answer_dept": language_scan(krc, root)}
+    results["language"] = {k: v[:20] for k, v in lang.items()}
+    for k, v in lang.items():
+        if v:
+            fails.append(f"language scan {k}: {len(v)} hits, first {v[:3]}")
+    # (4c) tender airflow columns (D-013): a build with tender values, recalculated
+    d13 = d013_check(data, work)
+    results["d013"] = d13
+    for f_ in d13["fails"]:
+        fails.append(f"D-013 columns: {f_}")
+    occ = occupancy_check(data, work)
+    results["occupancy"] = occ
+    for f_ in occ["fails"]:
+        fails.append(f"occupancy default density: {f_}")
     # Checks status of the Rev A rebuild
     wbv = openpyxl.load_workbook(rc, data_only=True)
     chk = [(r[1], r[2], r[4]) for r in wbv["Checks"].iter_rows(min_row=7, values_only=True) if r[1] and r[4]]
@@ -462,6 +629,9 @@ def run(work: Optional[Path] = None, report: Optional[Path] = None) -> int:
     print(f"== Independent recomputation: {sum(1 for x in rec if x['ok'])} of {len(rec)} lines within {TOL_PCT} %")
     print(f"== Errors: {sum(len(v) for v in err.values())}; formulas {fs['n_formula']}; typed literals {len(fs['literals'])}; IFERROR {len(fs['iferror'])}")
     print(f"== Style proof: {results['style']['n_coded']} coded cells, {len(results['style']['problems'])} problems")
+    print(f"== Deliverable language: {sum(len(v) for v in lang.values())} hits (forbidden terms and internal references)")
+    print(f"== D-013 tender columns: {'ok' if not results['d013']['fails'] else results['d013']['fails']}; AHU remark: {results['d013']['ahu_remarks']}")
+    print(f"== Default occupancy density: {'ok' if not results['occupancy']['fails'] else results['occupancy']['fails']}; note: {results['occupancy']['note'][:110]}")
     print(f"== PDF: {pdf['pages']} pages, footer found {pdf['footer_found']}")
     print(f"== Print proof: {len(pp['problems']) + len(ppk['problems'])} problems; lowest scale {min(v['scale'] for v in pp['sheets'].values()):.2f}")
     print("SELFTEST", "PASS" if not fails else "FAIL")

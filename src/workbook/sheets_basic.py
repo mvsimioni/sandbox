@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from collections import OrderedDict
 from typing import Any, Dict, List
 
@@ -15,7 +17,7 @@ from .sheets_rooms import _prov_cells, _setup
 from .styles import CODE_STYLES, FMT, put, link_to, setup_sheet
 
 LISTS = OrderedDict([
-    ("ListAreaSource", ["AUTO", "SOA", "MEASURED", "LARGER"]),
+    ("ListAreaSource", ["AUTO", "DPA", "SOA", "MEASURED", "LARGER"]),
     ("ListSystemType", ["VAV", "CAV", "FCU", "MZ", "AHU", "PAHU", "FAN", "EXHAUST", "OTHER"]),
     ("ListRegime", ["POSITIVE", "NEGATIVE", "NEUTRAL"]),
     ("ListSeal", ["hinged", "sliding", "bed_width", "shaft"]),
@@ -27,13 +29,14 @@ LISTS = OrderedDict([
     ("ListOACond", ["TREATED", "UNTREATED"]),
 ])
 PRESSURE_METHOD = (
-    "Project method for rooms with a pressure target (Marcus's method). Envelope leakage at a pressure difference: "
-    "Q = limit × internal surface × (ΔP ÷ 50)^n, with the whole envelope leaking to the reference space (the corridor outside "
-    "the suite at 0 Pa unless the documents name another). Door gaps: Q = 0.6 × A × √(2 ΔP ÷ 1.2) × 3600. Air flows from the higher "
-    "to the lower pressure; for each space supply + air in = exhaust + air out. Offset needed: air in − air out for a negative room "
-    "(extra exhaust), air out − air in for a positive room (extra supply). Design offset = limit × surface at the reference "
-    "pressure (the top of the control valve's range). Ratio = design offset ÷ offset needed: below 1.0 fail; 1.0 to 1.2 VERIFY. "
-    "Where a document in the corpus states a value it is cited; the other values are coded S, set by the engineer.")
+    "Project method for rooms with a pressure target. Envelope leakage at a pressure difference: Q = limit × internal surface × (ΔP ÷ 50)^n. "
+    "The whole envelope leaks to the reference space. The reference space is the corridor outside the suite at 0 Pa, unless the documents name another. "
+    "Door gaps: Q = 0.6 × A × √(2 ΔP ÷ 1.2) × 3600. Air flows from the higher to the lower pressure. "
+    "For each space: supply + air in = exhaust + air out. "
+    "Offset needed for a negative room (extra exhaust) = air in − air out. Offset needed for a positive room (extra supply) = air out − air in. "
+    "Design offset = limit × surface at the reference pressure (the top of the control valve's range). "
+    "Ratio = design offset ÷ offset needed. A ratio below 1.0 is a fail. A ratio from 1.0 to 1.2 is VERIFY. "
+    "A cited document gives each stated value. The engineer sets the other values (code S).")
 
 
 def _tbl_name(ctx: Ctx, ws, name: str, col: str, r0: int, r1: int) -> None:
@@ -179,17 +182,26 @@ def write_basis(ctx: Ctx) -> None:
     r += 1
     for text in d.get("criteria_origin", ["Room criteria: the criteria table of the department's DD Booklet; theatres in the MOT NSC: the MOT specification."]) + \
             [f"Safety factor on room loads: named cell SafetyFactor. Duct leakage on AHU supply airflow: named cell DuctLeakage.",
-             "Airflow rule: both cases are calculated for every room (air changes × volume; room sensible load at the supply-to-room temperature "
-             "difference); supply is the larger, not less than exhaust and pressure require; round once, at the end.",
-             "AHU outdoor air = outdoor-air fraction of the highest-standard room on the AHU × AHU supply airflow, with duct leakage added to supply "
-             "first. The plain sum and the multiple-space value of the example are shown beside it.",
-             "Outdoor air is capped at room supply: exhaust or pressure needs beyond the supply are made up by transfer air from the adjacent "
-             "spaces, not by outdoor air. Areas are taken to 0.1 m² (named cell AreaDecimals); airflows are calculated unrounded and rounded once at the end.",
-             "Coil duty keeps the method of the Rev A AHU Summary: room condition for the outdoor-air load taken from the first space type "
-             "(here the first supply room of the AHU, in room order); the example's own basis (maximum of the sum and the multiple-space value) is shown "
-             "beside the rule-based duty. No change of method has been approved.",
-             "Rooms fixed by the MOT specification (code S on their criteria) keep their specified supply, outdoor air and exhaust; they are not resized, "
-             "and the offset needed is shown beside the specified one on Airflow and Pressure.",
+             "Airflow rule: calculate both cases for every room. Case one is air changes × volume. Case two is the room sensible load at the "
+             "supply-to-room temperature difference. Supply is the larger case, not less than exhaust and pressure require. Round once, at the end.",
+             "AHU outdoor air = outdoor-air fraction of the highest-standard room on the AHU × AHU supply airflow. Add duct leakage to the supply first. "
+             "The plain sum and the multiple-space value of the example are shown beside it.",
+             "Outdoor air is capped at room supply. Transfer air from the adjacent spaces makes up any exhaust or pressure need beyond the supply. "
+             "Areas are taken to 0.1 m² (named cell AreaDecimals). Airflows are calculated unrounded and rounded once at the end.",
+             "Coil duty keeps the method of the Rev A AHU Summary. The outdoor-air load takes the room condition of the first supply room of the AHU, in room order. "
+             "The example's own basis is shown beside the rule-based duty. That basis is the maximum of the sum and the multiple-space value. "
+             "No change of method has been approved.",
+             "Tender airflow (Equipment Schedule Corr 5, else the tender air-side schematic) is information only. It is never a target or a limit. "
+             "Reduction = tender − calculated. Reduction (%) = (tender − calculated) ÷ tender. A calculated airflow above tender is marked VERIFY.",
+             "Occupancy comes from the RDS. The default density by room use applies only where the RDS field is empty or the room has no RDS. "
+             "It is rounded up to a whole person (red text, code A).",
+             "Area used (selector AUTO, the default): the design area is the DPA designed area, else the SOA area. "
+             "It is used where no area is measured, or where the measured area agrees with it within the tolerance (named cells AreaTolPct and AreaTolM2). "
+             "The measured area is used where the two disagree. A measured area comes only from a plan room that matches the room by name, storey and grid span. "
+             "Its area must be within a factor of two of the design area. Each room where the measured area replaces the design area has its own row on Flags. "
+             "The selectors SOA, DPA, MEASURED and LARGER override this. Areas are rounded to 0.1 m².",
+             "Rooms fixed by the MOT specification (code S on their criteria) keep their specified supply, outdoor air and exhaust. They are not resized. "
+             "Airflow and Pressure show the offset needed beside the specified one.",
              PRESSURE_METHOD]:
         c = put(ws, f"B{r}", text, "TextWrap")
         ws.merge_cells(f"B{r}:G{r}")
@@ -275,40 +287,101 @@ def write_sources(ctx: Ctx) -> None:
 
 
 def build_flag_rows(ctx: Ctx) -> List[Dict[str, Any]]:
+    """Flags of the workbook. One flag for each gap of each room, door, criteria row or AHU (never one per field); no duplicates."""
     rows: List[Dict[str, Any]] = []
+    seen = set()
+
+    def add(**kw) -> None:
+        d0 = kw["desc"]
+        first = re.split(r"(?<=[.!?])\s", d0, maxsplit=1)[0]
+        if len(first.split()) > 25 and ": " in d0 and d0.startswith("Room "):
+            # a long room name makes the lead-in a long sentence: end the lead-in with a full stop
+            head, tail = d0.split(": ", 1)
+            kw["desc"] = f"{head}. {tail[:1].upper()}{tail[1:]}"
+        key = (kw["type"], kw.get("ref", ""), kw["desc"])
+        if key not in seen:
+            seen.add(key)
+            rows.append(kw)
+
     for f in ctx.data.get("flags", []):
-        rows.append(dict(type=f["type"], ref=f.get("ref", ""), desc=f["text"], status=f.get("status", "OPEN"), owner=f.get("owner", "Marcus"),
-                         src=f.get("source", ""), link=f.get("link")))
+        add(type=f["type"], ref=f.get("ref", ""), desc=f["text"], status=f.get("status", "OPEN"), owner=f.get("owner", "ACMV engineer"),
+            src=f.get("source", ""), link=f.get("link"))
+    RI, CR = ctx.lay["RI"], ctx.lay["CR"]
     for gi, r in enumerate(ctx.rooms):
         n = r["number"]
+        who = f"Room {n} {r.get('name', '')}".strip()
+        gaps = r.get("gaps") or {}
+
+        def note(cat: str) -> str:
+            return (" " + str(gaps[cat])) if gaps.get(cat) else ""
+        plan_gap = gaps.get("plan")
         if blank(r.get("ahu")):
-            rows.append(dict(type="CONFIRM", ref=n, desc=f"Room {n} {r.get('name', '')}: no AHU or system assigned (approved zoning not available).",
-                             status="OPEN", owner="Zoning", src="", link=("Room Information", ctx.lay["RI"].local("ahu", gi))))
+            if plan_gap:
+                # one cause, one flag: with no plan room, neither the AHU or system nor the measured area can be set
+                add(type="CONFIRM", ref=n, desc=f"{who}: no AHU or system is set and the measured area is blank. {plan_gap}", status="OPEN", owner="Zoning", src="",
+                    link=("Room Information", RI.local("ahu", gi)))
+            else:
+                add(type="CONFIRM", ref=n, desc=f"{who}: no AHU or system is set.{note('ahu')}", status="OPEN", owner="Zoning", src="",
+                    link=("Room Information", RI.local("ahu", gi)))
+        elif plan_gap:
+            add(type="VERIFY", ref=n, desc=f"{who}: {plan_gap}", status="OPEN", owner="Zoning", src="", link=("Room Information", RI.local("meas", gi)))
         if blank(r.get("terminal_tag")):
-            rows.append(dict(type="VERIFY", ref=n, desc=f"Room {n} {r.get('name', '')}: no document seen shows its terminal type (VAV, CAV or venturi).",
-                             status="OPEN", owner="Marcus", src="", link=("Room Information", ctx.lay["RI"].local("terminal", gi))))
+            add(type="VERIFY", ref=n, desc=f"{who}: no document shows its terminal type (VAV, CAV or venturi).{note('terminal')}",
+                status="OPEN", owner="ACMV engineer", src="", link=("Room Information", RI.local("terminal", gi)))
         c = r.get("criteria") or {}
         if not c:
-            rows.append(dict(type="CONFIRM", ref=n, desc=f"Room {n} {r.get('name', '')}: no criteria row mapped; criteria cells are blank.",
-                             status="OPEN", owner="Marcus", src="", link=("Criteria", ctx.lay["CR"].local("crit", gi))))
+            add(type="CONFIRM", ref=n, desc=f"{who}: no criteria row is set; the criteria cells are blank.{note('criteria')}",
+                status="OPEN", owner="ACMV engineer", src="", link=("Criteria", CR.local("crit", gi)))
+        elif gaps.get("criteria"):
+            add(type="VERIFY", ref=n, desc=f"{who}: criteria row {c.get('criteria_row', '')}.{note('criteria')}", status="OPEN",
+                owner="ACMV engineer", src=c.get("source", ""), link=("Criteria", CR.local("crit", gi)))
         pr = r.get("pressure")
         has_pa = any(not blank(c.get(k)) for k in ("pressure_pa_booklet", "pressure_pa_tender", "pressure_pa_working"))
         if c.get("pressure_regime") in ("POSITIVE", "NEGATIVE") and not has_pa and not pr:
-            rows.append(dict(type="VERIFY", ref=n, desc=f"Room {n} {r.get('name', '')}: pressure given as a direction only ({c['pressure_regime']}) and no "
-                                                          "value on any drawing; not calculated on Pressure, listed for Marcus.",
-                             status="OPEN", owner="Marcus", src=c.get("source", ""), link=("Criteria", ctx.lay["CR"].local("regime", gi))))
-        for k, grp in (("soa_area_m2", "soa"), ("measured_area_m2", "meas")):
-            if blank(r.get(k)) and k == "soa_area_m2":
-                rows.append(dict(type="VERIFY", ref=n, desc=f"Room {n} {r.get('name', '')}: not found in the governing SOA; area from the measured layout only.",
-                                 status="OPEN", owner="Marcus", src="", link=("Room Information", ctx.lay["RI"].local("soa", gi))))
+            add(type="VERIFY", ref=n, desc=f"{who}: pressure is a direction only ({c['pressure_regime']}) and no drawing gives a value. "
+                                           "Not calculated on Pressure.", status="OPEN", owner="ACMV engineer", src=c.get("source", ""),
+                link=("Criteria", CR.local("regime", gi)))
+        if gaps.get("door"):
+            add(type="VERIFY", ref=n, desc=f"{who}: {gaps['door']}", status="OPEN", owner="ACMV engineer", src=c.get("source", ""),
+                link=("Criteria", CR.local("regime", gi)))
+        if blank(r.get("soa_area_m2")) and blank(r.get("dpa_area_m2")):
+            add(type="VERIFY", ref=n, desc=(f"{who}: no area in the DPA or the SOA. The measured area is used.{note('area')}" if not blank(r.get("measured_area_m2"))
+                                           else f"{who}: no area in the DPA, the SOA or a plan room; the area is 0 m² and every airflow that depends on it is 0.{note('area')}"),
+                status="OPEN", owner="ACMV engineer", src="", link=("Room Information", RI.local("soa", gi)))
+        elif gaps.get("area"):
+            add(type="VERIFY", ref=n, desc=f"{who}: {gaps['area']}", status="OPEN", owner="ACMV engineer", src="",
+                link=("Room Information", RI.local("meas", gi)))
+        base_a = r.get("dpa_area_m2") if not blank(r.get("dpa_area_m2")) and r.get("dpa_area_m2") > 0 else r.get("soa_area_m2")
+        if gaps.get("area_diff"):
+            add(type="VERIFY", ref=n, desc=f"{who}: {gaps['area_diff']}", status="OPEN", owner="ACMV engineer", src="",
+                link=("Room Information", RI.local("meas", gi)))
+        elif (not blank(r.get("measured_area_m2")) and not blank(base_a) and base_a > 0 and r.get("area_selector") in (None, "", "AUTO")
+              and abs(base_a - r["measured_area_m2"]) > max(ctx.constants["AreaTolM2"]["value"], ctx.constants["AreaTolPct"]["value"] * base_a)):
+            add(type="VERIFY", ref=n, desc=(f"{who}: the measured area {r['measured_area_m2']:.1f} m² differs from the design area {base_a:.1f} m² "
+                                           f"({(r['measured_area_m2'] - base_a) / base_a * 100:+.0f} %), outside the tolerance. The area used is the measured area "
+                                           "(selector AUTO). Confirm which area is right."), status="OPEN", owner="ACMV engineer", src="",
+                link=("Room Information", RI.local("meas", gi)))
+        if gaps.get("occupancy_note"):
+            add(type="VERIFY", ref=n, desc=f"{who}: {gaps['occupancy_note']}", status="OPEN", owner="ACMV engineer", src="",
+                link=("Room Information", RI.local("pfix", gi)))
         if blank(r.get("ceiling_height_m")):
-            rows.append(dict(type="CONFIRM", ref=n, desc=f"Room {n} {r.get('name', '')}: ceiling height not found; volume and air-change airflow are zero until given.",
-                             status="OPEN", owner="Marcus", src="", link=("Room Information", ctx.lay["RI"].local("h", gi))))
+            add(type="CONFIRM", ref=n, desc=f"{who}: ceiling height is not set. Volume and air-change airflow are zero until it is given.{note('height')}",
+                status="OPEN", owner="ACMV engineer", src="", link=("Room Information", RI.local("h", gi)))
+        if gaps.get("occupancy"):
+            add(type="VERIFY", ref=n, desc=f"{who}: {gaps['occupancy']}", status="OPEN", owner="ACMV engineer", src="",
+                link=("Room Information", RI.local("pfix", gi)))
+    for a in ctx.ahus:
+        if blank(a.get("sched_supply_lps")):
+            add(type="VERIFY", ref=a["tag"], desc=f"AHU {a['tag']}: no tender airflow is set (no equipment schedule row and no tender schematic figure).",
+                status="OPEN", owner="ACMV engineer", src="", link=("AHU", ctx.lay["AH"].local("sched", ctx.ahus.index(a))))
     # one flag per design constant or table row, and one per room (or per room and sheet) for the room-level inputs
     grouped: Dict[Any, List[Dict[str, Any]]] = {}
     for a in ctx.assumptions:
         if a["sheet"] == "Pressure" and a["label"].startswith("door "):
             grouped.setdefault((a["sheet"], a["label"].split()[1], a["room"]), []).append(a)
+            continue
+        if a["sheet"] == "Criteria":
+            grouped.setdefault(("Criteria", a.get("src", "")), []).append(a)
             continue
         if a["sheet"] in ("Room Information", "Envelope") and a.get("room"):
             grouped.setdefault((a["sheet"], a["room"]), []).append(a)
@@ -319,7 +392,7 @@ def build_flag_rows(ctx: Ctx) -> List[Dict[str, Any]]:
         else:
             desc = f"{a['label']} = {a['value']}: assumed, to confirm."
             typ = "ASSUMPTION"
-        rows.append(dict(type=typ, ref=f"{a['sheet']}!{a['cell']}", desc=desc, status="OPEN", owner="Marcus", src=a.get("src", ""),
+        rows.append(dict(type=typ, ref=f"{a['sheet']}!{a['cell']}", desc=desc, status="OPEN", owner="ACMV engineer", src=a.get("src", ""),
                          link=(a["sheet"], a["cell"])))
     door_fields = {"kind": "type", "seal": "seal type", "gap_cm2": "gap area (cm²)", "leaf_w_m": "leaf width (m)", "leaf_h_m": "leaf height (m)",
                    "fixed_flow_m3h": "fixed transfer (m³/h)"}
@@ -329,13 +402,18 @@ def build_flag_rows(ctx: Ctx) -> List[Dict[str, Any]]:
             parts = [f"{door_fields[a['label'].split()[2]]} {str(a['value']).replace('_', ' ')}" for a in items if a["label"].split()[2] in door_fields]
             what = "; ".join(parts) if parts else "door row entered without a measured or scheduled value"
             rows.append(dict(type="ASSUMPTION", ref=f"Pressure!{door}", desc=f"Door {door} (room {room}): assumed inputs, to confirm: {what}.",
-                             status="OPEN", owner="Marcus", src=items[0].get("src", ""), link=("Pressure", items[0]["cell"])))
+                             status="OPEN", owner="ACMV engineer", src=items[0].get("src", ""), link=("Pressure", items[0]["cell"])))
+            continue
+        if key[0] == "Criteria":
+            rooms_n = len({a["room"] for a in items})
+            rows.append(dict(type="ASSUMPTION", ref=f"Criteria!{key[1]}", desc=f"Criteria assumed for {rooms_n} room(s) from source {key[1]}: to confirm.",
+                             status="OPEN", owner="ACMV engineer", src=key[1], link=("Criteria", items[0]["cell"])))
             continue
         sheet, room = key
         what = ", ".join(f"{a['label'].replace('room ', '')} {a['value']}" for a in items)
         who = f"Envelope segment {room}" if sheet == "Envelope" else f"Room {room}"
         rows.append(dict(type="ASSUMPTION", ref=f"{sheet}!{room}", desc=f"{who}: assumed inputs, to confirm: {what}.",
-                         status="OPEN", owner="Marcus", src=items[0].get("src", ""), link=(sheet, items[0]["cell"])))
+                         status="OPEN", owner="ACMV engineer", src=items[0].get("src", ""), link=(sheet, items[0]["cell"])))
     return rows
 
 
@@ -391,20 +469,20 @@ def write_flags(ctx: Ctx, rows: List[Dict[str, Any]]) -> None:
                f'&TEXT({pick("frac")},"0.0%")&" on "&TEXT({pick("supply")},"0")&" L/s of supply sets the AHU fraction. AHU supply "&TEXT({sb},"0")&" to "'
                f'&TEXT({sa},"0")&" L/s, outdoor air "&TEXT({before},"0")&" to "&TEXT({after},"0")&" L/s, coil duty "&TEXT({cb},"0.0")&" to "'
                f'&TEXT({ca},"0.0")&" kW. "&IF(INDEX({FC.rng("oasrc")},{fm})="not set","FCU outdoor-air source not set: choose it from the zoning",'
-               f'"FCU outdoor air from "&INDEX({FC.rng("oasrc")},{fm})&" ("&INDEX({FC.rng("oaby")},{fm})&", "&INDEX({FC.rng("oacond")},{fm})&"); source capacity "&INDEX({FC.rng("cap")},{fm}))&". Proposal in zoning_change_proposals.csv; '
-               f'after Marcus approves, update the zone schedule and the zoning PDF and carry the FCU into Task 4."')
+               f'"FCU outdoor air from "&INDEX({FC.rng("oasrc")},{fm})&" ("&INDEX({FC.rng("oaby")},{fm})&", "&INDEX({FC.rng("oacond")},{fm})&"); source capacity "&INDEX({FC.rng("cap")},{fm}))&". The change proposal is in the zoning change proposals file; '
+               f'after the engineer approves the change, update the zone schedule and the zoning drawing, and add the FCU to the system schedule."')
         lst = (f'"Outdoor-air rule: room "&{pick("no")}&" ("&{pick("name")}&") sets the outdoor-air fraction of "&{ahu}&" with "'
                f'&TEXT({pick("frac")},"0.0%")&" on a small share of the supply, but its criteria (air class, filtration, pressure, or fixed by '
-               f'specification) may not be met by an FCU: not separated, listed for Marcus."')
+               f'specification) may not be met by an FCU: not separated, listed for review."')
         put(ws, g("desc"), f'=IF({used},IF({pick("status")}="SEPARATE",{sep},{lst}),"")', "TextWrap")
         put(ws, g("status"), f'=IF({used},"OPEN","")', "Text")
-        put(ws, g("owner"), f'=IF({used},"Marcus","")', "Text")
+        put(ws, g("owner"), f'=IF({used},"ACMV engineer","")', "Text")
         put(ws, g("src"), None, "Tag")
         put(ws, g("note"), None, "Note")
     r = L.last + 2
     put(ws, f"A{r}", "Live", "Tag")
     put(ws, f"D{r}", (f'="Outdoor-air rule: "&COUNTIF({AF.rng("status")},"SEPARATE")&" room(s) proposed for separation onto an FCU; "'
-                      f'&COUNTIF({AF.rng("status")},"LIST FOR MARCUS")&" clinical room(s) listed for Marcus (see Airflow, last columns and the FCU tab)."'),
+                      f'&COUNTIF({AF.rng("status")},"LIST FOR REVIEW")&" clinical room(s) listed for review (see Airflow, last columns and the FCU tab)."'),
         "Calc").alignment = Alignment(horizontal="left")
     _setup(ws, ctx, L, L.idx["note"], r, "4:6", f"B{L.first}", "FFC00000")
 
@@ -419,7 +497,6 @@ def write_checks(ctx: Ctx) -> None:
              ("status", "Status", "", 10), ("note", "Note", "", 60)]
     write_headers(ws, L, heads, 4, {"no": "RECONCILIATION"})
     nr = len(ctx.rooms)
-    soa_sum = f"SUM({RI.rng('soa')})"
     err_ranges = []
     for st in ctx.storeys:
         E = ctx.eng_layouts[st]
@@ -464,9 +541,9 @@ def write_checks(ctx: Ctx) -> None:
     unresolved = "+".join(src_terms) if src_terms else "0"
     pa = ctx.lay["PS"]
     checks = [
-        ("Total area used against the SOA or DPA total, within the tolerance", f"=SUM({RI.rng('area')})", f"={soa_sum}",
-         '=IF(ABS(C{r}-D{r})<=MAX(AreaTolM2,AreaTolPct*D{r}),"PASS","VERIFY")', "m²"),
-        ("Rooms whose SOA and measured areas disagree beyond tolerance", f'=COUNTIF({RI.rng("agree")},"NO")', 0, '=IF(C{r}=0,"PASS","VERIFY")', "list on Room Information"),
+        ("Total area used against the total design area (DPA, else SOA), within the tolerance", f"=SUM({RI.rng('area')})", f"=SUM({RI.rng('base')})",
+         '=IF(ABS(C{r}-D{r})<=MAX(AreaTolM2,AreaTolPct*D{r}),"PASS","VERIFY")', "m²; the difference comes from the rooms listed on Flags"),
+        ("Rooms whose design area (DPA, else SOA) and measured area disagree beyond tolerance", f'=COUNTIF({RI.rng("agree")},"NO")', 0, '=IF(C{r}=0,"PASS","VERIFY")', "list on Room Information"),
         ("Rooms whose final supply is below either airflow case or the pressure minimum", f'=COUNTIF({AF.rng("ok")},"FAIL")', 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
         ("Rooms whose outdoor air is below the air-change minimum", f"=SUMPRODUCT(--({AF.rng('oa')}<{AF.rng('oa_air')}))", 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
         ("Rooms whose outdoor air exceeds their supply", f"=SUMPRODUCT(--({AF.rng('oa')}>{AF.rng('supply')}))", 0, '=IF(C{r}=0,"PASS","FAIL")', "outdoor air is capped at supply; transfer air makes up the rest"),
@@ -478,18 +555,20 @@ def write_checks(ctx: Ctx) -> None:
         ("Pressure-controlled rooms with a ratio from 1.0 to 1.2 (VERIFY)", f'=COUNTIF({PS.rng("status")},"VERIFY")', 0, '=IF(C{r}=0,"PASS","VERIFY")', ""),
         ("Free-pressure spaces whose balance does not close", f'=COUNTIF({PS.rng("status")},"UNSOLVED")', 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
         ("Suites with a ratio below 1.0", f'=COUNTIF({PU.rng("status")},"FAIL")', 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
-        ("Known-answer pressure cases that miss their expected value", f'=COUNTIF({ctx.ka_status_range},"FAIL")', 0, '=IF(C{r}=0,"PASS","FAIL")', "Section 8.3, to 0.2 m³/h"),
+        ("Known-answer pressure cases that miss their expected value", f'=COUNTIF({ctx.ka_status_range},"FAIL")', 0, '=IF(C{r}=0,"PASS","FAIL")', "to 0.2 m³/h"),
         ("Room flow balances that do not close", f'=COUNTIF({FB.rng("status")},"FAIL")', 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
         ("AHU balances that do not close", f'=COUNTIF({FB2.rng("status")},"FAIL")' if ctx.ahus else "=0", 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
-        ("AHU supply of rooms equals the Airflow total (no room with supply lacks an AHU)", f"=SUM({AH.rng('sa_room')})", f"=SUM({AF.rng('supply')})",
-         '=IF(ABS(C{r}-D{r})<=BalTolLps,"PASS","FAIL")', "L/s"),
+        ("AHU room supply equals the Airflow total of the rooms that have an AHU", f"=SUM({AH.rng('sa_room')})",
+         f"=SUMPRODUCT(--ISTEXT({AF.rng('ahu')}),{AF.rng('supply')})", '=IF(ABS(C{r}-D{r})<=BalTolLps,"PASS","FAIL")', "L/s"),
+        ("Room supply of rooms that have no AHU", f"=SUMPRODUCT(--NOT(ISTEXT({AF.rng('ahu')})),{AF.rng('supply')})", 0,
+         '=IF(C{r}<=BalTolLps,"PASS","VERIFY")', "L/s; the rooms are listed on Flags"),
         ("Formula errors in the calculation tabs", f"={err}", 0, '=IF(C{r}=0,"PASS","FAIL")', "error values are never masked"),
         ("Source IDs that do not resolve on Sources", f"={unresolved}", 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
         ("Rooms with a blank AHU, area or ceiling height", f'=SUMPRODUCT(({RI.rng("no")}<>"")*(({RI.rng("ahu")}="")+({RI.rng("area")}=0)+({RI.rng("h")}="")>0))', 0,
          '=IF(C{r}=0,"PASS","VERIFY")', "listed on Flags"),
         ("Rooms with no criteria row", f'=SUMPRODUCT(({CR.rng("no")}<>"")*({CR.rng("crit")}=""))', 0, '=IF(C{r}=0,"PASS","VERIFY")', "listed on Flags"),
         ("Rooms separated by the outdoor-air rule", f'=COUNTIF({AF.rng("status")},"SEPARATE")', "information", '="INFO"', "see FCU"),
-        ("Clinical rooms listed for Marcus under the outdoor-air rule", f'=COUNTIF({AF.rng("status")},"LIST FOR MARCUS")', "information", '="INFO"', ""),
+        ("Clinical rooms listed for review under the outdoor-air rule", f'=COUNTIF({AF.rng("status")},"LIST FOR REVIEW")', "information", '="INFO"', ""),
         ("Rooms the rule would still separate after four rounds", f"=SUM({AF.rng('trg4')})-SUM({AF.rng('lst4')})", 0, '=IF(C{r}<=0,"PASS","FAIL")', "rounds converged"),
         ("AHUs whose scheduled supply is below the calculated AHU supply", f'=SUMPRODUCT(({AH.rng("sched")}<>"")*({AH.rng("sched")}<{AH.rng("sa_ahu")}))', 0,
          '=IF(C{r}=0,"PASS","VERIFY")', ""),
@@ -501,7 +580,7 @@ def write_checks(ctx: Ctx) -> None:
         put(ws, f"A{r}", i + 1, "Text", "d0")
         put(ws, f"B{r}", desc, "Text")
         put(ws, f"C{r}", val, "Calc", "d1" if i == 0 else "d0")
-        put(ws, f"D{r}", lim if isinstance(lim, str) and lim.startswith("=") else lim, "Calc", "d1" if (i == 0 or desc.startswith("AHU supply of rooms")) else "d0")
+        put(ws, f"D{r}", lim if isinstance(lim, str) and lim.startswith("=") else lim, "Calc", "d1" if (i == 0 or desc.startswith("AHU room supply")) else "d0")
         if isinstance(lim, str) and not lim.startswith("="):
             ws[f"D{r}"].alignment = Alignment(horizontal="right")
         put(ws, f"E{r}", st.replace("{r}", str(r)), "Check")
@@ -532,8 +611,8 @@ def write_readme(ctx: Ctx) -> None:
     r = 4
     put(ws, f"B{r}", "Purpose and scope", "Section")
     r += 1
-    put(ws, f"B{r}", d.get("purpose", "Independent calculation of room loads, supply and outdoor airflow, pressure offsets and AHU totals for the "
-                                      "department, on the NDH / Rev A engine, with every input traced to a source."), "TextWrap")
+    put(ws, f"B{r}", d.get("purpose", "This workbook calculates room loads, supply and outdoor airflow, pressure offsets and AHU totals for the "
+                                      "department. It uses the NDH / Rev A engine. Every input has a source."), "TextWrap")
     ws.merge_cells(f"B{r}:H{r}")
     ws.row_dimensions[r].height = 42
     r += 2
@@ -573,7 +652,7 @@ def write_readme(ctx: Ctx) -> None:
         sample = put(ws, f"D{r}", 123.4 if code not in ("K",) else "PASS", style, "d1")
         put(ws, f"E{r}", appearance[code], "Text")
         r += 1
-    put(ws, f"B{r}", "Notes are grey italic at 8 pt. Red is kept for failed checks and links to another file (none).", "Note")
+    put(ws, f"B{r}", "Notes are grey italic at 8 pt. A failed check is bold on light red. Red text on light yellow (style Assumption-Occupancy, code A) is an occupancy taken from the default density, because the RDS gives no value. The Remarks column of Room Information states the note.", "Note")
     r += 2
     put(ws, f"B{r}", "Tab map", "Section")
     r += 1
@@ -587,8 +666,8 @@ def write_readme(ctx: Ctx) -> None:
              ("AHU", "Airflow totalisation, outdoor air, coil duty"), ("FCU", "Rooms on fan coil units, including separated rooms"),
              ("Fans", "Return, exhaust and outdoor-air fan duties"), ("VAV", "Terminals: maximum, minimum, turndown"),
              ("Venturi Valves", "Valve ranges from Pressure"), ("Flow Balance", "Air in against air out"),
-             ("Airflow Comparison", "Calculated airflows against schematics and references"), ("Checks", "Live reconciliations"),
-             ("Sources", "Source register"), ("Flags", "Assumptions and open items")]
+             ("Airflow Comparison", "Calculated airflows against the tender airflows, room by room and AHU by AHU"), ("Checks", "Live reconciliations"),
+             ("Sources", "One row per source ID"), ("Flags", "Assumptions and open items")]
     for name, desc in tabs:
         c = put(ws, f"B{r}", name, "Text")
         link_to(c, name, "A1")

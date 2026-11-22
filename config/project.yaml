@@ -200,6 +200,7 @@ occupancy:
       classroom_training: 35
       computer_lab: 25
       laboratory: 25
+      process_area: 7      # light industrial (ASHRAE 62.1 Table 6.2.2.1); decontamination, washing, inspection and packing rooms of the CSSD; fix 2, VERIFY
       pharmacy_prep: 10
       retail_sales: 15
       kitchen_cooking: 20
