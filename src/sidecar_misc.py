@@ -12,7 +12,11 @@ extension of one source file and writes, under the output directory:
   ``email`` package; MSG files with ``extract-msg`` when it is installed and
   otherwise with a small ``olefile`` property reader.  The MSG attachment list
   always comes from the OLE directory, so the attachment payload is never
-  loaded.
+  loaded.  The extension is corrected by the file's signature bytes (a ``.eml``
+  with the OLE signature is parsed as an MSG), a single-part message that is
+  nothing but an attachment is listed as one, an unknown body charset falls back
+  to utf-8/cp1252 with a warning, and a file with no headers or binary content
+  fails the "parses as a mail message" check.
 * ``.jpg`` / ``.jpeg`` / ``.png`` / ``.heic`` (photos): ``image.json`` with the
   pixel size, EXIF date, camera and GPS fields when present (GPS is kept but
   flagged as personal data so the Markdown writer excludes it), the file
@@ -73,7 +77,7 @@ except ModuleNotFoundError:  # run as a plain script from inside src/
     from state import Progress  # type: ignore[no-redef]
 
 MODULE_NAME = "sidecar_misc"
-MODULE_VERSION = "1.0.0"
+MODULE_VERSION = "1.1.0"
 
 MANIFEST_NAME = "sidecar_manifest.json"
 MESSAGE_NAME = "message.json"
@@ -282,21 +286,73 @@ def _part_size(part: email.message.Message) -> Tuple[Optional[int], str]:
     return len(raw), f"decoded {encoding or '7bit'} length"
 
 
-def _eml_attachment(index: int, part: email.message.Message) -> Dict[str, Any]:
+def _is_top_level_attachment(msg: email.message.Message) -> bool:
+    """True for a non-multipart message whose single part is itself an attachment (``iter_attachments`` skips it)."""
+    if msg.is_multipart():
+        return False
+    try:
+        if msg.is_attachment():
+            return True
+    except Exception:  # noqa: BLE001 - defective Content-Disposition header
+        pass
+    return msg.get_content_maintype() not in ("text", "message")
+
+
+def iter_eml_attachments(msg: email.message.Message) -> Iterable[email.message.Message]:
+    """Attachment parts of a message, including a single-part message that is nothing but an attachment."""
+    if _is_top_level_attachment(msg):
+        yield msg
+        return
+    yield from msg.iter_attachments()
+
+
+def _eml_attachment(index: int, part: email.message.Message, whole_message: bool = False) -> Dict[str, Any]:
     """One attachment row from an EML part (listed, never opened)."""
     name = part.get_filename()
     content_type = part.get_content_type()
     size, method = _part_size(part)
     disposition = (part.get_content_disposition() or "").lower() or None
+    note: Optional[str] = None
+    if whole_message:
+        note = "single-part message: the whole message is this attachment; no body text"
+    elif content_type == "message/rfc822":
+        note = "embedded message; not opened; its own attachments are not enumerated"
     return {
         "index": index, "name": name, "size_bytes": size, "size_method": method,
         "content_type": content_type, "disposition": disposition, "content_id": _header(part, "Content-ID") or None,
-        "is_zip": is_zip_attachment(name, content_type), "opened": False,
+        "is_zip": is_zip_attachment(name, content_type), "opened": False, "note": note,
     }
 
 
-def _eml_body(msg: email.message.Message) -> Tuple[str, str]:
-    """``(body text, source)`` preferring text/plain, then HTML with its tags stripped."""
+def decode_body_bytes(raw: bytes, declared: Optional[str], warnings: List[str]) -> str:
+    """Decode a body whose content manager failed: the declared charset when Python knows it, else utf-8, else cp1252.
+
+    Never raises: an unknown charset (``iso-8859-8-i``, ``x-mac-roman``, ``unknown-8bit``
+    all occur in real mail) ends in cp1252 with replacement characters and a warning.
+    """
+    attempts: List[Tuple[str, str]] = [("utf-8", "strict"), ("cp1252", "replace")]
+    if declared:
+        attempts.insert(0, (declared, "replace"))
+    unknown = False
+    for codec, errors in attempts:
+        try:
+            text = raw.decode(codec, errors=errors)
+        except LookupError:
+            unknown = True
+            continue
+        except UnicodeDecodeError:
+            continue
+        if declared and codec.lower() != declared.lower():
+            cause = "is unknown to Python" if unknown else "did not decode cleanly"
+            warnings.append(f"body charset {declared!r} {cause}; decoded as {codec} with replacement characters")
+        elif not declared:
+            warnings.append(f"body has no declared charset; decoded as {codec}")
+        return text
+    return raw.decode("latin-1")
+
+
+def _eml_body(msg: email.message.Message, warnings: List[str]) -> Tuple[str, str]:
+    """``(body text, source)`` preferring text/plain, then HTML with its tags stripped; decoding never raises."""
     for preference, label in (("plain", "text/plain"), ("html", "text/html (tags stripped)")):
         try:
             part = msg.get_body(preferencelist=(preference,))
@@ -307,37 +363,123 @@ def _eml_body(msg: email.message.Message) -> Tuple[str, str]:
         try:
             content = part.get_content()
         except Exception:  # noqa: BLE001 - unknown charset or broken encoding
-            raw = part.get_payload(decode=True) or b""
-            content = raw.decode(part.get_content_charset() or "utf-8", errors="replace")
+            try:
+                raw = part.get_payload(decode=True) or b""
+            except Exception:  # noqa: BLE001 - undecodable transfer encoding
+                raw = str(part.get_payload(decode=False) or "").encode("utf-8", errors="replace")
+            content = decode_body_bytes(raw, part.get_content_charset(), warnings)
         if not isinstance(content, str):
             continue
         return (content if preference == "plain" else html_to_text(content)), label
     return "", "none"
 
 
+def binary_ratio(text: str) -> float:
+    """Share of replacement (U+FFFD) and non-printing control characters in a text (0.0 for an empty text)."""
+    if not text:
+        return 0.0
+    bad = sum(1 for ch in text if ch == "�" or (ord(ch) < 32 and ch not in "\t\r\n") or ord(ch) == 127)
+    return bad / len(text)
+
+
+def sniff_container(path: Path) -> Optional[str]:
+    """Container type suggested by the file's first bytes (``ole``, ``zip``, ``pdf``, ``png``, ``jpeg``) or ``None``."""
+    with path.open("rb") as handle:
+        head = handle.read(len(OLE_MAGIC))
+    for magic, name in _CONTAINER_SIGNATURES:
+        if head.startswith(magic):
+            return name
+    return None
+
+
+def _has_nul_in_head(path: Path) -> bool:
+    """True when the first few KiB hold a NUL byte (RFC 822 text never does)."""
+    with path.open("rb") as handle:
+        return b"\x00" in handle.read(_SNIFF_BYTES)
+
+
 def parse_eml(path: Path) -> Dict[str, Any]:
-    """Headers, body text and attachment list of an EML file via the standard library."""
+    """Headers, body text and attachment list of an EML file via the standard library.
+
+    Content that is not an RFC 822 message (no header at all, NUL bytes, a body
+    of replacement characters) is recorded in ``warnings`` so the checks and the
+    grade can see it; parsing itself never raises on odd charsets.
+    """
+    warnings: List[str] = []
     with path.open("rb") as handle:
         msg = email.message_from_binary_file(handle, policy=email.policy.default)
-    body, body_source = _eml_body(msg)
-    attachments = [_eml_attachment(i, part) for i, part in enumerate(msg.iter_attachments(), start=1)]
+    body, body_source = _eml_body(msg, warnings)
+    whole = _is_top_level_attachment(msg)
+    attachments = [_eml_attachment(i, part, whole_message=whole)
+                   for i, part in enumerate(iter_eml_attachments(msg), start=1)]
+    if whole and not body:
+        body_source = ATTACHMENT_ONLY_SOURCE
     raw_date = _header(msg, "Date")
-    return {
-        "format": "eml", "parser": "email (standard library)",
-        "headers": {
-            "from": _header(msg, "From"), "to": _header(msg, "To"), "cc": _header(msg, "Cc"),
-            "date": raw_date, "date_iso": _iso_date(raw_date), "subject": _header(msg, "Subject"),
-            "message_id": _header(msg, "Message-ID"), "in_reply_to": _header(msg, "In-Reply-To") or None,
-        },
-        "body_text": body, "body_source": body_source, "attachments": attachments, "warnings": [],
+    headers = {
+        "from": _header(msg, "From"), "to": _header(msg, "To"), "cc": _header(msg, "Cc"),
+        "date": raw_date, "date_iso": _iso_date(raw_date), "subject": _header(msg, "Subject"),
+        "message_id": _header(msg, "Message-ID"), "in_reply_to": _header(msg, "In-Reply-To") or None,
     }
+    sanity: List[str] = []
+    if not any(headers[k] for k in HEADER_SANITY_KEYS):
+        sanity.append("no From/To/Subject/Date/Message-ID header found; the file may not be an RFC 822 message")
+    if _has_nul_in_head(path):
+        sanity.append("NUL bytes in the first 4 KiB; the file is binary, not an RFC 822 message")
+    ratio = binary_ratio(body)
+    if ratio > _BINARY_BODY_RATIO:
+        sanity.append(f"body text looks binary ({ratio:.0%} replacement or control characters)")
+    return {
+        "format": "eml", "parser": "email (standard library)", "headers": headers,
+        "body_text": body, "body_source": body_source, "attachments": attachments,
+        "warnings": warnings + sanity, "sanity": sanity,
+    }
+
+
+def parse_email(path: Path) -> Dict[str, Any]:
+    """Parse a mail file by extension, corrected by its signature bytes.
+
+    A ``.eml`` that starts with the OLE compound-file signature is an Outlook MSG
+    saved under the wrong name and goes to the MSG parser (falling back to the
+    RFC 822 parser, with the failure recorded, when it is not a readable MSG);
+    a ``.msg`` without that signature that reads as RFC 822 text with headers is
+    parsed as EML.  Every rerouting leaves a warning behind.
+    """
+    container = sniff_container(path)
+    if path.suffix.lower() != ".eml":
+        try:
+            return parse_msg(path)
+        except Exception as exc:  # noqa: BLE001 - maybe RFC 822 text named .msg
+            if container is not None:
+                raise
+            result = parse_eml(path)
+            if not any(result["headers"][k] for k in HEADER_SANITY_KEYS):
+                raise exc
+            result["warnings"].insert(0, f".msg file is not an OLE compound file ({type(exc).__name__}); "
+                                         "parsed as RFC 822 text")
+            return result
+    prefix: List[str] = []
+    if container == "ole":
+        try:
+            result = parse_msg(path)
+        except Exception as exc:  # noqa: BLE001 - OLE signature but not a readable MSG
+            prefix.append("OLE compound-file signature in a .eml, but MSG parsing failed "
+                          f"({type(exc).__name__}: {str(exc)[:120]}); parsed as RFC 822 text")
+        else:
+            result["warnings"].insert(0, ".eml file carries the OLE compound-file signature; parsed as an Outlook MSG")
+            return result
+    elif container is not None:
+        prefix.append(f"{container} signature at the start of a .eml; not an RFC 822 message")
+    result = parse_eml(path)
+    result["warnings"] = prefix + result["warnings"]
+    result["sanity"] = prefix + result["sanity"]
+    return result
 
 
 def count_eml_attachment_parts(path: Path) -> int:
     """Independent recount of attachment parts (for the manifest check)."""
     with path.open("rb") as handle:
         msg = email.message_from_binary_file(handle, policy=email.policy.default)
-    return sum(1 for _ in msg.iter_attachments())
+    return sum(1 for _ in iter_eml_attachments(msg))
 
 
 # --------------------------------------------------------------------------- #
@@ -619,6 +761,7 @@ def message_record(parsed: Dict[str, Any], path: Path, sha256: str) -> Dict[str,
         "zip_attachments": [a["name"] for a in zips],
         "attachments_opened": False,
         "attachments": attachments, "warnings": parsed["warnings"],
+        "parse_sanity": list(parsed.get("sanity") or []),
     }
 
 
@@ -645,21 +788,29 @@ def _email_checks(path: Path, record: Dict[str, Any], out_dir: Path, files: Sequ
     rows = record["attachments"]
     zip_names = [a for a in rows if (a["name"] or "").lower().endswith(".zip")]
     extra = sorted(p.name for p in out_dir.iterdir() if p.is_file() and p.name not in files and not p.name.startswith("."))
+    sanity = record.get("parse_sanity") or []
+    headers_present = [k for k in HEADER_SANITY_KEYS if record["headers"].get(k)]
+    attachment_only = record["body"]["source"] == ATTACHMENT_ONLY_SOURCE and bool(rows)
+    body_evidence = f"{record['body']['chars']} chars from {record['body']['source']}"
+    if attachment_only:
+        body_evidence = "attachment-only message (no body part)"
     return [
+        {"check": "file parses as a mail message (headers present, no binary content)", "pass": not sanity,
+         "evidence": (f"headers: {', '.join(headers_present)}" if not sanity else "; ".join(sanity))},
         {"check": "attachment rows equal attachment parts in the file", "pass": len(rows) == recount,
          "evidence": f"{len(rows)} rows, {recount} parts"},
         {"check": "every .zip attachment is flagged", "pass": all(a["is_zip"] for a in zip_names),
          "evidence": f"{sum(1 for a in zip_names if a['is_zip'])} of {len(zip_names)} flagged"},
         {"check": "no attachment extracted (only the sidecar files are in the output directory)", "pass": not extra,
          "evidence": "no extra files" if not extra else f"extra files: {', '.join(extra)}"},
-        {"check": "body text present", "pass": record["body"]["chars"] > 0,
-         "evidence": f"{record['body']['chars']} chars from {record['body']['source']}"},
+        {"check": "body text present (or attachment-only message)", "pass": record["body"]["chars"] > 0 or attachment_only,
+         "evidence": body_evidence},
     ]
 
 
 def run_email(path: Path, out_dir: Path, sha256: str) -> Tuple[List[str], Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
     """Write ``message.json`` and ``body.md``; return ``(files, counts, checks, extra manifest fields)``."""
-    parsed = parse_eml(path) if path.suffix.lower() == ".eml" else parse_msg(path)
+    parsed = parse_email(path)
     record = message_record(parsed, path, sha256)
     atomic_write_json(out_dir / MESSAGE_NAME, record)
     atomic_write_text(out_dir / BODY_NAME, body_markdown(record, parsed["body_text"]))

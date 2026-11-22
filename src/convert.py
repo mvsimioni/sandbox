@@ -14,12 +14,19 @@
 5. appends the result to ``state/convert_ledger.jsonl`` and updates
    ``state/progress.json``.
 
-Hash-identical duplicates (the same sha256 as an earlier ledger row) get a
-short Markdown pointing to the first copy and are recorded as duplicates.
-Zips are never opened: they are recorded once as skipped.  Files run in a
-multiprocessing pool of ``cpu_count() - 1`` workers with a per-file timeout
-(900 s by default).  The run is resumable: a sha256 already in the convert
-ledger with the same ``pipeline_version`` is skipped unless ``--force``.
+Hash-identical duplicates get a short Markdown pointing to the copy that was
+converted in full and are recorded as duplicates.  The copy converted in
+full is the first one in ledger order among the files of this run, or a copy
+an earlier run already converted; a duplicate whose first copy is outside the
+selection (a department-wise run) is converted in full itself, so a stub never
+points at a Markdown file that does not exist.  Zips are never opened: they
+are recorded once as skipped.  Files run in up to ``cpu_count() - 1`` worker
+processes, one short-lived process per file, with a per-file timeout (900 s
+by default); a worker that dies (segfault, OOM kill) is noticed at once and
+recorded as such, and a file that overruns the hard deadline is killed on its
+own without disturbing the other files in flight.  The run is resumable: a
+sha256 already in the convert ledger with the same ``pipeline_version`` is
+skipped unless ``--force``.
 The Markdown path mirrors the source tree under ``out/markdown`` with the
 extension replaced by ``.md`` (the original extension is kept before ``.md``
 only when two names in one folder would otherwise collide).  Nothing under
@@ -30,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import multiprocessing
+import multiprocessing.connection
 import os
 import signal
 import sys
@@ -78,15 +86,20 @@ except ModuleNotFoundError:  # run as a plain script from inside src/
     )
     from state import Progress, file_lock  # type: ignore[no-redef]
 
-PIPELINE_VERSION = "1.0.0"
+PIPELINE_VERSION = "1.1.0"
+"""1.1.0: numeric recall tolerates float repr noise; duplicates resolve against converted copies; per-file workers."""
 LEDGER_NAME = "convert_ledger.jsonl"
 LEDGER_FILES: Tuple[str, ...] = ("pull_ledger.jsonl", "upload_ledger.jsonl")
 DEFAULT_TIMEOUT_S = 900
 HARD_TIMEOUT_GRACE_S = 60
-"""Extra seconds the parent waits beyond the worker's own alarm before it terminates the pool."""
+"""Extra seconds the parent waits beyond the worker's own alarm before it kills that worker."""
 POLL_INTERVAL_S = 0.2
 POOL_CONTEXT = "forkserver"
 """Workers start from a clean server process: no fork of a possibly multi-threaded parent."""
+JOIN_TIMEOUT_S = 5
+FAILURE_TIMEOUT = "timeout"
+FAILURE_WORKER_DIED = "worker died"
+FAILURE_NO_RESULT = "no result"
 ROOT_CHOICES: Tuple[str, ...] = ("Basis", "Template", "DD Sign-OFF")
 STATUS_CONVERTED = "converted"
 STATUS_DUPLICATE = "duplicate"
@@ -251,15 +264,32 @@ def is_done(row: Optional[Dict[str, Any]], layout: Layout) -> bool:
     return not md_path or (layout.root / str(md_path)).is_file()
 
 
+def converted_by_sha(done: Dict[str, Dict[str, Any]], layout: Layout) -> Dict[str, str]:
+    """``sha256 -> rel_path`` of the first full conversion per hash that still counts as done.
+
+    Only rows with status ``converted`` (not stubs) at this pipeline version
+    whose Markdown exists qualify: a duplicate stub may only point at them.
+    """
+    canonical: Dict[str, str] = {}
+    for row in done.values():
+        if row.get("status") == STATUS_CONVERTED and is_done(row, layout):
+            canonical.setdefault(str(row["sha256"]), str(row["rel_path"]))
+    return canonical
+
+
 def plan_tasks(rows: Sequence[Dict[str, Any]], layout: Layout, args: argparse.Namespace) -> Tuple[List[Task], List[Dict[str, Any]]]:
     """Turn ledger rows into worker tasks; return ``(tasks, rows recorded without a worker)``.
 
     Zips are recorded as skipped (once) and never opened; rows already done
-    for this pipeline version are left out unless ``--force``.
+    for this pipeline version are left out unless ``--force``.  A file is a
+    duplicate only when a copy with the same sha256 is converted in full by
+    this run (earlier in ledger order) or was converted in full by an earlier
+    run and its Markdown is present; otherwise it is converted in full itself,
+    so a filtered run never writes a stub that points at a missing file.
     """
-    canonical = first_by_sha(rows)
     collisions = colliding_stems(rows)
     done = load_convert_rows(layout.ledger_path())
+    canonical = converted_by_sha(done, layout)
     threshold = recall_check.threshold_from_config()
     tasks: List[Task] = []
     recorded: List[Dict[str, Any]] = []
@@ -274,8 +304,10 @@ def plan_tasks(rows: Sequence[Dict[str, Any]], layout: Layout, args: argparse.Na
             continue
         if not args.force and is_done(done.get(key), layout):
             continue
-        first = canonical[sha]
-        duplicate_of = str(first["rel_path"]) if str(first["rel_path"]) != rel else None
+        first_rel = canonical.get(sha)
+        duplicate_of = first_rel if first_rel is not None and first_rel != rel else None
+        if duplicate_of is None:
+            canonical[sha] = rel
         tasks.append(Task(
             sha256=sha, rel_path=rel, local_path=str(local_file(row, layout)), bytes=int(row.get("bytes") or 0),
             drive_id=row.get("drive_id"), drive_modified=row.get("drive_modified"),
@@ -283,7 +315,7 @@ def plan_tasks(rows: Sequence[Dict[str, Any]], layout: Layout, args: argparse.Na
             md_rel=md_rel_path(rel, collisions), root=str(layout.root), markdown_dir=str(layout.markdown),
             sidecar_dir=str(layout.sidecar / rel), state_dir=str(layout.state), timeout_s=int(args.timeout),
             force=bool(args.force), threshold=threshold, duplicate_of=duplicate_of,
-            duplicate_md=md_rel_path(str(first["rel_path"]), collisions) if duplicate_of else None,
+            duplicate_md=md_rel_path(duplicate_of, collisions) if duplicate_of else None,
             scratch_dir=args.scratch,
         ))
         if args.limit and len(tasks) >= args.limit:
@@ -445,20 +477,115 @@ def convert_task(task_dict: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# Pool with a per-file deadline
+# Workers: one short-lived process per file, with a per-file deadline
 # --------------------------------------------------------------------------- #
 def default_workers() -> int:
     """``cpu_count() - 1`` with a floor of one."""
     return max(1, (os.cpu_count() or 2) - 1)
 
 
+@dataclass
+class Running:
+    """One worker process in flight."""
+
+    task: Task
+    process: Any
+    conn: Any
+    started: float
+
+    def elapsed(self) -> float:
+        """Seconds since the process was started."""
+        return time.monotonic() - self.started
+
+
+def _run_in_worker(func: Any, task_dict: Dict[str, Any], conn: Any) -> None:
+    """Child entry point: run ``func`` on the task and send its row back; any escape becomes an error row."""
+    try:
+        row = func(task_dict)
+    except BaseException as exc:  # noqa: BLE001 - the parent must always get a row
+        row = _result(str(task_dict["sha256"]), str(task_dict["rel_path"]), STATUS_ERROR, kind=task_dict.get("kind"),
+                      doc_class=task_dict.get("doc_class"), error=f"{type(exc).__name__}: {str(exc)[:300]}")
+    try:
+        conn.send(row)
+    finally:
+        conn.close()
+
+
+def start_worker(context: Any, task: Task) -> Running:
+    """Start one short-lived process for ``task`` (``convert_task`` is looked up at call time)."""
+    parent_conn, child_conn = context.Pipe(duplex=False)
+    process = context.Process(target=_run_in_worker, args=(convert_task, asdict(task), child_conn), daemon=True)
+    process.start()
+    child_conn.close()
+    return Running(task=task, process=process, conn=parent_conn, started=time.monotonic())
+
+
+def _failure_row(running: Running, failure: str, error: str, **extra: Any) -> Dict[str, Any]:
+    """An error row for a worker that returned nothing."""
+    task = running.task
+    return _result(task.sha256, task.rel_path, STATUS_ERROR, kind=task.kind, doc_class=task.doc_class, error=error,
+                   failure=failure, seconds=round(running.elapsed(), 3), **extra)
+
+
+def _receive(running: Running) -> Optional[Dict[str, Any]]:
+    """The row the worker sent, or ``None`` when nothing is waiting in the pipe."""
+    try:
+        if not running.conn.poll():
+            return None
+        row = running.conn.recv()
+    except (EOFError, OSError):
+        return None
+    running.process.join(JOIN_TIMEOUT_S)
+    if isinstance(row, dict):
+        return row
+    return _failure_row(running, FAILURE_NO_RESULT, "worker returned no result row")
+
+
+def _stop(running: Running) -> None:
+    """Kill a worker and reap it."""
+    if running.process.is_alive():
+        running.process.kill()
+    running.process.join(JOIN_TIMEOUT_S)
+    running.conn.close()
+
+
+def collect(running: Running) -> Optional[Dict[str, Any]]:
+    """The ledger row of a finished worker, or ``None`` while it still runs.
+
+    A row the worker sent wins.  A worker that ended without sending one died
+    (segfault, OOM kill, ``os._exit``) and is recorded as such at once, with
+    its exit code; a worker still alive beyond its timeout plus the grace is
+    killed and recorded as a hard timeout.  Neither touches the other workers.
+    """
+    row = _receive(running)
+    if row is not None:
+        return row
+    code = running.process.exitcode
+    if code is not None:
+        row = _receive(running)  # the row may have landed between the poll and the exit
+        if row is not None:
+            return row
+        running.process.join(JOIN_TIMEOUT_S)
+        running.conn.close()
+        return _failure_row(running, FAILURE_WORKER_DIED, exit_code=code,
+                            error=f"worker process died with exit code {code} after {running.elapsed():.1f} s, before "
+                                  f"the per-file timeout of {running.task.timeout_s} s; no result was returned")
+    if running.elapsed() > running.task.timeout_s + HARD_TIMEOUT_GRACE_S:
+        _stop(running)
+        return _failure_row(running, FAILURE_TIMEOUT,
+                            error=f"hard timeout after {running.task.timeout_s + HARD_TIMEOUT_GRACE_S} s; worker killed")
+    return None
+
+
 def run_tasks(tasks: Sequence[Task], workers: int) -> Iterator[Dict[str, Any]]:
     """Yield one ledger row per task, in completion order.
 
-    With one worker the files run inline.  Otherwise a pool keeps ``workers``
-    files in flight; when a worker's own alarm fails to end a file within the
-    grace period the pool is terminated, the file is recorded as timed out,
-    and a fresh pool takes the remaining files.
+    With one worker the files run inline.  Otherwise up to ``workers`` files
+    are in flight, each in its own short-lived process (a clean ``forkserver``
+    child, so a crash or a leak in a C extension stays with its file).  A
+    worker that dies is noticed as soon as its pipe closes; a file whose own
+    alarm did not end it within the grace period is killed alone.  The other
+    files in flight carry on in both cases.
     """
     pending: Deque[Task] = deque(tasks)
     if workers <= 1:
@@ -466,35 +593,27 @@ def run_tasks(tasks: Sequence[Task], workers: int) -> Iterator[Dict[str, Any]]:
             yield convert_task(asdict(pending.popleft()))
         return
     context = multiprocessing.get_context(POOL_CONTEXT)
-    pool = context.Pool(processes=workers, maxtasksperchild=1)
-    in_flight: Dict[str, Tuple[Task, Any, float]] = {}
+    running: List[Running] = []
     try:
-        while pending or in_flight:
-            while pending and len(in_flight) < workers:
-                task = pending.popleft()
-                in_flight[task.sha256 + task.rel_path] = (task, pool.apply_async(convert_task, (asdict(task),)), time.monotonic())
-            finished = [key for key, (_t, result, _s) in in_flight.items() if result.ready()]
-            for key in finished:
-                task, result, _started = in_flight.pop(key)
-                yield result.get()
-            late = [key for key, (t, _r, started) in in_flight.items()
-                    if time.monotonic() - started > t.timeout_s + HARD_TIMEOUT_GRACE_S]
-            if late:
-                key = late[0]
-                task, _result_obj, _started = in_flight.pop(key)
-                yield _result(task.sha256, task.rel_path, STATUS_ERROR, kind=task.kind, doc_class=task.doc_class,
-                              error=f"hard timeout after {task.timeout_s + HARD_TIMEOUT_GRACE_S} s; pool restarted")
-                pending.extendleft(t for t, _r, _s in reversed(list(in_flight.values())))
-                in_flight.clear()
-                pool.terminate()
-                pool.join()
-                pool = context.Pool(processes=workers, maxtasksperchild=1)
-                continue
-            if not finished:
-                time.sleep(POLL_INTERVAL_S)
+        while pending or running:
+            while pending and len(running) < workers:
+                running.append(start_worker(context, pending.popleft()))
+            still_running: List[Running] = []
+            finished = 0
+            for item in running:
+                row = collect(item)
+                if row is None:
+                    still_running.append(item)
+                else:
+                    finished += 1
+                    yield row
+            running = still_running
+            if not finished and running:
+                multiprocessing.connection.wait([r.process.sentinel for r in running] + [r.conn for r in running],
+                                                timeout=POLL_INTERVAL_S)
     finally:
-        pool.terminate()
-        pool.join()
+        for item in running:
+            _stop(item)
 
 
 # --------------------------------------------------------------------------- #
@@ -546,7 +665,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--only-class", default=None, help="only this document class (e.g. RDS)")
     run.add_argument("--limit", type=int, default=None, help="stop after N files")
     run.add_argument("--force", action="store_true", help="reconvert files already in the convert ledger")
-    run.add_argument("--workers", type=int, default=None, help="pool size (default: cpu_count() - 1)")
+    run.add_argument("--workers", type=int, default=None, help="files in flight at once (default: cpu_count() - 1)")
     run.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S, help="per-file timeout in seconds (default 900)")
     run.add_argument("--scratch", default=None, help="scratch parent for .xls conversion copies")
     run.add_argument("--no-progress", action="store_true", help="do not touch progress.json")

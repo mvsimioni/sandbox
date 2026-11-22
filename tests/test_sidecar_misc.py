@@ -441,3 +441,91 @@ def test_cli_failures(fixtures: Dict[str, Any], tmp_path: Path, monkeypatch: pyt
     (tmp_path / "locked").mkdir()
     assert sm.main(["run", "--path", str(fixtures["png"]), "--out", str(tmp_path / "locked" / "x"), "--no-progress"]) == 1
     assert not (tmp_path / "locked" / "x").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Review fixes: unknown charset (I-01), single-part attachment (I-02), non-mail bytes (I-03)
+# --------------------------------------------------------------------------- #
+def test_unknown_body_charset_falls_back_with_warning(tmp_path: Path) -> None:
+    """A charset Python lacks never aborts the run: cp1252 fallback, warning recorded, numbers kept."""
+    raw = (b"From: a@example.com\r\nSubject: odd charset\r\nContent-Type: text/plain; charset=\"iso-8859-8-i\"\r\n"
+           b"Content-Transfer-Encoding: 8bit\r\n\r\nbody 45 Pa \xe9\r\n")
+    path = tmp_path / "charset.eml"
+    path.write_bytes(raw)
+    out = tmp_path / "out"
+    assert sm.main(["run", "--path", str(path), "--out", str(out), "--state-dir", str(tmp_path), "--no-progress"]) == 0
+    record = _json(out / "message.json")
+    assert record["body"]["numeric_tokens"] == 1 and record["body"]["source"] == "text/plain"
+    assert any("iso-8859-8-i" in w and "cp1252" in w for w in record["warnings"]), record["warnings"]
+    assert record["parse_sanity"] == []
+    assert "body 45 Pa" in (out / "body.md").read_text(encoding="utf-8")
+    manifest = _json(out / "sidecar_manifest.json")
+    assert all(c["pass"] for c in manifest["checks"]), manifest["checks"]
+    warnings: list = []
+    assert sm.decode_body_bytes(b"caf\xc3\xa9", None, warnings) == "café" and warnings
+    assert sm.decode_body_bytes(b"\xe9", "x-mac-roman", []) == "é"
+
+
+def test_single_part_attachment_only_message(tmp_path: Path) -> None:
+    """A non-multipart mail whose only part is a zip attachment lists it, flags it and does not open it."""
+    msg = EmailMessage()
+    msg["From"] = "a@example.com"
+    msg["Subject"] = "bare zip"
+    msg.set_content(_zip_bytes(), maintype="application", subtype="zip", filename="bare.zip")
+    path = tmp_path / "bare.eml"
+    path.write_bytes(msg.as_bytes())
+    manifest = sm.run_one(path, tmp_path / "out", tmp_path)
+    record = _json(tmp_path / "out" / "message.json")
+    assert record["attachment_count"] == 1 and record["zip_attachments"] == ["bare.zip"]
+    row = record["attachments"][0]
+    assert row["is_zip"] is True and row["opened"] is False and row["disposition"] == "attachment"
+    assert row["size_bytes"] == len(_zip_bytes()) and "single-part message" in row["note"]
+    assert record["body"]["chars"] == 0 and record["body"]["source"] == sm.ATTACHMENT_ONLY_SOURCE
+    assert sm.count_eml_attachment_parts(path) == 1
+    assert all(c["pass"] for c in manifest["checks"]), manifest["checks"]
+    assert ZIP_MEMBER_TEXT.decode() not in (tmp_path / "out" / "body.md").read_text(encoding="utf-8")
+    assert sorted(p.name for p in (tmp_path / "out").iterdir()) == ["body.md", "message.json", "sidecar_manifest.json"]
+
+
+def test_non_mail_bytes_in_eml_fail_the_parse_check(tmp_path: Path) -> None:
+    """OLE magic plus garbage named .eml: the MSG parser is tried, the fallback records why, and the check fails."""
+    path = tmp_path / "really_a_msg.eml"
+    path.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + bytes(range(256)) * 8)
+    assert sm.sniff_container(path) == "ole"
+    out = tmp_path / "out"
+    assert sm.main(["run", "--path", str(path), "--out", str(out), "--state-dir", str(tmp_path), "--no-progress"]) == 0
+    record = _json(out / "message.json")
+    manifest = _json(out / "sidecar_manifest.json")
+    assert not any(record["headers"][k] for k in sm.HEADER_SANITY_KEYS)
+    assert record["parse_sanity"] and all(s in manifest["warnings"] for s in record["parse_sanity"])
+    assert any("OLE compound-file signature" in w for w in manifest["warnings"])
+    assert any("NUL bytes" in w for w in manifest["warnings"])
+    failed = [c["check"] for c in manifest["checks"] if not c["pass"]]
+    assert failed == ["file parses as a mail message (headers present, no binary content)"]
+    assert sm.binary_ratio("") == 0.0 and sm.binary_ratio("ab�\x00") == 0.5
+
+
+def test_msg_named_eml_is_parsed_as_msg(fixtures: Dict[str, Any], tmp_path: Path) -> None:
+    """A real Outlook MSG saved with a .eml name is routed to the MSG parser by its signature, with a warning."""
+    source = _require_msg(fixtures)
+    renamed = tmp_path / "forwarded.eml"
+    renamed.write_bytes(source.read_bytes())
+    manifest = sm.run_one(renamed, tmp_path / "out", tmp_path)
+    record = _json(tmp_path / "out" / "message.json")
+    assert record["format"] == "msg" and record["attachments"][0]["is_zip"] is True
+    assert manifest["methods_used"][-1] == "olefile"
+    assert any("OLE compound-file signature" in w and "Outlook MSG" in w for w in manifest["warnings"])
+    assert all(c["pass"] for c in manifest["checks"]), manifest["checks"]
+
+
+def test_rfc822_text_named_msg_is_parsed_as_eml(tmp_path: Path) -> None:
+    """RFC 822 text with headers under a .msg name is parsed as EML; bytes with no headers still fail."""
+    path = tmp_path / "text.msg"
+    path.write_bytes(b"From: a@example.com\r\nSubject: s\r\n\r\nhello 12 Pa\r\n")
+    parsed = sm.parse_email(path)
+    assert parsed["format"] == "eml" and parsed["headers"]["subject"] == "s"
+    assert any("not an OLE compound file" in w for w in parsed["warnings"])
+    bad = tmp_path / "bad.msg"
+    bad.write_bytes(b"not an ole file")
+    with pytest.raises(Exception):
+        sm.parse_email(bad)

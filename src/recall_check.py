@@ -8,6 +8,13 @@ final Markdown, computes
   (PDF words), the shapes (PPTX), the cells (workbooks) or the body text
   (e-mail) that appear in the Markdown body, after normalising thousands
   separators, a leading ``+`` and trailing zeros (``1,200.0`` == ``1200``);
+  a cached float that MarkItDown printed at a shorter precision still counts
+  as found when the printed form is the full value rounded at
+  :data:`DISPLAY_PLACES` or more decimal places (trailing zeros trimmed, as
+  pandas prints a workbook) within :data:`ROUNDING_TOLERANCE`, or lies within
+  :data:`RELATIVE_TOLERANCE` of it (``113.30000000000001`` is found as
+  ``113.3``, ``0.3074074074074074`` as ``0.307407``, ``0.2858695652173913``
+  as ``0.28587``; the sidecar CSV keeps the full value);
 * **table count**: tables in the sidecar versus Markdown tables under the
   writer's ``### Tables`` sections;
 * **annotation count**: annotations or comments in the sidecar versus rows in
@@ -33,7 +40,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 try:  # package import (python -m src.recall_check, tests)
     from src import sidecar_misc, sidecar_pdf, sidecar_pptx, sidecar_xlsx
@@ -48,12 +55,20 @@ except ModuleNotFoundError:  # run as a plain script from inside src/
 CHECKS_NAME = "checks.json"
 DEFAULT_THRESHOLD = 0.995
 MAX_MISSES_LISTED = 50
+RELATIVE_TOLERANCE = 1e-6
+"""Two numbers this close (relative to the larger magnitude) are the same number: float repr noise."""
+DISPLAY_PLACES = 6
+"""Decimal places pandas prints a float with (``display.precision``); a rounding at fewer places is a gap."""
+ROUNDING_TOLERANCE = 5e-4
+"""Largest relative error a :data:`DISPLAY_PLACES` rounding may carry (about four significant digits kept)."""
 KINDS: Tuple[str, ...] = ("pdf", "pptx", "xlsx", "email", "image", "other")
 GRADES: Tuple[str, ...] = ("A", "B", "C", "pending")
 
 SECTION_MARK_RE = re.compile(r"^<!-- section: ([a-z-]+) -->\s*$")
 FRONT_MATTER_RE = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)
 TABLE_SEPARATOR_RE = re.compile(r"^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
+NORMALISED_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
+"""The shape of a :func:`normalise_number` result."""
 
 SECTION_TABLES = "tables"
 SECTION_ANNOTATIONS = "annotations"
@@ -120,6 +135,80 @@ def word_key(word: str) -> str:
 def word_keys(text: str) -> Set[str]:
     """Set of :func:`word_key` values for every whitespace-separated word of ``text``."""
     return {key for key in (word_key(w) for w in str(text).split()) if key}
+
+
+def is_number_key(key: str) -> bool:
+    """True when ``key`` is a normalised number (the form :func:`normalise_number` returns)."""
+    return bool(NORMALISED_NUMBER_RE.fullmatch(key))
+
+
+def decimals_of(key: str) -> int:
+    """Digits after the decimal point of a normalised number (``113.3`` -> 1, ``2`` -> 0)."""
+    return len(key.split(".", 1)[1]) if "." in key else 0
+
+
+def relative_difference(a: float, b: float) -> float:
+    """``|a - b|`` relative to the larger magnitude (0 when both are zero)."""
+    scale = max(abs(a), abs(b))
+    return abs(a - b) / scale if scale else 0.0
+
+
+def numbers_equivalent(expected: str, candidate: str) -> bool:
+    """True when ``candidate`` is ``expected`` printed at a shorter precision, not a different number.
+
+    Either the two values lie within :data:`RELATIVE_TOLERANCE` of each other
+    (``113.30000000000001`` versus ``113.3``: float repr noise), or
+    ``candidate`` is ``expected`` rounded at :data:`DISPLAY_PLACES` or more
+    decimal places, trailing zeros trimmed, within :data:`ROUNDING_TOLERANCE`
+    (``0.3074074074074074`` versus ``0.307407`` and ``0.2858695652173913``
+    versus ``0.28587``: pandas' six-place display of a workbook).  A rounding
+    at fewer places (``0.3`` for ``0.3074``) or one that loses the value
+    (``0`` for ``0.0000004``) is a different number: a thermal load printed at
+    one place is a real gap.
+    """
+    if expected == candidate:
+        return True
+    if not (is_number_key(expected) and is_number_key(candidate)):
+        return False
+    try:
+        e_value, c_value = float(expected), float(candidate)
+    except ValueError:
+        return False
+    if relative_difference(e_value, c_value) <= RELATIVE_TOLERANCE:
+        return True
+    if decimals_of(candidate) >= decimals_of(expected) or relative_difference(e_value, c_value) > ROUNDING_TOLERANCE:
+        return False
+    return any(normalise_number(f"{e_value:.{places}f}") == candidate
+               for places in range(DISPLAY_PLACES, decimals_of(expected)))
+
+
+def rounded_forms(expected: str) -> Iterator[str]:
+    """The normalised forms of ``expected`` printed with fewer decimals, longest first (no duplicates)."""
+    if not is_number_key(expected) or "." not in expected:
+        return
+    try:
+        value = float(expected)
+    except ValueError:
+        return
+    seen: Set[str] = set()
+    for places in range(decimals_of(expected) - 1, -1, -1):
+        form = normalise_number(f"{value:.{places}f}")
+        if form is not None and form not in seen:
+            seen.add(form)
+            yield form
+
+
+def find_match(expected: str, found: Set[str]) -> Optional[str]:
+    """The key in ``found`` that stands for ``expected``: the key itself, else an equivalent shorter print.
+
+    Returns ``None`` when nothing in ``found`` is the same number (or word).
+    """
+    if expected in found:
+        return expected
+    for form in rounded_forms(expected):
+        if form in found and numbers_equivalent(expected, form):
+            return form
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -294,10 +383,14 @@ def native_layer(kind: str, sidecar_dir: Path) -> Tuple[bool, str]:
 # Checks and grade
 # --------------------------------------------------------------------------- #
 def recall(expected: Set[str], found: Set[str]) -> Tuple[float, List[str]]:
-    """``(share of expected tokens present in found, sorted misses)``; an empty expectation is recall 1."""
+    """``(share of expected tokens present in found, sorted misses)``; an empty expectation is recall 1.
+
+    A token is present when it is in ``found`` or when ``found`` holds an
+    equivalent shorter print of it (see :func:`find_match`).
+    """
     if not expected:
         return 1.0, []
-    misses = sorted(expected - found, key=lambda t: (len(t), t))
+    misses = sorted((t for t in expected if find_match(t, found) is None), key=lambda t: (len(t), t))
     return (len(expected) - len(misses)) / len(expected), misses
 
 

@@ -115,7 +115,6 @@ def test_zip_flag_by_type_by_name_and_unnamed_part(tmp_path: Path) -> None:
     assert sorted(p.name for p in (tmp_path / "out").iterdir()) == ["body.md", "message.json", "sidecar_manifest.json"]
 
 
-@pytest.mark.xfail(strict=True, reason="I-01: an unknown charset raises LookupError out of _eml_body and the run exits 1")
 def test_unknown_charset_body_does_not_abort_run(tmp_path: Path) -> None:
     """A body declared in a charset Python lacks (common: iso-8859-8-i) must be recorded, not abort the run."""
     raw = (b"From: a@example.com\r\nSubject: odd charset\r\nContent-Type: text/plain; charset=\"iso-8859-8-i\"\r\n"
@@ -127,7 +126,6 @@ def test_unknown_charset_body_does_not_abort_run(tmp_path: Path) -> None:
     assert "45" in (tmp_path / "out" / "body.md").read_text(encoding="utf-8")
 
 
-@pytest.mark.xfail(strict=True, reason="I-02: a single-part attachment-only mail lists no attachment, so its zip is never flagged")
 def test_single_part_zip_attachment_is_listed_and_flagged(tmp_path: Path) -> None:
     """A non-multipart message whose only part is a zip with Content-Disposition: attachment."""
     msg = EmailMessage()
@@ -142,7 +140,6 @@ def test_single_part_zip_attachment_is_listed_and_flagged(tmp_path: Path) -> Non
     assert record["attachment_count"] == 1 and record["zip_attachments"] == ["bare.zip"]
 
 
-@pytest.mark.xfail(strict=True, reason="I-03: non-mail bytes in a .eml give empty headers and a garbage body, yet no warning and every check passes")
 def test_ole_bytes_in_eml_are_reported(tmp_path: Path) -> None:
     """An Outlook MSG mis-named .eml (OLE magic) must leave a warning or a failed check behind."""
     path = tmp_path / "really_a_msg.eml"

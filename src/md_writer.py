@@ -381,8 +381,20 @@ def _rows_for_unit(rows: Sequence[Dict[str, Any]], unit_key: Any) -> List[Dict[s
 # Missing-word logic shared by the unit builders
 # --------------------------------------------------------------------------- #
 def missing_keys(sidecar_text: str, markitdown_keys: set) -> set:
-    """Word keys of ``sidecar_text`` that are absent from the MarkItDown text."""
-    return {key for key in recall_check.word_keys(sidecar_text) if key not in markitdown_keys}
+    """Word keys of ``sidecar_text`` that are absent from the MarkItDown text.
+
+    A number is present when the MarkItDown text holds it or an equivalent
+    shorter print of it (``113.30000000000001`` as ``113.3``, see
+    :func:`recall_check.find_match`), so float repr noise is not a gap.
+    """
+    return {key for key in recall_check.word_keys(sidecar_text)
+            if recall_check.find_match(key, markitdown_keys) is None}
+
+
+def word_missing(word: str, markitdown_keys: set) -> bool:
+    """True when one word of the native layer (with a usable key) is absent from the MarkItDown text."""
+    key = recall_check.word_key(word)
+    return bool(key) and recall_check.find_match(key, markitdown_keys) is None
 
 
 def markitdown_block(text: str, failed: Optional[str]) -> str:
@@ -413,7 +425,7 @@ def _pdf_native_lines(page: Dict[str, Any], words: List[Dict[str, Any]], blocks:
         return [f"No native text layer on this page ({page.get('image_count', 0)} image(s), coverage "
                 f"{page.get('image_coverage_pct', 0)} %, vector paths {page.get('vector_path_count', 0)}; "
                 "a vision pass is needed)."], 0
-    missing = [w for w in words if recall_check.word_key(w["text"]) and recall_check.word_key(w["text"]) not in md_keys]
+    missing = [w for w in words if word_missing(w["text"], md_keys)]
     lines: List[str] = []
     if page.get("is_drawing_page"):
         lines.append(f"Drawing page: every text block with its page-view box and rotation; "
