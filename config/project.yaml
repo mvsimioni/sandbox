@@ -135,3 +135,16 @@ department_scope:
 final_verification:
   verifier: fable
   fixers: [sonnet, opus]
+
+# D-011 (Marcus, 22 Nov 2026): App D units recalculated from area; default for circulation/corridor/lobby spaces
+# without a booklet row = modal booklet circulation row (ASSUMPTION, to confirm).
+circulation_default_criteria:
+  pressure: neutral
+  min_oa_ach: 2
+  min_total_ach: 6
+  air_class: 2
+  filter: MERV 15
+  rh_max_pct: 60
+  temp_c: [23, 25]
+  source: "modal of 45 corridor/circulation/lobby rows in out/registers/criteria.csv"
+  status: ASSUMPTION
