@@ -346,7 +346,7 @@ def build_flag_rows(ctx: Ctx) -> List[Dict[str, Any]]:
                 link=("Criteria", CR.local("regime", gi)))
         if blank(r.get("soa_area_m2")) and blank(r.get("dpa_area_m2")):
             add(type="VERIFY", ref=n, desc=(f"{who}: no area in the DPA or the SOA. The measured area is used.{note('area')}" if not blank(r.get("measured_area_m2"))
-                                           else f"{who}: no area in the DPA, the SOA or a plan room; the area is 0 m² and every airflow that depends on it is 0.{note('area')}"),
+                                           else f"{who}: no area in the DPA, the SOA or a plan room. The area is 0 m², so every airflow that depends on it is 0.{note('area')}"),
                 status="OPEN", owner="ACMV engineer", src="", link=("Room Information", RI.local("soa", gi)))
         elif gaps.get("area"):
             add(type="VERIFY", ref=n, desc=f"{who}: {gaps['area']}", status="OPEN", owner="ACMV engineer", src="",
@@ -361,6 +361,9 @@ def build_flag_rows(ctx: Ctx) -> List[Dict[str, Any]]:
                                            f"({(r['measured_area_m2'] - base_a) / base_a * 100:+.0f} %), outside the tolerance. The area used is the measured area "
                                            "(selector AUTO). Confirm which area is right."), status="OPEN", owner="ACMV engineer", src="",
                 link=("Room Information", RI.local("meas", gi)))
+        if gaps.get("rds_code"):
+            add(type="VERIFY", ref=n, desc=f"{who}: {gaps['rds_code']}", status="OPEN", owner="ACMV engineer", src="",
+                link=("Room Information", RI.local("pfix", gi)))
         if gaps.get("occupancy_note"):
             add(type="VERIFY", ref=n, desc=f"{who}: {gaps['occupancy_note']}", status="OPEN", owner="ACMV engineer", src="",
                 link=("Room Information", RI.local("pfix", gi)))
@@ -469,11 +472,11 @@ def write_flags(ctx: Ctx, rows: List[Dict[str, Any]]) -> None:
                f'&TEXT({pick("frac")},"0.0%")&" on "&TEXT({pick("supply")},"0")&" L/s of supply sets the AHU fraction. AHU supply "&TEXT({sb},"0")&" to "'
                f'&TEXT({sa},"0")&" L/s, outdoor air "&TEXT({before},"0")&" to "&TEXT({after},"0")&" L/s, coil duty "&TEXT({cb},"0.0")&" to "'
                f'&TEXT({ca},"0.0")&" kW. "&IF(INDEX({FC.rng("oasrc")},{fm})="not set","FCU outdoor-air source not set: choose it from the zoning",'
-               f'"FCU outdoor air from "&INDEX({FC.rng("oasrc")},{fm})&" ("&INDEX({FC.rng("oaby")},{fm})&", "&INDEX({FC.rng("oacond")},{fm})&"); source capacity "&INDEX({FC.rng("cap")},{fm}))&". The change proposal is in the zoning change proposals file; '
-               f'after the engineer approves the change, update the zone schedule and the zoning drawing, and add the FCU to the system schedule."')
+               f'"FCU outdoor air from "&INDEX({FC.rng("oasrc")},{fm})&" ("&INDEX({FC.rng("oaby")},{fm})&", "&INDEX({FC.rng("oacond")},{fm})&"); source capacity "&INDEX({FC.rng("cap")},{fm}))&". The change proposal is in the zoning change proposals file. '
+               f'After the engineer approves the change, update the zone schedule and the zoning drawing. Add the FCU to the system schedule."')
         lst = (f'"Outdoor-air rule: room "&{pick("no")}&" ("&{pick("name")}&") sets the outdoor-air fraction of "&{ahu}&" with "'
-               f'&TEXT({pick("frac")},"0.0%")&" on a small share of the supply, but its criteria (air class, filtration, pressure, or fixed by '
-               f'specification) may not be met by an FCU: not separated, listed for review."')
+               f'&TEXT({pick("frac")},"0.0%")&" on a small share of the supply. Its criteria (air class, filtration, pressure, or fixed by '
+               f'specification) may not be met by an FCU. It is not separated. It is listed for review."')
         put(ws, g("desc"), f'=IF({used},IF({pick("status")}="SEPARATE",{sep},{lst}),"")', "TextWrap")
         put(ws, g("status"), f'=IF({used},"OPEN","")', "Text")
         put(ws, g("owner"), f'=IF({used},"ACMV engineer","")', "Text")

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from . import conf
-from .assemble import (REG, _expand_abbreviations, _f, _norm, _read, _tag_candidates, _tender_for_tag, criteria_from_row, match_criteria, room_use)
+from .assemble import (REG, _expand_abbreviations, _f, _norm, _read, _tag_candidates, _tender_for_tag, criteria_from_row, criteria_text, match_criteria, room_use)
 from .build import build_workbook
 from .reva import build_reva_input
 
@@ -74,12 +74,12 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
         return sid
 
     add_src("ASM-DEFAULT", document="Workbook defaults", issue="", page="", location="space type UNCLASSIFIED",
-            text_as_read="design room condition of the Rev A design basis (24 °C, 52.6 kJ/kg) applied where no space type is set", method="assumption, to confirm", confidence="low")
+            text_as_read="design room condition of the Rev A design basis (24 °C, 52.6 kJ/kg) applied where no space type is set", method="Assumption, to confirm", confidence="low")
     add_src("ASM-ACTIVITY", document="Workbook defaults", issue="", page="", location="activity of occupants",
-            text_as_read="activity Seated (Rev A table) applied where occupancy is assumed", method="assumption, to confirm", confidence="low")
+            text_as_read="activity Seated (Rev A table) applied where occupancy is assumed", method="Assumption, to confirm", confidence="low")
     add_src("OCC-DENSITY", document="ASHRAE Standard 62.1, Table 6.2.2.1: default occupant density", issue="edition to confirm (health-care rows: 62.1-2007)",
             page="Table 6.2.2.1", location="persons per 100 m² by occupancy category", text_as_read="default densities per 100 m², as listed in the project design basis",
-            method="project design basis", confidence="medium")
+            method="Value taken from the project design basis", confidence="medium")
     csid = add_src("CIRC-DEFAULT", document="Project design basis: default criteria for circulation, corridor and lobby spaces", issue="22 Nov 2026",
                    page="circulation default", location="DD Booklet criteria tables",
                    text_as_read="most frequent row of the corridor, circulation and lobby rows of the DD Booklet criteria tables (45 rows)",
@@ -117,7 +117,7 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
             if row is not None:
                 sid = add_src(f"CRIT-ALL-{_norm(row['room_type_as_printed'])}"[:60], document=Path(row["source_file"]).name,
                               issue=f"{row.get('department_label', 'booklet')} and other booklets", page=f"page {row['booklet_page']}",
-                              location=row.get("bbox", ""), text_as_read=(row.get("raw_cells") or "")[:300],
+                              location=row.get("bbox", ""), text_as_read=criteria_text(row),
                               method="most frequent row of this room type in the booklet criteria tables", confidence=str(row.get("confidence", "")))
                 c = criteria_from_row(row, sid, how, code="A",
                                       remark=f"No booklet covers the common areas. Room type '{row['room_type_as_printed']}' is printed in the booklets; "
@@ -147,14 +147,14 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
         sid = add_src(f"APPD-{st}-{s['annotation_index']}", document="Appendix D, ACMV for common areas (combined plans)", issue="as issued",
                       page=f"page {s['page']}, drawing {s['drawing_number']}", location=f"area annotation {s['annotation_index']}",
                       text_as_read=f"area label {s.get('area_label_text') or printed}; names {s.get('space_names_text_layer', '')}; outline {meas} m² at 1:250",
-                      method="area label and outline read from the markup", confidence="high" if s.get("printed_area_m2") else "medium")
+                      method="Area label and room outline read from the marked-up drawing", confidence="high" if s.get("printed_area_m2") else "medium")
         room: Dict[str, Any] = dict(number=number, name=name, storey=st, ahu=None, zone_tag=None, system_type=None, terminal_tag=None, exhaust_fan=None,
                                     space_type="UNCLASSIFIED", room_condition="Comfort", dpa_area_m2=None, soa_area_m2=printed if printed else None,
                                     measured_area_m2=meas, area_selector="SOA" if printed else None, ceiling_height_m=None, occupancy_people=None,
                                     occupancy_per_100m2=None, iof=None, activity=None, operation_hours=None, lighting_w_m2=None, small_power_w_m2=None,
                                     gaps={}, criteria={}, envelope=[],
                                     prov={"identity": ["D", sid], "zoning": ["D", sid], "space_type": ["A", "ASM-DEFAULT"], "soa_area": ["D", sid],
-                                          "measured_area": ["M", sid], "area_selector": ["S", "GEN-CONFIG"]},
+                                          "measured_area": ["M", sid], "area_selector": ["S", "GEN-BASIS"]},
                                     remark=f"App D page {s['page']}: area label {printed:g} m²" if printed else f"App D page {s['page']}: outline {meas:g} m² at 1:250")
         cc, kind = criteria_for(name, number)
         if cc is not None:
@@ -181,7 +181,7 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
         if m and len(m) == 1 and _f(m[0].get("designed_area_m2")):
             room["dpa_area_m2"] = _f(m[0]["designed_area_m2"])
             dsid = add_src(f"DPA-{_norm(m[0]['unique_room_identifier'])}", document=Path(m[0]["source_file"]).name, issue="DPA", page=f"row {m[0]['row']}",
-                           location=f"room {m[0]['unique_room_identifier']}", text_as_read=f"designed {m[0]['designed_area_m2']} m²", method="read from the DPA sheet", confidence="high")
+                           location=f"room {m[0]['unique_room_identifier']}", text_as_read=f"designed {m[0]['designed_area_m2']} m²", method="Value read from the DPA workbook, sheet Database", confidence="high")
             room["prov"]["dpa_area"] = ["D", dsid]
             n_dpa += 1
         use, label = room_use(name)
@@ -234,7 +234,7 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
                     f["remark"] = "App D shows no unit with the same level, area and number; the unit it serves is not known, so the airflow is not calculated"
             if lps is not None:
                 sid = add_src(f"EQS5-{_norm(tag)}"[:60], document="Equipment Schedule, fan schedule", issue="Corr 5", page=f"page {rr.get('schedule_pages', '')}",
-                              location=f"tag {tag}", text_as_read=f"{tag}: airflow {lps:g} L/s", method="read from the schedule table", confidence="high")
+                              location=f"tag {tag}", text_as_read=f"{tag}: airflow {lps:g} L/s", method="Value read from the Equipment Schedule table", confidence="high")
                 f.update(scheduled_lps=lps, code="D", source=sid, tender_source_text=f"Equipment Schedule Corr 5, page {rr.get('schedule_pages', '')}, {tag}")
             else:
                 f.update(code="D", source="CIRC-DEFAULT" if False else "ASM-DEFAULT")

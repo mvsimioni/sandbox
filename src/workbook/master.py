@@ -112,7 +112,7 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
     put(ba, "B5", leak, "Specified", "0.0%")
     put(ba, "C5", "fraction  (DuctLeakage)", "Text")
     put(ba, "D5", "S", "Code")
-    put(ba, "E5", "GEN-CONFIG", "Tag")
+    put(ba, "E5", "GEN-BASIS", "Tag")
     link_to(ba["E5"], "Sources", "A7")
     put(ba, "F5", "10 % default confirmed for the project; the tender schematics state 15 %", "Note")
     wb.defined_names["DuctLeakage"] = DefinedName("DuctLeakage", attr_text="'Basis'!$B$5")
@@ -125,7 +125,7 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
         put(so, f"{c}6", h, "HeaderLeft")
     put(so, "A1", "Sources", "Title")
     put(so, "A2", "One row per source ID.", "Note")
-    srcs = [("GEN-CONFIG", "Project design basis: default values", "22 Nov 2026", "duct leakage", "10 %", "duct leakage 10 %")]
+    srcs = [("GEN-BASIS", "Project design basis: default values", "22 Nov 2026", "duct leakage", "10 %", "duct leakage 10 %")]
     for r in recs:
         dn = r["department"]["number"]
         srcs.append((f"DEPT-{dn}", r.get("file", f"department {dn}"), f"{date}", "AHU tab, table A", f"department {dn} {r['department']['name']}",

@@ -211,9 +211,9 @@ def _write_links(ctx: Ctx, ws) -> None:
     heads = {"id": ("Path ID", "", 14), "room": ("Room", "", 14), "a": ("Node A", "", 14), "b": ("Node B (other side)", "", 14),
              "kind": ("Door or gap", "", 24), "seal": ("Seal type", "", 10), "gap": ("Open gap area", "cm²", 8),
              "gap_c": ("Code", "", 5), "gap_s": ("Source ID", "", 11), "leaf_w": ("Leaf width", "m", 7), "leaf_h": ("Leaf height", "m", 7),
-             "fixed": ("Fixed transfer A → B", "m³/h", 9), "area": ("Gap area used", "m²", 9), "pa": ("Pressure A", "Pa", 8),
-             "pb": ("Pressure B", "Pa", 8), "dp": ("ΔP", "Pa", 8), "q": ("Gap flow A → B", "m³/h", 9),
-             "qf": ("Fixed flow A → B", "m³/h", 9)}
+             "fixed": ("Fixed transfer, A to B", "m³/h", 9), "area": ("Gap area used", "m²", 9), "pa": ("Pressure A", "Pa", 8),
+             "pb": ("Pressure B", "Pa", 8), "dp": ("ΔP", "Pa", 8), "q": ("Gap flow, A to B", "m³/h", 9),
+             "qf": ("Fixed flow, A to B", "m³/h", 9)}
     spec = [(k, *heads[k]) for k in PL.keys if k in heads]
     write_headers(ws, PL, spec, PL.first - 3, {"id": "PATH"})
     for m, d in enumerate(ctx.pl_links):

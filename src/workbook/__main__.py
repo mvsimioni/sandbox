@@ -60,8 +60,11 @@ def main(argv=None) -> int:
         return 0
     if args.cmd == "check":
         return check_workbook(Path(args.xlsx), Path(args.work) if args.work else None)
-    from .assemble import assemble_department
-    assemble_department(args.dept, Path(args.out))
+    from .assemble import assemble_department, write_link_audit
+    data = assemble_department(args.dept, Path(args.out))
+    audit = Path("out/qa") / f"dpa_link_audit_D{data['department']['number']}.csv"
+    write_link_audit(data, audit)
+    print(f"assembled {args.out}: {len(data['rooms'])} rooms; link audit {audit}")
     return 0
 
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import csv
 import difflib
 import glob
+import hashlib
 import json
 import math
 import re
@@ -22,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import conf
 from .fans import department_fans
+from .linking import link_rds, link_rls, load_rls, plan_links, plan_system, rls_source_fields, split_code
 from .reva import build_reva_input
 
 REG = Path("out/registers")
@@ -244,10 +246,19 @@ def occupancy_notes(text: str) -> List[str]:
 
 
 # --------------------------------------------------------------------------- #
+# Abbreviations of plan room tags that the abbreviation register does not list. 'Collab' is the first part of the word 'Collaboration' in the
+# DPA room name 'Collaboration Huddle' (plan room B2-R022 'Collab' and DPA room PHAB 04.04.01). Each entry is applied to the name match only.
+EXTRA_ABBREVIATIONS: Dict[str, List[str]] = {"collab": ["collaboration"]}
+
+
 def _expansions(root: Path) -> Dict[str, List[str]]:
     out: Dict[str, List[str]] = defaultdict(list)
     for r in _read(root / REG / "zoning_abbreviations.csv"):
         out[r["abbreviation"].strip().lower()].append(r["expansion"].strip().lower())
+    for k, v in EXTRA_ABBREVIATIONS.items():
+        for x in v:
+            if x not in out[k]:
+                out[k].append(x)
     return out
 
 
@@ -271,6 +282,27 @@ def name_score(dpa_name: str, plan_name: str, abbr: Dict[str, List[str]]) -> flo
         if vw and vw <= dw and len(vw) >= max(1, len(dw) - 1):
             best = max(best, 0.9)
     return best
+
+
+def zoning_name_score(dpa_name: str, plan_name: str, abbr: Dict[str, List[str]]) -> float:
+    """Name fit for the zoning links (AHU only, never an area): `name_score`, and 0.86 where the plan name, or one of its abbreviation
+    expansions, has two or more words and prints as a run of words inside the DPA name ('Manual Picking' in 'Manual Picking | Repackaging Area',
+    'Inpatient Pharmacy' in 'Inpatient Pharmacy Automation System'). A single word is not enough ('Office' is not 'Office - Pharmacy Head').
+    The link then still needs equal counts on both sides and one AHU (see `plan_links`)."""
+    sc = name_score(dpa_name, plan_name, abbr)
+    if sc >= 0.85:
+        return sc
+    dw = [w for w in _words(dpa_name) if len(w) > 1]
+    pw = _words(plan_name)
+    variants = [pw]
+    for i, w in enumerate(pw):
+        for ex in abbr.get(w, []):
+            variants.append(pw[:i] + _words(ex) + pw[i + 1:])
+    for v in variants:
+        v = [w for w in v if len(w) > 1]
+        if len(v) >= 2 and any(dw[i:i + len(v)] == v for i in range(len(dw) - len(v) + 1)):
+            return 0.86
+    return sc
 
 
 MAX_AREA_RATIO = 2.0          # a plan room whose area is more than this factor above or below the design area is not the same room
@@ -389,6 +421,31 @@ def match_plan_rooms(dpa_rooms: List[Dict[str, Any]], plan_rooms: List[Dict[str,
 
 
 # --------------------------------------------------------------------------- #
+_SEARCH_FLAG_WORDS = [("a join on the room name collides", "the room name is not unique"), ("the register keeps each row as printed", "each row is kept as printed"),
+               ("the register keeps them as printed", "they are kept as printed")]
+
+
+def criteria_text(row: Dict[str, str]) -> str:
+    """Text of a booklet criteria row in document terms: the cells as printed, with no tool wording."""
+    try:
+        cells = json.loads(row.get("raw_cells") or "{}")
+    except ValueError:
+        cells = {}
+    labels = [("min_oa", "minimum outdoor-air changes"), ("min_total", "minimum total air changes"), ("single_pass", "single pass"),
+              ("afterhours", "after hours"), ("setback", "setback"), ("min_oa_rate_as_printed", "outdoor-air rate as printed")]
+    parts = [f"{lab} {cells[k]}" for k, lab in labels if str(cells.get(k, "")).strip()]
+    head = f"Room type {row.get('room_type_as_printed', '')}"
+    out = head + (": " + "; ".join(parts) if parts else "")
+    if cells.get("read_by"):
+        out += ". The booklet page is an image; the cells are read from the printed page"
+    flag = str(cells.get("source_flag") or "")
+    for a, b in _SEARCH_FLAG_WORDS:
+        flag = flag.replace(a, b)
+    if flag:
+        out += ". " + flag
+    return out[:400]
+
+
 def _criteria_alternatives(row: Dict[str, str]) -> List[str]:
     t = row.get("room_type_as_printed") or ""
     alts = [t] + [x for x in re.split(r"\s*/\s*|\s+-\s+|,\s*|\s+&\s+|\(|\)", t) if x.strip()]
@@ -533,7 +590,7 @@ def _tender_for_tag(tag: str, sched: Dict[str, Dict[str, str]], fcu: Dict[str, D
                 add_src(sid, document="Equipment Schedule, air handling unit schedule", issue="Corr 5", page=f"page {page}",
                         location=f"sheet {row.get('sheet_code', '')}, tag {row.get('tag_as_written', c)}",
                         text_as_read=f"{row.get('tag_as_written', c)}: supply airflow {sup:g} L/s; outdoor airflow minimum {oa if oa is not None else 'not printed'}",
-                        method="read from the schedule table", confidence="high")
+                        method="Value read from the Equipment Schedule table", confidence="high")
                 out.update(sched_supply_lps=sup, sched_oa_lps=oa, sched_source=sid, sched_code="D", type=row.get("type") or "AHU",
                            tender_source_text=f"Equipment Schedule Corr 5, page {page}, {row.get('tag_as_written', c)}")
                 return out
@@ -544,7 +601,7 @@ def _tender_for_tag(tag: str, sched: Dict[str, Dict[str, str]], fcu: Dict[str, D
                 sid = f"EQS5-{_norm(c)}"[:60]
                 add_src(sid, document="Equipment Schedule, fan coil unit schedule", issue="Corr 5", page=f"page {frow.get('page(s)', '')}",
                         location=f"sheet {frow.get('sheet_code', '')}, tag {frow.get('tag_as_written', c)}",
-                        text_as_read=f"{frow.get('tag_as_written', c)}: minimum airflow {sup:g} L/s", method="read from the schedule table",
+                        text_as_read=f"{frow.get('tag_as_written', c)}: minimum airflow {sup:g} L/s", method="Value read from the Equipment Schedule table",
                         confidence="high")
                 out.update(sched_supply_lps=sup, sched_source=sid, sched_code="D", type="FCU",
                            tender_source_text=f"Equipment Schedule Corr 5, page {frow.get('page(s)', '')}, {frow.get('tag_as_written', c)}")
@@ -554,7 +611,7 @@ def _tender_for_tag(tag: str, sched: Dict[str, Dict[str, str]], fcu: Dict[str, D
             if t.get("issue_set") == "tender" and t.get("ahu_tag") == c and _f(t.get("ahu_supply_L_s")) is not None:
                 sid = f"TSCH-{_norm(c)}"[:60]
                 add_src(sid, document=f"Air-side schematic {t.get('sheet', '')}", issue=t.get("issue", "tender issue"), page=t.get("sheet", ""),
-                        location=f"AHU {c}", text_as_read=t.get("ahu_supply_as_written", ""), method="read from the schematic text", confidence="medium")
+                        location=f"AHU {c}", text_as_read=t.get("ahu_supply_as_written", ""), method="Value read from the text printed on the air-side schematic", confidence="medium")
                 out.update(sched_supply_lps=_f(t["ahu_supply_L_s"]), sched_source=sid, sched_code="D",
                            tender_source_text=f"tender air-side schematic {t.get('sheet', '')}, {c}")
                 return out
@@ -564,7 +621,7 @@ def _tender_for_tag(tag: str, sched: Dict[str, Dict[str, str]], fcu: Dict[str, D
                 if m:
                     sid = f"TSCH-{_norm(c)}"[:60]
                     add_src(sid, document=f"Air-side schematic {e.get('sheet', '')}", issue=e.get("issue", "tender issue"), page=f"page {e.get('page', '')}",
-                            location=f"AHU {c}", text_as_read=e["duty_as_written"], method="read from the schematic text", confidence=e.get("confidence", ""))
+                            location=f"AHU {c}", text_as_read=e["duty_as_written"], method="Value read from the text printed on the air-side schematic", confidence=e.get("confidence", ""))
                     out.update(sched_supply_lps=float(m.group(1).replace(",", "")), sched_source=sid, sched_code="D",
                                tender_source_text=f"tender air-side schematic {e.get('sheet', '')}, {c}")
                     return out
@@ -583,6 +640,35 @@ def ip_units(key: str, stack: List[Dict[str, str]], dpa_units: Dict[str, List[Di
             if nm and nm == _norm(s["department_as_written"]):
                 ip.setdefault(code, _storey_code(s["storey"]))
     return ip
+
+
+def height_conflict_text(c: Dict[str, Any]) -> str:
+    """Words for a height conflict: different heights in the room layout sheets, or one sheet that prints several heights."""
+    vals = ", ".join(f"{v:g} m" for v in c["values"])
+    if len(c["values"]) > 1:
+        return f"the room layout sheets give different ceiling heights for code {c['code']}: {vals}. None is chosen"
+    return (f"a room layout sheet for code {c['code']} prints more than one ceiling height ({', '.join(c.get('flags') or [])}). "
+            f"The value {vals} is only the governing value given for the code, not a clear height of this room. None is chosen")
+
+
+def _area_txt(p: Dict[str, Any]) -> str:
+    return f"{p['area']:.1f} m²" if p.get("area") is not None else "no measured area"
+
+
+def _class_of(p: Dict[str, Any]) -> str:
+    tag, _ = plan_system(p["zone"], AHU_COLUMNS, SYSTEM_KINDS)
+    return tag or (p["zone"].get("class") or "")
+
+
+def write_link_audit(data: Dict[str, Any], path: Path) -> None:
+    """CSV of the links of one department: every DPA room with its RDS, height and plan basis, and the unlinked RDS and plan rooms."""
+    fields = ["side", "dept", "ref", "name", "code", "storey", "rds_basis", "rds_code", "rds_note", "height_basis", "height_m", "plan_basis", "ahu", "occupancy_basis"]
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with Path(path).open("w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=fields)
+        w.writeheader()
+        for r in data["link_audit"]:
+            w.writerow({k: r.get(k, "") for k in fields})
 
 
 def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path(".")) -> Dict[str, Any]:
@@ -630,13 +716,17 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
 
     add_src("ASM-DEFAULT", document="Workbook defaults", issue="", page="", location="space type UNCLASSIFIED",
             text_as_read="design room condition of the Rev A design basis (24 °C, 52.6 kJ/kg) applied where no space type is set",
-            method="assumption, to confirm", confidence="low")
+            method="Assumption, to confirm", confidence="low")
     add_src("ASM-ACTIVITY", document="Workbook defaults", issue="", page="", location="activity of occupants",
-            text_as_read="activity Seated (Rev A table) applied where occupancy is stated and no activity is given", method="assumption, to confirm",
+            text_as_read="activity Seated (Rev A table) applied where occupancy is stated and no activity is given", method="Assumption, to confirm",
             confidence="low")
+    ch_default = _f((conf.config(root).get("ceiling_height") or {}).get("flagged_default_m"))
+    if ch_default:
+        add_src("ASM-CEILING", document="Workbook defaults", issue="", page="", location="ceiling height",
+                text_as_read=f"ceiling height {ch_default:g} m applied where the room layout sheets give none", method="Assumption, to confirm", confidence="low")
     add_src("OCC-DENSITY", document="ASHRAE Standard 62.1, Table 6.2.2.1: default occupant density", issue="edition to confirm (health-care rows: 62.1-2007)",
             page="Table 6.2.2.1", location="persons per 100 m² by occupancy category",
-            text_as_read="default densities per 100 m², taken as listed in the project design basis", method="project design basis", confidence="medium")
+            text_as_read="default densities per 100 m², taken as listed in the project design basis", method="Value taken from the project design basis", confidence="medium")
 
     soa_by_code: Dict[str, Dict[str, str]] = {}
     for r in soa_all:
@@ -655,7 +745,9 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
         for ident, group in by_id.items():
             pick = next((g for g in group if (_f(g.get("designed_area_m2")) or 0) > 0), group[0])
             ident_storey = _storey_code(pick.get("storey_from_identifier") or "")
+            soa_q = soa_by_code.get(ident)
             dpa_rows.append(dict(number=ident, name=pick["room_name"], storey=ident_storey or storey_stack, dpa_area=_f(pick.get("designed_area_m2")),
+                                 code=(pick.get("soa_std_room_code") or "").strip(), typical_count=int(_f(soa_q.get("qty")) or 1) if soa_q else 1,
                                  ref_area=_f(pick.get("designed_area_m2")) or soa_area_of(ident),
                                  row=pick, unit=code, differ=len({_f(g.get("designed_area_m2")) for g in group}) > 1,
                                  storey_basis="identifier" if ident_storey else "stacking diagram"))
@@ -670,14 +762,19 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
     for st in sorted({d["storey"] for d in dpa_rows}):
         for p in polygons.get(st, []):
             za = zones.get(st, {}).get(p["room_id"])
-            if not za or not dept_re.search(za.get("department", "")) or _f(p.get("a_area_m2")) is None:
+            if not za or not dept_re.search(za.get("department", "")):
                 continue
             n_tags = int(_f(p.get("n_tags_in_region")) or 1)
             plan.append(dict(storey=st, name=p.get("room_name") or p.get("room_tag", ""), area=_f(p.get("a_area_m2")), poly=p, zone=za,
                              shared=n_tags > 1 or (p.get("region_kind") or "").startswith("open plan"), n_tags=n_tags,
                              cx=_f(p.get("centroid_x_mm")), cy=_f(p.get("centroid_y_mm")), grid=p.get("grid_location", "")))
     rejected: List[Dict[str, Any]] = []
-    pairs, un_dpa, un_plan = match_plan_rooms(dpa_rows, plan, abbr, rejected)
+    # a plan room with no measured area (a tag of a leaked region, a tag with no closed region) still carries its adjudicated AHU: it is not
+    # paired one to one (no area to test) but it takes part in the zoning links, and it is listed when no DPA room uses it
+    plan_area = [p for p in plan if p["area"] is not None]
+    plan_no_area = [p for p in plan if p["area"] is None]
+    pairs, un_dpa, un_plan = match_plan_rooms(dpa_rows, plan_area, abbr, rejected)
+    un_plan = un_plan + plan_no_area
     rejected_by = {rj["dpa"]: rj for rj in rejected}
     # rooms inside an open-plan region: the polygon file lists the tags that share the region; a DPA room that no plan room matches but
     # whose name matches exactly one of these tags is in that region, and takes its zoning (never its area)
@@ -685,7 +782,7 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
     for d in un_dpa:
         best: Dict[int, Tuple[float, str]] = {}
         for j, pr in enumerate(plan):
-            if not pr["shared"] or pr["storey"] != d["storey"]:
+            if not pr["shared"] or pr["area"] is None or pr["storey"] != d["storey"]:
                 continue
             tags = [t.strip() for t in (pr["poly"].get("other_tags") or "").split("|") if t.strip()]
             for t in tags:
@@ -696,6 +793,20 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
         if len(best) == 1:
             j, (sc, nm) = next(iter(best.items()))
             region_of[d["number"]] = (plan[j], nm)
+    # DPA rooms that the strict match and the open-plan regions leave without a plan room: link by name and count, then by the department rule
+    zlinks = plan_links([d for d in dpa_rows if d["number"] not in pairs and d["number"] not in region_of], plan, set(pairs) | set(region_of),
+                        lambda a, b: zoning_name_score(a, b, abbr), AHU_COLUMNS, SYSTEM_KINDS)
+    count_plan_ids = {id(p) for z in zlinks.values() if z["basis"] == "name and count" for p in z["plan"]}
+    rule_users: Dict[int, List[str]] = defaultdict(list)
+    for no, z in zlinks.items():
+        if z["basis"] == "department rule":
+            for p in z["plan"]:
+                rule_users[id(p)].append(no)
+    # RDS and RLS links of every DPA room
+    link_in = [dict(number=d["number"], name=d["name"], code=d["code"]) for d in dpa_rows]
+    rds_link = link_rds(link_in, rds_all)
+    rls_rows = load_rls(root)
+    rls_link = link_rls(link_in, rls_rows, key)
     tol_pct = ((conf.config(root).get("tolerances") or {}).get("area_vs_soa") or {}).get("agree_pct", 3) / 100.0
     tol_m2 = ((conf.config(root).get("tolerances") or {}).get("area_vs_soa") or {}).get("agree_m2", 0.5)
     crit_stats: Dict[str, List[str]] = defaultdict(list)
@@ -703,6 +814,9 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
     ahu_kinds: Dict[str, str] = {}
     rooms: List[Dict[str, Any]] = []
     n_rds = n_rds_occ = n_default = n_nouse = 0
+    rds_basis_count: Dict[str, int] = defaultdict(int)
+    zl_rule_count, zl_count_count = [0], [0]
+    n_rls = n_ch_default = 0
 
     for d in dpa_rows:
         pick = d["row"]
@@ -710,7 +824,7 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
         sid = add_src(f"DPA-{_norm(number)}", document=_doc(pick["source_file"]), issue=f"DPA, Revit synchronisation {pick.get('revit_sync_date', '')}",
                       page=f"sheet Database, row {pick['row']}", location=f"room {number}",
                       text_as_read=f"designed {pick.get('designed_area_m2')} m²; programmed {pick.get('programmed_area_m2')} m²; name {d['name']}",
-                      method="read from the DPA sheet", confidence="high")
+                      method=f"Value read from the DPA workbook, sheet Database, row {pick['row']}", confidence="high")
         room: Dict[str, Any] = dict(
             number=number, name=d["name"], storey=d["storey"], ahu=None, zone_tag=None, system_type=None, terminal_tag=None, exhaust_fan=None,
             space_type=UNCLASSIFIED, room_condition="Comfort", dpa_area_m2=d["dpa_area"], soa_area_m2=None, measured_area_m2=None,
@@ -731,7 +845,7 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
             sa = _f(s.get("as_drawn_area_m2")) or _f(s.get("designed_area_m2")) or _f(s.get("unit_area_m2"))
             ssid = add_src(f"SOA-{key}-{_norm(number)}", document=_doc(s["source_file"]), issue=f"{s.get('soa_version', '')} {s.get('issue_date', '')}".strip(),
                            page=s.get("page_or_sheet_row", ""), location=s.get("bbox_pt", ""), text_as_read=f"{s['room_name']}: as drawn area {s.get('as_drawn_area_m2')} m²",
-                           method="read from the SOA table", confidence=str(s.get("confidence", "")))
+                           method="Value read from the SOA table", confidence=str(s.get("confidence", "")))
             room["soa_area_m2"] = sa
             room["prov"]["soa_area"] = ["D", ssid]
             remark.append(f"SOA {s.get('soa_version', '')} {sa:.1f} m²" if sa is not None else "SOA row without area")
@@ -746,7 +860,7 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
             psid = add_src(f"PLAN-{poly['room_id']}", document=_doc(poly.get("source_file", "")) or "Architectural tender drawings", issue="plan measurement",
                            page=f"page {poly.get('source_page', '')}, storey {p['storey']}", location=f"room {poly.get('room_tag', '')}, grid {poly.get('grid_location', '')}",
                            text_as_read=f"plan room {poly.get('room_tag', '')}; area {poly.get('a_area_m2')} m² (measure A), {poly.get('b_area_m2')} m² (measure B); {poly.get('method_agreement', '')}",
-                           method="room outline measured from the drawing", confidence=str(poly.get("method_agreement", "")))
+                           method="Area measured from the room outline on the drawing", confidence=str(poly.get("method_agreement", "")))
             base_area = d["dpa_area"] if d["dpa_area"] else soa_area_of(number)
             if p.get("shared"):
                 gaps["area_diff"] = (f"Plan room {poly.get('room_tag', '')} is an open-plan region ({p['area']:.1f} m², grid {p['grid']}). "
@@ -772,28 +886,78 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
                 zsid = add_src(f"ZONE-{p['storey']}-{poly['room_id']}", document=f"AHU zoning, storey {p['storey']}", issue="zoning assignment",
                                page=p["storey"], location=f"plan room {poly['room_id']}",
                                text_as_read=f"class {za.get('class', '')} ({za.get('class_kind', '')}); department {za.get('department', '')}; basis {za.get('method', '')}",
-                               method="zoning of the storey", confidence=str(za.get("confidence", "")))
+                               method="Zoning of the storey, as printed on the room tag of the plan", confidence=str(za.get("confidence", "")))
                 room["prov"]["zoning"] = ["D", zsid]
                 ahu_kinds.setdefault(tag, kind or "AHU")
             else:
                 gaps["ahu"] = f"The plan room shows class '{za.get('class', '')}' and no system tag."
         else:
             rj = rejected_by.get(number)
+            notes_plan: List[str] = []
             if rj is not None:
                 pl = rj["plan"]
                 if rj["reason"] == "area":
-                    gaps["plan"] = (f"Plan room {pl['poly'].get('room_tag', '')} has a similar name ({pl['name']}, grid {pl['grid']}). It measures {pl['area']:.1f} m². "
-                                    f"The design area is {d['ref_area']:.1f} m², more than a factor of {MAX_AREA_RATIO:g} apart. It is not accepted as this room.")
+                    notes_plan.append(f"Plan room {pl['poly'].get('room_tag', '')} has a similar name ({pl['name']}, grid {pl['grid']}). It measures {pl['area']:.1f} m². "
+                                      f"The design area is {d['ref_area']:.1f} m², more than a factor of {MAX_AREA_RATIO:g} apart. It is not accepted as this room.")
                 else:
-                    gaps["plan"] = (f"Plan room {pl['poly'].get('room_tag', '')} has the same name ({pl['name']}). It lies outside the grid span of the department "
-                                    f"on this storey (grid {pl['grid']}). It is not accepted as this room.")
-            else:
-                gaps["plan"] = "No plan room matches this room by name, department and storey."
+                    notes_plan.append(f"Plan room {pl['poly'].get('room_tag', '')} has the same name ({pl['name']}). It lies outside the grid span of the department "
+                                      f"on this storey (grid {pl['grid']}). It is not accepted as this room.")
+            zl = zlinks.get(number)
+            if zl is not None:
+                plans = zl["plan"]
+                plan_names = "', '".join(dict.fromkeys(x["name"] for x in plans))
+                ids = ", ".join(x["poly"]["room_id"] for x in plans)
+                zsid = add_src((f"ZONE-{d['storey']}-{_norm(ids)}" if len(_norm(ids)) <= 36 else f"ZONE-{d['storey']}-{hashlib.sha1(ids.encode()).hexdigest()[:12]}"), document=f"AHU zoning, storey {d['storey']}", issue="zoning assignment", page=d["storey"],
+                               location=f"plan rooms {ids}", text_as_read=f"{len(plans)} plan room(s) named {plan_names}; class {zl['value']}; department "
+                               f"{plans[0]['zone'].get('department', '')}", method="Zoning of the storey, as printed on the room tags of the plan", confidence="medium")
+                if zl["basis"] == "name and count":
+                    notes_plan.append(f"AHU by name and count. Storey {d['storey']} has {zl['n_dpa']} DPA room(s) and {zl['n_plan']} plan room(s) named '{plan_names}'. "
+                                      f"All of them carry {zl['value']}. The plan rooms are not paired one to one, so the measured area is not used.")
+                    zcode = "D"
+                else:
+                    notes_plan.append(f"AHU by department rule: no plan room matches this room one to one. All {zl['n_plan']} plan room(s) named '{plan_names}' in the department "
+                                      f"on storey {d['storey']} carry {zl['value']}. The room takes it. The measured area is not used. Confirm.")
+                    zcode = "A"
+                    zl_rule_count[0] += 1
+                if zl["basis"] == "name and count":
+                    zl_count_count[0] += 1
+                if zl["tag"]:
+                    room["ahu"] = zl["tag"]
+                    room["zone_tag"] = _first(plans[0]["zone"], ZONE_COLUMNS) or None
+                    room["system_type"] = _first(plans[0]["zone"], SYSTYPE_COLUMNS) or ("FCU" if zl["kind"] in ("FCU", "DXFCU") else None)
+                    room["prov"]["zoning"] = [zcode, zsid]
+                    ahu_kinds.setdefault(zl["tag"], zl["kind"] or "AHU")
+                else:
+                    gaps["ahu"] = f"The plan rooms of the same name show class '{zl['value']}' and no system tag."
+            elif rj is None:
+                notes_plan.append("No plan room matches this room by name, department and storey.")
+            gaps["plan"] = " ".join(notes_plan)
+        hl = rls_link["heights"].get(number)
+        hc = next((c for c in rls_link["conflicts"] if c["number"] == number), None)
+        if hl is not None:
+            src_f = rls_source_fields(hl["row"])
+            hsid = add_src(f"RLS-{_norm(hl['code'])}"[:60], document=src_f["document"], issue="room layout sheet", page=f"page {src_f['page']}" if src_f["page"] else "",
+                           location=f"room type {hl['code']}; linked to the DPA room by {hl['basis']}",
+                           text_as_read=src_f["text"] or f"ceiling height {hl['height_m'] * 1000:.0f} mm",
+                           method="Value read from the ceiling height note of the room layout sheet", confidence="high")
+            room["ceiling_height_m"] = hl["height_m"]
+            room["prov"]["ceiling_height"] = ["D", hsid]
+            remark.append(f"ceiling height {hl['height_m']:.2f} m from the room layout sheet ({hl['basis']})")
+            n_rls += 1
+        elif ch_default:
+            room["ceiling_height_m"] = ch_default
+            room["prov"]["ceiling_height"] = ["A", "ASM-CEILING"]
+            why = (height_conflict_text(hc).replace(". ", "; ") if hc
+                   else ("no room layout sheet height is linked to this room" if rls_rows else "no room layout sheet height is available"))
+            remark.append(f"ceiling height {ch_default:g} m assumed ({why})")
+            if hc:
+                gaps["height"] = height_conflict_text(hc)[0].upper() + height_conflict_text(hc)[1:] + "."
+            n_ch_default += 1
         row, variants, how = match_criteria(d["name"], criteria)
         if row is not None:
             csid = add_src(f"CRIT-{key}-{_norm(row['room_type_as_printed'])}"[:60], document=_doc(row["source_file"]), issue=row.get("department_label", "booklet"),
-                           page=f"page {row['booklet_page']}", location=row.get("bbox", ""), text_as_read=(row.get("raw_cells") or "")[:300],
-                           method="read from the booklet criteria table", confidence=str(row.get("confidence", "")))
+                           page=f"page {row['booklet_page']}", location=row.get("bbox", ""), text_as_read=criteria_text(row),
+                           method="Value read from the DD Booklet criteria table", confidence=str(row.get("confidence", "")))
             room["criteria"] = criteria_from_row(row, csid, how)
             crit_stats[row["room_type_as_printed"]].append(number)
             if variants:
@@ -801,17 +965,32 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
         else:
             unmapped_crit.append(number)
             gaps["criteria"] = "No booklet room type fits this room name" + (f" ({how})" if how else "") + "."
-        rds_rows = [x for x in rds_all if pick.get("soa_std_room_code") and x["room_code"] == pick["soa_std_room_code"]]
-        rds = None
-        if rds_rows:
-            rds = max(rds_rows, key=lambda x: difflib.SequenceMatcher(None, _norm(x["room_name"]), _norm(d["name"])).ratio())
+        rl = rds_link["links"].get(number)
+        rds = rl["resolved"]["row"] if rl else None
+        rds_conflict = rl["resolved"]["conflict"] if rl else []
+        rds_unlinked = next((u for u in rds_link["unlinked_dpa"] if u["number"] == number), None)
+        if rl:
             n_rds += 1
-        occ = occupancy_from_rds(rds)
-        if occ is not None:
+            rds_basis_count[rl["basis"]] += 1
+            remark.append(f"RDS room code {rl['code']} linked by {rl['basis']}")
+            if rl.get("code_note"):
+                remark.append("RDS code disagreement: " + rl["code_note"])
+                gaps["rds_code"] = (f"The room data sheet is linked by name only. {rl['code_note'][0].upper()}{rl['code_note'][1:]}. "
+                                    "Confirm that this is the sheet of this room.")
+        else:
+            remark.append("no RDS linked" + (f" ({rds_unlinked['reason']})" if rds_unlinked else ""))
+        occ = occupancy_from_rds(rds) if not rds_conflict else None
+        if rds_conflict:
+            n_nouse += 1
+            room["occupancy_basis"] = "NOT SET"
+            remark.append("occupancy not set (the RDS issues disagree; 0 people is a placeholder)")
+            gaps["occupancy"] = ("The RDS gives different occupancy texts for this room in the same issue: " + "; ".join(f"'{t}'" for t in rds_conflict) +
+                                 ". None is chosen. Confirm the occupancy.")
+        elif occ is not None:
             n_rds_occ += 1
             rsid = add_src(f"RDS-{key}-{_norm(rds['room_code'])}"[:60], document=_doc(rds["rel_path"]), issue=f"{rds.get('revision', '')} {rds.get('date', '')}".strip(),
-                           page="room data sheet, occupancy field", location=f"room code {rds['room_code']}", text_as_read=f"Occupancy: {occ[1]}",
-                           method="read from the RDS", confidence="high")
+                           page="room data sheet, occupancy field", location=f"room code {rds['room_code']}; linked to the DPA room by {rl['basis']}", text_as_read=f"Occupancy: {occ[1]}",
+                           method=f"Value read from the room data sheet {_doc(rds['rel_path'])}, occupancy field", confidence="high")
             room["occupancy_people"] = occ[0]
             room["occupancy_basis"] = "RDS"
             room["prov"]["occupancy_people"] = ["D", rsid]
@@ -838,6 +1017,8 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
                     room["prov"]["activity"] = ["A", "ASM-ACTIVITY"]
                 n_default += 1
                 remark.append(("no RDS for this room" if rds is None else "RDS occupancy field empty") + f"; room use {use.replace('_', ' ')}")
+                if rl and rl["resolved"]["notes"]:
+                    remark.append("RDS " + "; ".join(rl["resolved"]["notes"]))
             else:
                 n_nouse += 1
                 room["occupancy_basis"] = "NOT SET"
@@ -858,7 +1039,7 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
             s = rws[0]
             ssid = add_src(f"TSCH-{s['sheet']}-{_norm(s['room_name_as_written'])}"[:60], document=f"Air-side schematic {s['sheet']}", issue=s.get("issue", "tender issue"),
                            page=f"page {s.get('page', '')}", location=s.get("box_page_view_table", ""), text_as_read=s.get("airflow_as_printed", ""),
-                           method="read from the schematic room table", confidence=s.get("confidence", ""))
+                           method="Value read from the room table on the air-side schematic", confidence=s.get("confidence", ""))
             room["schematic"] = dict(supply_lps=_f(s["supply_L_s"]), return_lps=_f(s["return_L_s"]), exhaust_lps=_f(s["exhaust_L_s"]),
                                      pressure_pa=_pa(s.get("pressure")), source=ssid, code="D",
                                      source_text=f"tender air-side schematic {s['sheet']}, {s['room_name_as_written']}")
@@ -890,8 +1071,23 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
                           "The tender airflow covers the whole unit. The reduction is a unit result only when every department of the unit is counted. "
                           "The master AHU summary counts each unit once.", source=""))
     for p in un_plan:
-        flags.append(dict(type="VERIFY", ref=p["poly"]["room_id"], text=f"Plan room {p['poly'].get('room_tag', '')} ({p['area']:.1f} m², storey {p['storey']}, "
-                          f"department {p['zone'].get('department', '')}) matches no DPA room of this department. It is not in the workbook.", source=""))
+        if id(p) in count_plan_ids:
+            continue
+        users = rule_users.get(id(p))
+        flags.append(dict(type="VERIFY", ref=p["poly"]["room_id"], text=f"Plan room {p['poly'].get('room_tag', '')} ({_area_txt(p)}, storey {p['storey']}, "
+                          f"department {p['zone'].get('department', '')}) matches no DPA room of this department one to one. It is not in the workbook."
+                          + (f" Its AHU is used by the department rule for room(s) {', '.join(users)}." if users else ""), source=""))
+    for u in rds_link["unlinked_rds"]:
+        flags.append(dict(type="VERIFY", ref=u["code"] or u["name"], text=f"Room data sheet {u['code']} ({u['name']}) is linked to no DPA room of this workbook: {u['reason']}. "
+                          f"Files: {', '.join(u['files'][:3])}{' and others' if len(u['files']) > 3 else ''}.", source=""))
+    if rds_link["unlinked_dpa"]:
+        flags.append(dict(type="VERIFY", ref="Room Information", text=f"{len(rds_link['unlinked_dpa'])} of {len(rooms)} DPA room(s) have no room data sheet link. "
+                          "Each takes its occupancy from the default density. The reason for each room is in its Remarks.", source=""))
+    for c in rls_link["conflicts"]:
+        flags.append(dict(type="VERIFY", ref=c["number"], text=(height_conflict_text(c)[0].upper() + height_conflict_text(c)[1:] + ". The assumed height applies."), source="ASM-CEILING"))
+    if not rls_rows:
+        flags.append(dict(type="CONFIRM", ref="Room Information", text="No ceiling heights from the room layout sheets are available. Every room has the assumed height "
+                          f"of {ch_default:g} m. Confirm the heights.", source="ASM-CEILING"))
     for d in out_of_scope:
         flags.append(dict(type="VERIFY", ref=d["number"], text=f"DPA room {d['number']} {d['name']} is on storey {d['storey']}, outside the IP storeys. It is not in the workbook.", source=""))
     for code in sorted(soa_units - set(ip_map) - {""}):
@@ -932,11 +1128,35 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
         key_flags=[f["text"] for f in flags[-3:]], criteria_origin=["Room criteria: the criteria tables of the DD Booklet for this department."] + crit_lines + use_lines)
     data["constants"] = dict(base["constants"])
     data["assemble_stats"] = dict(
-        rooms=len(rooms), plan_rooms_of_department=len(plan), matched_to_plan=len(pairs), in_open_plan_region=len(region_of), unmatched_dpa_rooms=len(un_dpa) - len(region_of), unmatched_plan_rooms=len(un_plan),
+        rooms=len(rooms), plan_rooms_of_department=len(plan), matched_to_plan=len(pairs), in_open_plan_region=len(region_of), unmatched_dpa_rooms=len(un_dpa) - len(region_of) - len(zlinks), unmatched_plan_rooms=len(un_plan),
         with_ahu=sum(1 for r in rooms if r["ahu"]), with_criteria=sum(1 for r in rooms if r["criteria"]), with_soa=sum(1 for r in rooms if r.get("soa_area_m2") is not None),
         with_rds=n_rds, occupancy_from_rds=n_rds_occ, occupancy_default_density=n_default, occupancy_not_set=n_nouse, ahus=len(ahus), fans=len(dept_fans),
         ahus_with_tender=sum(1 for a in ahus if a.get("sched_supply_lps") is not None), pressure_rooms_not_calculated=sum(1 for r in rooms if r["gaps"].get("door")),
-        units=list(ip_map.items()))
+        units=list(ip_map.items()),
+        plan_linked=len(pairs) + len(region_of) + len(zlinks), plan_pairs=len(pairs), plan_by_name_and_count=zl_count_count[0], plan_by_department_rule=zl_rule_count[0],
+        rds_links_by_basis=dict(rds_basis_count), rds_unlinked_dpa=len(rds_link['unlinked_dpa']), rds_unlinked_rds=len(rds_link['unlinked_rds']),
+        height_from_rls=n_rls, height_default=n_ch_default, height_conflicts=len(rls_link['conflicts']), rls_rows=len(rls_rows))
+    audit: List[Dict[str, Any]] = []
+    for d, room in zip(dpa_rows, rooms):
+        rl_ = rds_link["links"].get(d["number"])
+        un = next((u for u in rds_link["unlinked_dpa"] if u["number"] == d["number"]), None)
+        hl_ = rls_link["heights"].get(d["number"])
+        zl_ = zlinks.get(d["number"])
+        plan_basis = ("one to one" if d["number"] in pairs else "open-plan region" if d["number"] in region_of else zl_["basis"] if zl_ else "none")
+        audit.append(dict(side="DPA", dept=key, ref=d["number"], name=d["name"], code=d["code"], storey=d["storey"],
+                          rds_basis=rl_["basis"] if rl_ else "none", rds_code=rl_["code"] if rl_ else "", rds_note=(un or {}).get("reason", "") or (rl_ or {}).get("code_note", ""),
+                          height_basis=hl_["basis"] if hl_ else "default (flagged)", height_m=room.get("ceiling_height_m") or "",
+                          plan_basis=plan_basis, ahu=room.get("ahu") or "", occupancy_basis=room.get("occupancy_basis", "")))
+    for u in rds_link["unlinked_rds"]:
+        audit.append(dict(side="RDS", dept=key, ref=u["code"], name=u["name"], rds_note=u["reason"]))
+    for u in sorted(rls_link["unlinked_rls"], key=lambda x: (x["code"], x["number"], x["variant"])):
+        audit.append(dict(side="RLS", dept=key, ref=f"{u['number']}_{u['code']}" + (f"_{u['variant']}" if u["variant"] else ""), name=f"{u['rows']} row(s)",
+                          height_basis="no DPA room of this workbook links to it", height_m=u["height_m"] or ""))
+    for p_ in un_plan:
+        if id(p_) not in count_plan_ids:
+            audit.append(dict(side="PLAN", dept=key, ref=p_["poly"]["room_id"], name=p_["name"], storey=p_["storey"], ahu=_class_of(p_),
+                              plan_basis="no DPA room one to one" + ("; used by the department rule" if rule_users.get(id(p_)) else "")))
+    data["link_audit"] = audit
     if out is not None:
         Path(out).parent.mkdir(parents=True, exist_ok=True)
         Path(out).write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")

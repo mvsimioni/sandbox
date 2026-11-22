@@ -118,7 +118,7 @@ def write_room_information(ctx: Ctx) -> None:
             v = r.get(f)
             if k == "sel" and blank(v):
                 v = "AUTO"
-                code_s, src_s = ("S", "GEN-CONFIG")
+                code_s, src_s = ("S", "GEN-BASIS")
             elif k == "cond" and not blank(v):
                 code_s, src_s = prov_of(r, "space_type", True)
             else:
@@ -433,7 +433,7 @@ def write_airflow(ctx: Ctx) -> None:
         for rr in range(1, OA_ROUNDS + 1):
             inn = g(f"in{rr}")
             if rr == 1:
-                put(ws, inn, f"=IF({g('supply')}>0,1,0)", "Calc", "d0")
+                put(ws, inn, f'=IF(AND({g("supply")}>0,{g("ahu")}<>""),1,0)', "Calc", "d0")
             else:
                 put(ws, inn, f"={g(f'in{rr-1}')}-{g(f'sep{rr-1}')}", "Calc", "d0")
             put(ws, g(f"tot{rr}"), expand(ctx, f"=SUMIFS([AF.supply],[AF.ahu],{{ahu}},[AF.in{rr}],1)", L, i), "Calc", "d1")

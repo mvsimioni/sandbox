@@ -14,8 +14,20 @@ ISSUE = "Rev A draft, 1 Oct 2026"
 SS = "Level 1 Room Zones"
 
 
-def _src(id_, doc, page, loc, text, method="openpyxl read of the cell (formulas kept)", conf="high"):
+def _src(id_, doc, page, loc, text, method=None, conf="high"):
+    method = method or f"Value read from the Rev A workbook, sheet {page}, at {loc}"
     return dict(id=id_, document=doc, issue=ISSUE, page=page, location=loc, text_as_read=text, method=method, confidence=conf)
+
+
+_SEARCH_TOOL_WORDS = {"PDF text layer": "printed text"}      # search keys only, never written
+
+
+def _plain(v: Any) -> str:
+    """Text of a Rev A cell for the documents table: tool wording of the cell is put in document terms."""
+    out = str(v)
+    for old, new in _SEARCH_TOOL_WORDS.items():
+        out = out.replace(old, new)
+    return out
 
 
 def _density(formula: Any) -> Any:
@@ -51,15 +63,15 @@ def build_reva_input(root: Path = Path(".")) -> Dict[str, Any]:
     sources.append(_src("RA-OCC", doc, "Basis of Design", "B12, J37", f"{bod['B12'].value}: {bod['E12'].value}"))
     sources.append(_src("RA-DD21", "DD Booklet, Pharmacy (Batch 2), Aug 2025 (as cited by the Rev A Basis of Design)", "p.21",
                         "criteria table 'OP Level 1 Pharmacy'", str(bod["E10"].value),
-                        method="read through the Rev A workbook: Basis of Design E10 and Level 1 Room Zones V30:Z34 (the booklet itself is not re-read here)",
+                        method="Value as quoted in the Rev A workbook, sheet Basis of Design cell E10 and sheet Level 1 Room Zones cells V30:Z34. The booklet page was not checked for this entry.",
                         conf="medium"))
     sources.append(_src("RA-AHU-B29", doc, "AHU Summary", "B29:B30, D29:D30", f"fan total pressure {ahu['B29'].value} Pa; efficiency {ahu['B30'].value}"))
     sources.append(_src("RA-AHU-REF", doc, "AHU Summary", "A44:F49", f"{ahu['A44'].value} {ahu['B44'].value}; {ahu['A45'].value} {ahu['B45'].value} / OA {ahu['E45'].value}; "
                                                                       f"{ahu['A46'].value} {ahu['B46'].value} / OA {ahu['E46'].value}"))
     sources.append(_src("RA-SS553", "SS 553:2016 Table 2 (as cited by the Rev A Basis of Design B12)", "Table 2", "reception / waiting; pharmacy",
-                        "30 persons/100 m2 reception and waiting; 10 persons/100 m2 pharmacy (prep area)", method="read through the Rev A workbook", conf="medium"))
+                        "30 persons/100 m2 reception and waiting; 10 persons/100 m2 pharmacy (prep area)", method="Value as quoted in the Rev A workbook, sheet Basis of Design cell B12", conf="medium"))
     sources.append(_src("RA-DD7", "DD Booklet, Pharmacy (as cited by the Rev A Basis of Design)", "p.7", "room areas and AHU zoning",
-                        str(bod["B10"].value), method="read through the Rev A workbook", conf="medium"))
+                        str(bod["B10"].value), method="Value as quoted in the Rev A workbook, sheet Basis of Design cell B10", conf="medium"))
 
     rooms = []
     regime = {"G": "POSITIVE"}
@@ -118,7 +130,7 @@ def build_reva_input(root: Path = Path(".")) -> Dict[str, Any]:
             equipment_sensible_w=v(f"AP{r}") if sup and (v(f"AP{r}") or 0) > 0 else None,
             equipment_latent_w=v(f"BI{r}") if sup and (v(f"BI{r}") or 0) > 0 else None,
             prov=prov, criteria=c, envelope=env,
-            remark=f"Rev A {SS} row {r}: contractor area {v(f'M{r}')} m2 entered as the SOA-column area (no SOA row exists for the contractor's grouping); "
+            remark=f"Rev A {SS} row {r}: contractor area {v(f'M{r}')} m2 entered as the SOA-column area. No SOA row exists for the contractor's grouping. "
                    f"room number is the zone tag because Rev A gives room ID '-'."))
         if not sup:
             rooms[-1]["occupancy_per_100m2"] = None
@@ -153,7 +165,7 @@ def build_reva_input(root: Path = Path(".")) -> Dict[str, Any]:
     refs = [dict(label=str(ahu["A44"].value), flow_lps=ahu["B44"].value, oa_lps=None, source="RA-AHU-REF", code="D",
                  remark="contractor's stated tender figure; Rev A could not trace it"),
             dict(label="Equipment Schedule (Corr 5) sheet 7, AHU-B-03-01OPPHARM-01A/B", flow_lps=ahu["B45"].value, oa_lps=ahu["E45"].value,
-                 source="RA-AHU-REF", code="D", remark="VERIFY: read from the PDF text layer in Rev A"),
+                 source="RA-AHU-REF", code="D", remark="VERIFY: the Rev A workbook quotes this figure from the printed Equipment Schedule"),
             dict(label=str(ahu["A46"].value), flow_lps=ahu["B46"].value, oa_lps=ahu["E46"].value, source="RA-AHU-REF", code="D", remark="")]
     flags = [
         dict(type="VERIFY", ref="Airflow Comparison", text="Contractor's TENDER AHU airflow 5,530 L/s is not traceable; the Equipment Schedule (Corr 5) lists AHU-B-03-01OPPHARM-01A/B at 1,455 L/s / OA 523 L/s. VERIFY the tender air-side schematic before accepting any reduction narrative.", source="RA-BOD-B45"),
@@ -162,17 +174,17 @@ def build_reva_input(root: Path = Path(".")) -> Dict[str, Any]:
         dict(type="ASSUMPTION", ref="Basis of Design", text="Supply air temperature 14 °C (12 °C off-coil + 2 K fan rise). If rooms must be held at 21 °C the temperature difference falls to 7 K and airflow rises about 40 %.", source="RA-BOD-C28"),
         dict(type="CONFIRM", ref="AHU", text="Outdoor air 2 ACH far exceeds toilet exhaust plus pressurisation leakage; the surplus must be relieved (spill or relief, or transfer to lower-pressure areas).", source="RA-BOD-B45"),
         dict(type="CONFIRM", ref="AHU", text="Contractor tag AHU-B-02-01OPPPHARM-01A&B differs from the tender tag AHU-B-03-01OPPHARM-01A/B; confirm plant location and MCP allocation.", source="RA-BOD-B45"),
-        dict(type="VERIFY", ref="Pressure", text="DD p.21 gives Positive for the pharmacy rooms without a pascal value and the contractor shows 0 Pa; the pressure method is not applied to this department.", source="RA-DD21"),
+        dict(type="VERIFY", ref="Pressure", text="DD p.21 gives Positive for the pharmacy rooms with no pascal value. The contractor shows 0 Pa. The pressure method is not applied to this department.", source="RA-DD21"),
     ]
     documents = []
     for rr in range(8, 16):
-        documents.append(dict(document=str(bod[f"B{rr}"].value), role=str(bod[f"C{rr}"].value), issue="", taken=str(bod[f"E{rr}"].value), source="RA-BOD-B45"))
+        documents.append(dict(document=_plain(bod[f"B{rr}"].value), role=_plain(bod[f"C{rr}"].value), issue="", taken=_plain(bod[f"E{rr}"].value), source="RA-BOD-B45"))
     return {
         "schema_version": 1,
         "project": dict(name="AIGH redevelopment, Contract 2 (Inpatient), ACMV", code="AIGH_C2",
                         revision=dict(rev="A", date=__import__("datetime").date.today().isoformat(), description="Reproduction of the Rev A worked example", by="", checked="", approved="")),
         "department": dict(number="L1-OPP", name="Level 1 Outpatient Pharmacy AHU (Rev A example)"),
-        "scope": "Reproduction of the Rev A worked example (451.5 m2, 2,760 L/s room supply) by the workbook generator, with inputs read from the Rev A workbook.",
+        "scope": "Reproduction of the Rev A worked example (451.5 m2, 2,760 L/s room supply) with inputs read from the Rev A workbook.",
         "storeys": ["L01"], "storey_labels": {"L01": "Level 1"},
         "documents": documents, "constants": constants, "space_types": sp, "activities": acts, "orientations": ori, "space_type_defaults": defaults,
         "criteria_origin": ["Room criteria: the DD Booklet, Pharmacy (Batch 2), p.21, as cited by the Rev A Basis of Design and carried in the Room Zones cells."],

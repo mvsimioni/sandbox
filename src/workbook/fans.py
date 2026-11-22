@@ -133,11 +133,11 @@ def department_fans(root: Path, ahu_tags: List[str], rooms: List[Dict[str, Any]]
             sid = add_src(f"EQS5F-{_norm(tag)}"[:60], document="Equipment Schedule, fan schedule (SCH010)", issue="Corr 5", page=f"page {first['page']}",
                           location=f"tag {r['tag_as_written']}; {first['loc']}", text_as_read=f"{r['tag_as_written']}: {first['desc']}; minimum airflow {lps:g} L/s"
                           if lps is not None else f"{r['tag_as_written']}: {first['desc']}; no airflow printed",
-                          method="read from the schedule table", confidence="high")
+                          method="Value read from the Equipment Schedule table", confidence="high")
             src_text = f"Equipment Schedule Corr 5, page {first['page']}, {r['tag_as_written']}"
         else:
             sid = add_src(f"TSCH-{_norm(tag)}"[:60], document=f"Air-side schematic {first['sheet']}", issue="tender issue", page=f"page {first['page']}",
-                          location=f"fan {tag}", text_as_read=f"{tag}: {lps:g} L/s" if lps is not None else tag, method="read from the schematic text",
+                          location=f"fan {tag}", text_as_read=f"{tag}: {lps:g} L/s" if lps is not None else tag, method="Value read from the text printed on the air-side schematic",
                           confidence="medium")
             src_text = f"tender air-side schematic {first['sheet']}, {tag}"
         serves, serves2, why = tag, None, ""

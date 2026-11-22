@@ -73,7 +73,13 @@ def scan_formulas(path: Path) -> Dict[str, Any]:
 
 
 INTERNAL_PATTERNS = [r"config/", r"out/(qa|registers|zoning|loads|sidecar)", r"\.(csv|md|py|json|yaml)\b", r"\bSection \d+(\.\d+)?\b",
-                     r"\bbrief\b", r"\bGate \w+", r"\bTask \d", r"template_spec", r"\bD-0\d\d\b"]
+                     r"\bbrief\b", r"\bGate \w+", r"\bTask \d", r"template_spec", r"\bD-0\d\d\b",
+                     # tool and process wording (D-015): a document says what was read and where, never which program read it
+                     r"\bopenpyxl\b", r"\blibre ?office\b", r"\bpython\d?\b", r"\bpdfplumber\b", r"\bpymupdf\b", r"\bvision\b", r"\btext layer\b",
+                     r"(?-i:\bconfig\b)(?!-)", r"\bcached\b", r"\bformulas? kept\b", r"\bre-?read\b", r"\bnot re-?read\b", r"\bjson\b", r"\bcsv\b",
+                     r"\bparser\b", r"\b(workbook|document|file|report) generator\b", r"\bself-?test\b", r"\bsidecar\b", r"\bmarkdown\b", r"\bocr\b", r"\bregion growing\b",
+                     r"\bscript(s|ed)?\b", r"\bhumani[sz]er\b", r"\bste-lint\b", r"\bworkflow\b", r"\bpipeline\b", r"\bregisters?\b",
+                     r"\bdata/source\b", r"\bscratch\b", r"\bregex\b", r"\balgorithm\b"]
 
 
 def language_scan(path: Path, root: Path = Path(".")) -> List[Tuple[str, str, str]]:
@@ -124,6 +130,99 @@ def language_scan(path: Path, root: Path = Path(".")) -> List[Tuple[str, str, st
         if v:
             check("properties", k, str(v))
     return hits
+
+
+def _patterns(root: Path = Path(".")) -> List[Tuple[str, "re.Pattern[str]"]]:
+    from .conf import forbidden_terms
+    pats = [(t, re.compile(r"\b" + re.escape(t) + r"(s|es)?\b", 0 if t == "AI" else re.I)) for t in forbidden_terms(root)]
+    pats += [(f"internal reference '{p}'", re.compile(p, re.I)) for p in INTERNAL_PATTERNS]
+    return pats
+
+
+def method_column_scan(path: Path, root: Path = Path(".")) -> Tuple[int, List[Tuple[str, str]]]:
+    """The Method column of the Sources tab (D-015): how each value was obtained, in document terms. Returns the number of cells read
+    and the hits. An empty method is a hit, and so is a method that names a tool or an internal process."""
+    wb = openpyxl.load_workbook(path, data_only=True)
+    ws = wb["Sources"]
+    col = None
+    for row in ws.iter_rows(min_row=1, max_row=12):
+        for c in row:
+            if c.value == "Method":
+                col, first = c.column, c.row + 1
+                break
+        if col:
+            break
+    if col is None:
+        return 0, [("Sources", "no Method column")]
+    pats = _patterns(root)
+    n, hits = 0, []
+    for r in range(first, ws.max_row + 1):
+        if not ws.cell(r, 1).value:
+            continue
+        v = ws.cell(r, col).value
+        n += 1
+        if not isinstance(v, str) or not v.strip():
+            hits.append((f"G{r}", "empty method"))
+            continue
+        for name, rx in pats:
+            if rx.search(v):
+                hits.append((f"{ws.cell(r, col).coordinate}", f"{name}: {v[:80]}"))
+                break
+    return n, hits
+
+
+def scan_strings(obj: Any, root: Path = Path("."), where: str = "") -> List[Tuple[str, str]]:
+    """Hits of the deliverable-language patterns in every string of a nested structure (the department input of the generator)."""
+    pats = _patterns(root)
+    hits: List[Tuple[str, str]] = []
+
+    def walk(o: Any, path: str) -> None:
+        if isinstance(o, str):
+            for name, rx in pats:
+                m = rx.search(o)
+                if m:
+                    hits.append((path, f"{name}: ...{o[max(0, m.start() - 25):m.end() + 25]}..."))
+                    break
+        elif isinstance(o, dict):
+            for k, v in o.items():
+                walk(v, f"{path}.{k}")
+        elif isinstance(o, (list, tuple)):
+            for i, v in enumerate(o):
+                walk(v, f"{path}[{i}]")
+    walk(obj, where)
+    return hits
+
+
+def generator_text_scan(root: Path = Path(".")) -> Tuple[int, List[Tuple[str, int, str]]]:
+    """Static scan of every prose string literal in the generator modules (text that can reach a cell): three words or more, not a
+    docstring, not a file name. The command-line module and this module are excluded (console text). Returns (strings scanned, hits)."""
+    import ast
+    pats = _patterns(root)
+    n, hits = 0, []
+    pkg = Path(__file__).resolve().parent
+    for f in sorted(pkg.glob("*.py")):
+        if f.name in ("__main__.py", "selftest.py"):
+            continue
+        tree = ast.parse(f.read_text(encoding="utf-8"))
+        skip = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.ClassDef)) and node.body and isinstance(node.body[0], ast.Expr) \
+                    and isinstance(getattr(node.body[0], "value", None), ast.Constant):
+                skip.add(id(node.body[0].value))
+            if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id.startswith("_SEARCH_") for t in node.targets):
+                for sub in ast.walk(node.value):
+                    skip.add(id(sub))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in skip:
+                v = node.value
+                if len(v.split()) < 3 or re.fullmatch(r"[\w./\\*-]+", v):
+                    continue
+                n += 1
+                for name, rx in pats:
+                    if rx.search(v):
+                        hits.append((f.name, node.lineno, f"{name}: {v[:80]}"))
+                        break
+    return n, hits
 
 
 def style_proof(ctx, path: Path) -> Dict[str, Any]:
@@ -186,7 +285,7 @@ def ka_input() -> Dict[str, Any]:
         return dict(number=no, name=name, storey="L01", ahu="AHU-KA", zone_tag=no, system_type="VAV", terminal_tag=None,
                     space_type="Pharmacy (OP)", room_condition="Comfort", soa_area_m2=area, area_selector="SOA", ceiling_height_m=3.0,
                     prov={"identity": ["D", "KA-8.3"], "zoning": ["D", "KA-8.3"], "space_type": ["D", "KA-8.3"], "soa_area": ["D", "KA-8.3"],
-                          "ceiling_height": ["D", "KA-8.3"], "area_selector": ["S", "GEN-CONFIG"]},
+                          "ceiling_height": ["D", "KA-8.3"], "area_selector": ["S", "GEN-BASIS"]},
                     criteria=dict(criteria_row="known-answer room", page="8.3", min_oa_ach=2, min_total_ach=6, pressure_regime="NEGATIVE",
                                   pressure_pa_tender=pa, air_class="1", single_pass="Y", source="KA-8.3", code="D"),
                     pressure=dict(mode="controlled", suite=suite, perimeter_m=perim, prov=["D", "KA-8.3"], surface_override_m2=override,
@@ -587,6 +686,31 @@ def run(work: Optional[Path] = None, report: Optional[Path] = None) -> int:
     for k, v in lang.items():
         if v:
             fails.append(f"language scan {k}: {len(v)} hits, first {v[:3]}")
+    # (4b2) Sources Method column, every string the generator writes (D-015)
+    mc = {}
+    for nm, path_ in (("reva_rebuild", rc), ("known_answer_dept", krc)):
+        mc[nm] = method_column_scan(path_, root)
+    gen_n, gen_hits = generator_text_scan(root)
+    asm_hits: List[Tuple[str, str]] = []
+    asm_n = 0
+    if (root / "out" / "registers" / "dpa_rooms.csv").exists():
+        from .assemble import assemble_department
+        for dept in ("30", "41"):
+            try:
+                dd = assemble_department(dept, None, root)
+            except (OSError, ValueError, KeyError):
+                continue
+            asm_n += 1
+            asm_hits += scan_strings(dd, root, f"D{dept}")
+    results["language_method"] = {k: dict(cells=v[0], hits=v[1][:10]) for k, v in mc.items()}
+    results["language_generator"] = dict(strings=gen_n, hits=gen_hits[:20], assembled_inputs=asm_n, assembled_hits=asm_hits[:20])
+    for k, (n_, h_) in mc.items():
+        if h_:
+            fails.append(f"Sources Method column {k}: {len(h_)} hits, first {h_[:3]}")
+    if gen_hits:
+        fails.append(f"generator text: {len(gen_hits)} hits, first {gen_hits[:3]}")
+    if asm_hits:
+        fails.append(f"assembled department input text: {len(asm_hits)} hits, first {asm_hits[:3]}")
     # (4c) tender airflow columns (D-013): a build with tender values, recalculated
     d13 = d013_check(data, work)
     results["d013"] = d13
@@ -630,6 +754,8 @@ def run(work: Optional[Path] = None, report: Optional[Path] = None) -> int:
     print(f"== Errors: {sum(len(v) for v in err.values())}; formulas {fs['n_formula']}; typed literals {len(fs['literals'])}; IFERROR {len(fs['iferror'])}")
     print(f"== Style proof: {results['style']['n_coded']} coded cells, {len(results['style']['problems'])} problems")
     print(f"== Deliverable language: {sum(len(v) for v in lang.values())} hits (forbidden terms and internal references)")
+    print(f"== Sources Method column: {sum(v[0] for v in mc.values())} cells scanned, {sum(len(v[1]) for v in mc.values())} hits; generator text: {gen_n} strings scanned, {len(gen_hits)} hits; "
+          f"assembled department inputs: {asm_n} scanned, {len(asm_hits)} hits")
     print(f"== D-013 tender columns: {'ok' if not results['d013']['fails'] else results['d013']['fails']}; AHU remark: {results['d013']['ahu_remarks']}")
     print(f"== Default occupancy density: {'ok' if not results['occupancy']['fails'] else results['occupancy']['fails']}; note: {results['occupancy']['note'][:110]}")
     print(f"== PDF: {pdf['pages']} pages, footer found {pdf['footer_found']}")
