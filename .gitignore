@@ -13,3 +13,6 @@ state/listings/
 state/*.jsonl
 # project registers and QA outputs stay in a local-only repository under out/ (brief: no remote for project data)
 out/
+state/inbox/
+state/pull_batches/
+state/dept/

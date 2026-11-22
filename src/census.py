@@ -759,14 +759,22 @@ def default_workers() -> int:
     return max(1, (os.cpu_count() or 1) - 1)
 
 
+def _add_dir_options(parser: argparse.ArgumentParser, suppress: bool) -> None:
+    """Add ``--registers-dir`` / ``--logs-dir``; accepted before or after the subcommand."""
+    reg_default: Any = argparse.SUPPRESS if suppress else PATHS["registers"]
+    log_default: Any = argparse.SUPPRESS if suppress else PATHS["logs"]
+    parser.add_argument("--registers-dir", type=Path, default=reg_default, help="out/registers directory")
+    parser.add_argument("--logs-dir", type=Path, default=log_default, help="logs directory")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    """Argument parser with the ``run`` and ``summary`` subcommands."""
+    """Argument parser with the ``run`` and ``summary`` subcommands (directory options go on either side)."""
     parser = argparse.ArgumentParser(description="Page census of pulled PDF and PPTX files (script only, no model).")
-    parser.add_argument("--registers-dir", type=Path, default=PATHS["registers"], help="out/registers directory")
-    parser.add_argument("--logs-dir", type=Path, default=PATHS["logs"], help="logs directory")
+    _add_dir_options(parser, suppress=False)
     sub = parser.add_subparsers(dest="command", required=True)
 
     run_cmd = sub.add_parser("run", help="census every pending pdf/pptx in the pull ledger")
+    _add_dir_options(run_cmd, suppress=True)
     run_cmd.add_argument("--ledger", type=Path, default=PATHS["state"] / "pull_ledger.jsonl", help="pull ledger")
     run_cmd.add_argument("--progress", type=Path, default=PATHS["state"] / "progress.json", help="progress file")
     run_cmd.add_argument("--project-root", type=Path, default=None, help="root that ledger local_path values are relative to")
@@ -778,6 +786,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_cmd.set_defaults(func=run)
 
     sum_cmd = sub.add_parser("summary", help="page counts per root and page class")
+    _add_dir_options(sum_cmd, suppress=True)
     sum_cmd.set_defaults(func=summary)
     return parser
 

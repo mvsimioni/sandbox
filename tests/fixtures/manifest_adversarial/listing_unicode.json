@@ -1,0 +1,105 @@
+{
+ "taken_at": "2026-11-22T10:00:00Z",
+ "files": [
+  {
+   "id": "u1",
+   "title": "14_Déjà vu – plan, \"final\" | v2 .pdf",
+   "mimeType": "application/pdf",
+   "fileSize": "1000",
+   "fileExtension": "pdf",
+   "modifiedTime": "2026-11-21T00:00:00Z",
+   "createdTime": "2026-11-20T00:00:00Z",
+   "parentId": "p26s01",
+   "owner": "owner@example.com",
+   "etag": "e",
+   "rel_path": "DD Sign-OFF/26 - Diagnostic Imaging/Submitted/01_Layouts/14_Déjà vu – plan, \"final\" | v2 .pdf",
+   "listed_at": "2026-11-22T10:00:00Z",
+   "md5Checksum": "u1md5"
+  },
+  {
+   "id": "u2",
+   "title": "14_Déjà vu – plan, \"final\" | v2 .pdf",
+   "mimeType": "application/pdf",
+   "fileSize": "1000",
+   "fileExtension": "pdf",
+   "modifiedTime": "2026-11-21T00:00:00Z",
+   "createdTime": "2026-11-20T00:00:00Z",
+   "parentId": "p26d01",
+   "owner": "owner@example.com",
+   "etag": "e",
+   "rel_path": "DD Sign-OFF/26 - Diagnostic Imaging/DD Closure/01_Layouts/14_Déjà vu – plan, \"final\" | v2 .pdf",
+   "listed_at": "2026-11-22T10:00:00Z",
+   "md5Checksum": "u1md5"
+  },
+  {
+   "id": "u3",
+   "title": "Ünïcödé (2).zip",
+   "mimeType": "application/zip",
+   "fileSize": "300",
+   "fileExtension": "zip",
+   "modifiedTime": "2026-11-21T00:00:00Z",
+   "createdTime": "2026-11-20T00:00:00Z",
+   "parentId": "p26s",
+   "owner": "owner@example.com",
+   "etag": "e",
+   "rel_path": "DD Sign-OFF/26 - Diagnostic Imaging/Submitted/Ünïcödé (2).zip",
+   "listed_at": "2026-11-22T10:00:00Z"
+  },
+  {
+   "id": "u4",
+   "title": "Ünïcödé.zip",
+   "mimeType": "application/zip",
+   "fileSize": "300",
+   "fileExtension": "zip",
+   "modifiedTime": "2026-11-21T00:00:00Z",
+   "createdTime": "2026-11-20T00:00:00Z",
+   "parentId": "p26s",
+   "owner": "owner@example.com",
+   "etag": "e",
+   "rel_path": "DD Sign-OFF/26 - Diagnostic Imaging/Submitted/Ünïcödé.zip",
+   "listed_at": "2026-11-22T10:00:00Z"
+  }
+ ],
+ "folders": [
+  {
+   "id": "ROOT_DD",
+   "title": "DD Sign-OFF",
+   "mimeType": "application/vnd.google-apps.folder",
+   "parentId": "",
+   "rel_path": "DD Sign-OFF",
+   "listed_at": "2026-11-22T10:00:00Z"
+  },
+  {
+   "id": "f26",
+   "title": "26 - Diagnostic Imaging",
+   "mimeType": "application/vnd.google-apps.folder",
+   "parentId": "ROOT_DD",
+   "rel_path": "DD Sign-OFF/26 - Diagnostic Imaging",
+   "listed_at": "2026-11-22T10:00:00Z"
+  },
+  {
+   "id": "p26s",
+   "title": "Submitted",
+   "mimeType": "application/vnd.google-apps.folder",
+   "parentId": "f26",
+   "rel_path": "DD Sign-OFF/26 - Diagnostic Imaging/Submitted",
+   "listed_at": "2026-11-22T10:00:00Z"
+  },
+  {
+   "id": "p26s01",
+   "title": "01_Layouts",
+   "mimeType": "application/vnd.google-apps.folder",
+   "parentId": "p26s",
+   "rel_path": "DD Sign-OFF/26 - Diagnostic Imaging/Submitted/01_Layouts",
+   "listed_at": "2026-11-22T10:00:00Z"
+  },
+  {
+   "id": "p26d01",
+   "title": "01_Layouts",
+   "mimeType": "application/vnd.google-apps.folder",
+   "parentId": "f26",
+   "rel_path": "DD Sign-OFF/26 - Diagnostic Imaging/DD Closure/01_Layouts",
+   "listed_at": "2026-11-22T10:00:00Z"
+  }
+ ]
+}

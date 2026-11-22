@@ -1,0 +1,12 @@
+{
+  "name": "fixture suite",
+  "externals": {"CORRIDOR": 0.0},
+  "spaces": [
+    {"name": "ROOM", "set_pressure_pa": -15, "floor_area": 5.5272, "perimeter": 9.64, "height": 3.0},
+    {"name": "ENSUITE", "set_pressure_pa": null, "surface_m2": 20.0, "exhaust_m3h": 40.0}
+  ],
+  "links": [
+    {"a": "CORRIDOR", "b": "ROOM", "sealed": "hinged", "kind": "hinged sealed door"},
+    {"a": "ROOM", "b": "ENSUITE", "gap_area_cm2": 50, "kind": "door louvre"}
+  ]
+}
