@@ -135,6 +135,12 @@ department_scope:
 final_verification:
   verifier: fable
   fixers: [sonnet, opus]
+# D-014: before the final verification, two reviewer roles on each workbook batch, fixes by sonnet.
+pre_verification_review:
+  reviewers:
+    - {role: Senior Graphic Designer, focus: [typography, hierarchy, colour and cell code, print proof], model: opus}
+    - {role: Advanced Excel user, focus: [live formulas and precedents, named ranges, allowed functions, information flow, D-013 columns], model: opus}
+  fixer: sonnet
 
 # D-011 (Marcus, 22 Nov 2026): App D units recalculated from area; default for circulation/corridor/lobby spaces
 # without a booklet row = modal booklet circulation row (ASSUMPTION, to confirm).
