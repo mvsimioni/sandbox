@@ -50,7 +50,7 @@ def load_rooms(storeys: List[str]) -> Dict[str, List[dict]]:
     return out
 
 
-from ..workbook.common import THERMAL_NOTE  # noqa: E402
+from ..workbook.common import THERMAL_NOTE, THERMAL_NOTE_SHORT  # noqa: E402
 from ..workbook.tender_lookup import Tender  # noqa: E402,F401   (one tender lookup for every deliverable)
 
 
@@ -150,9 +150,9 @@ README = [
     ("If neither source has a figure, the cell is blank and the source column gives the reason.", ""),
     ("The Calculated airflow column holds the supply airflow in L/s from AHU_master_summary.xlsx (tab AHU Master): the room supply of the department workbooks that carry rooms on the unit, plus the duct leakage. The Calculated airflow source ID column points to the Sources sheet, which names the master row and the department workbooks. The values are numbers: they do not update when a workbook changes.", ""),
     ("Reduction (L/s) = Tender airflow minus Calculated airflow. Reduction (%) = Reduction divided by Tender airflow. Both are formulas and stay blank where the tender airflow or the calculated airflow is blank, or where the room list of the unit is partial.", ""),
-    ("Room list of the unit: the department workbooks add up only the rooms that they hold. The cell reads 'partial: n of m zoned rooms counted' when the zoned area of the unit is 0 m², or when the counted area is less than the share 0.9 of the zoned area of the unit, or more than 1 divided by 0.9 of it, or when the rooms that have a criteria row and a supply airflow hold less than the share 0.9 of the counted area. A partial unit shows no reduction. Its Remarks cell states the tender and the calculated airflow of the counted rooms only.", ""),
+    ("Room list of the unit: the department workbooks add up only the rooms that they hold. The cell reads 'No criteria row for n of m rooms on this unit' when the rooms with no criteria row hold more than 0.1 of the counted area: the calculated airflow is not known and no reduction is stated. It reads 'partial:' with the two areas and the two room counts when the zoned area of the unit is 0 m², or when the counted area is less than the share 0.9 of the zoned area of the unit, or more than 1 divided by 0.9 of it, or when the rooms that have a criteria row and a supply airflow hold less than the share 0.9 of the counted area. A unit with such a cell shows no reduction. Its Remarks cell states the tender and the calculated airflow of the counted rooms only. A unit that the zone schedule gives 2 rooms or fewer and that shows a reduction is marked in its Remarks cell as not confirmed (OI-R206-1, open for Marcus); the reduction is kept as the rule gives it.", ""),
     ("Tender outdoor airflow is the outdoor airflow of the same schedule row (Outdoor Airflow / Min), or of the tender air-side schematic where the schedule has none. Calculated outdoor air is the outdoor air of the unit in AHU_master_summary.xlsx. Where the calculated outdoor air is above the tender outdoor air, the Remarks cell says VERIFY and the unit shows no reduction. Both columns are blank where no figure exists.", ""),
-    ("The calculated airflow and the reduction include occupants only. Lighting, small power, equipment and envelope gains are not included, so the reduction is an upper limit.", ""),
+    ("The calculated airflow and the reduction include occupants only. Lighting, small power, equipment and envelope gains are not included. A reduction that is stated is therefore an upper limit.", ""),
     ("The Remarks cell is a formula. It states the tender airflow, the calculated airflow and the change. If the calculated airflow is more than the tender airflow, the Remarks cell starts with VERIFY.", ""),
     ("Schematic and schedule airflows are for comparison only. They do not set the zone.", ""),
     ("Units that are in AHU_master_summary.xlsx and not on the zoning drawing are listed after the zoned units. Their Departments, Storeys and Rooms come from the master summary.", ""),
@@ -181,15 +181,22 @@ NO_POLYGON_NOTE = ("No zone polygon: the room tags of this unit lie in an open r
                    "on the zoning PDF. No reduction is stated. ")
 
 
-def remarks_formula(i: int, zoned: bool = False) -> str:
-    """Remarks of the AHU summary. A reduction is worded only when the room list of the unit is complete (partial: n of m rooms counted) and the outdoor air is not above the
-    tender outdoor airflow (R1-10: VERIFY on every unit)."""
+def remarks_formula(i: int, zoned: bool = False, on_drawing: bool = True) -> str:
+    """Remarks of the AHU summary. A reduction is worded only when the room list of the unit is complete and the outdoor air is not above the tender outdoor airflow
+    (R1-10: VERIFY on every unit). 'The reduction is an upper limit.' stands on a text that states a reduction and on no other (round 3). A unit that the zone schedule
+    gives 2 rooms or fewer is marked as not confirmed (OI-R206-1, open for Marcus)."""
     oa = ('IF({oa},"Outdoor air "&TEXT(U{r},"#,##0")&" L/s is above tender outdoor air "&TEXT(T{r},"#,##0")&" L/s ("&J{r}&"). VERIFY. ","")').format(oa=oa_above_f(i), r=i)
-    f = ('=(IF(I{r}="",J{r}&".",IF(K{r}="","Tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). Calculated airflow not available. "&' + oa + ',' 
-         'IF(K{r}>I{r},"VERIFY: increase from "&TEXT(I{r},"#,##0")&" to "&TEXT(K{r},"#,##0")&" L/s (+"&TEXT((K{r}-I{r})/I{r},"0.0 %")&") against tender ("&J{r}&"). "&' + oa + ',' 
-         'IF(S{r}<>"",S{r}&". Tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). Calculated for the counted rooms: "&TEXT(K{r},"#,##0")&" L/s. No reduction is stated until the room list of the unit is complete. "&' + oa + ',' 
-         'IF(' + oa_above_f(i) + ',"Supply "&TEXT(K{r},"#,##0")&" L/s against tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). "&' + oa + '&"No reduction is stated for this unit until the outdoor air is checked.",' 
-         '"Reduced "&TEXT(I{r},"#,##0")&" to "&TEXT(K{r},"#,##0")&" L/s (−"&TEXT((I{r}-K{r})/I{r},"0.0 %")&") against tender ("&J{r}&")."))))))&" "&"' + THERMAL_NOTE + '"').format(r=i)
+    sn = '&" ' + THERMAL_NOTE_SHORT + '"'
+    small = ('IF(AND(ISNUMBER(F{r}),F{r}>0,F{r}<=2)," Interim, open for Marcus (OI-R206-1): the zone schedule gives this unit "&F{r}&IF(F{r}=1," room"," rooms")&" ("&TEXT(G{r},"#,##0")&" m²). '
+             'The reduction may come from an incomplete room list. It is not a confirmed result.","")').format(r=i)
+    if not on_drawing:
+        small = '""'
+    f = ('=IF(I{r}="",J{r}&"."' + sn + ',IF(K{r}="","Tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). Calculated airflow not available. "&' + oa + sn + ',' 
+         'IF(K{r}>I{r},"VERIFY: increase from "&TEXT(I{r},"#,##0")&" to "&TEXT(K{r},"#,##0")&" L/s (+"&TEXT((K{r}-I{r})/I{r},"0.0 %")&") against tender ("&J{r}&"). "&' + oa + sn + ',' 
+         'IF(ISNUMBER(SEARCH("no criteria row for",S{r})),S{r}&". The calculated airflow is not known. No reduction is stated. Tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). "&' + oa + sn + ',' 
+         'IF(S{r}<>"",S{r}&". Tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). Calculated for the counted rooms: "&TEXT(K{r},"#,##0")&" L/s. No reduction is stated until the room list of the unit is complete. "&' + oa + sn + ',' 
+         'IF(' + oa_above_f(i) + ',"Supply "&TEXT(K{r},"#,##0")&" L/s against tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). "&' + oa + '&"No reduction is stated for this unit until the outdoor air is checked."' + sn + ',' 
+         '"Reduced "&TEXT(I{r},"#,##0")&" to "&TEXT(K{r},"#,##0")&" L/s (−"&TEXT((I{r}-K{r})/I{r},"0.0 %")&") against tender ("&J{r}&")."&' + small + '&" ' + THERMAL_NOTE + '"))))))').format(r=i)
     if zoned:
         f = '=IF(G%d=0,"%s","")&' % (i, NO_POLYGON_NOTE) + f[1:]
     return f

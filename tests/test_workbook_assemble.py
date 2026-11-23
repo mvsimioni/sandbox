@@ -159,9 +159,10 @@ def test_helpers():
     assert occupancy_from_rds(dict(occupancy="")) is None
     assert occupancy_from_rds(dict(occupancy="1 patient, 1 visitor, up to 6-8 staff", occupancy_staff="8", occupancy_patients="1", occupancy_visitors="1"))[0] == 10.0
     assert room_use("Staff Toilet (Clean)")[0] == "toilet" and room_use("Meeting Room - Medium")[0] == "conference_meeting" and room_use("Xyzzy")[0] is None
-    assert _tag_candidates("AHU-X-01A/B")[:2] == ["AHU-X-01A", "AHU-X-01B"] and _tag_candidates("AHU-X-04") == ["AHU-X-04"]
+    assert _tag_candidates("AHU-X-01A/B")[:2] == ["AHU-X-01A", "AHU-X-01B"] and _tag_candidates("AHU-X-04")[0] == "AHU-X-04" and {"AHU-X-04A", "AHU-X-04B"} <= set(_tag_candidates("AHU-X-04"))
     rows = [dict(room_type_as_printed="Decontamination", room_type_norm="decontamination", booklet_page="3", min_oa_ach="2", min_total_ach="12")]
-    assert match_criteria("Decontamination area", rows)[0] is not None
+    assert match_criteria("Decontamination", rows)[0] is not None
+    assert match_criteria("Decontamination area", rows)[0] is None            # no match on one shared word (D-024): such a name is mapped in criteria_map.py
 
 
 def test_plan_match_never_forces_ties():

@@ -220,10 +220,11 @@ def build_layouts(ctx: Ctx) -> None:
 
 
 AHU_KEYS = ["ahu", "type", "n", "area", "area_sup", "vol", "noh", "sa_room", "leak", "sa_ahu", "oa_sum", "crit", "frac", "oa_rule",
-            "vou", "vps", "xs", "zd", "ev", "vot", "oa_ms", "ret", "exh", "relief",
+            "vou", "vps", "xs", "zd", "ev", "vot", "oa_ms", "oa_mb", "ret", "exh", "relief",
             "sens", "lat", "rt", "rh", "oa_sens", "oa_lat", "fan", "coil_s", "coil_l", "coil", "wm2",
             "oa_sens_ms", "oa_lat_ms", "coil_s_ms", "coil_l_ms", "coil_ms", "req_t", "sched", "sched_oa",
-            "sched_c", "sched_s", "tsrc", "zr", "za", "zc", "zs", "cov", "red", "redp", "rem", "nfix", "area_ok", "leadtxt", "nocrit", "area_nocrit"]
+            "sched_c", "sched_s", "tsrc", "zr", "za", "zc", "zs", "cov", "red", "redp", "rem", "nfix", "area_ok", "leadtxt", "nocrit", "area_nocrit",
+            "fsp", "spr", "spl", "spy", "spnote", "oaflg"]
 FCU_KEYS = ["k", "no", "name", "ahu", "why", "area", "sens_kw", "lat_kw", "supply", "oa", "oasrc", "oaby", "oacond", "oa_t", "oa_h",
             "oa_sens", "oa_lat", "coil_s", "coil_l", "coil", "cap_sched", "cap_drawn", "cap", "flag",
             "tender", "tsrc", "calc", "red", "redp", "rem"]

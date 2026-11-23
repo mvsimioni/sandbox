@@ -26,24 +26,27 @@ def test_tender_columns_reduction_and_remarks(tmp_path):
 def test_calculated_above_tender_is_verify_not_fail_and_tender_never_caps(tmp_path):
     d = build_reva_input(ROOT)
     tag = d["rooms"][0]["ahu"]
-    d["ahus"] = [dict(tag=tag, type="AHU", sched_supply_lps=1000.0, sched_code="D", sched_source="RA-AHU-REF", tender_source_text="tender equipment schedule, test")]
+    mine = [r for r in d["rooms"] if r["ahu"] == tag]
+    zone = dict(zone_rooms=len(mine), zone_area_m2=round(sum(r["soa_area_m2"] or r["dpa_area_m2"] or 0 for r in mine), 1), zone_code="D", zone_source="RA-AHU-REF")
+    d["ahus"] = [dict(tag=tag, type="AHU", sched_supply_lps=1000.0, sched_code="D", sched_source="RA-AHU-REF", tender_source_text="tender equipment schedule, test", **zone)]
     build_workbook(d, tmp_path / "a.xlsx")
     rc = recalc(tmp_path / "a.xlsx", tmp_path / "rc")
     wb = openpyxl.load_workbook(rc, data_only=True)
     from src.workbook.layouts import AHU_KEYS
     row = [r for r in wb["AHU"].iter_rows(min_row=7, values_only=True) if r[0] == tag][0]
     k = lambda key: row[AHU_KEYS.index(key)]
-    assert k("sa_ahu") == pytest.approx(3036.0) and k("red") == pytest.approx(1000.0 - 3036.0) and k("redp") == pytest.approx((1000 - 3036) / 1000)
+    assert k("sa_ahu") == pytest.approx(3036.0) and k("cov") in (None, "")
+    assert k("red") == pytest.approx(1000.0 - 3036.0) and k("redp") == pytest.approx((1000 - 3036) / 1000)
     assert k("rem").startswith("VERIFY: calculated 3,036 L/s is above tender 1,000 L/s")
     assert [r for r in wb["Checks"].iter_rows(min_row=7, values_only=True) if r[1] and r[4] == "FAIL"] == []
-    cp = [r for r in wb["Airflow Comparison"].iter_rows(min_row=7, values_only=True) if r[0] == tag]
+    cp = [r for r in wb["Comparison by AHU"].iter_rows(min_row=7, values_only=True) if r[0] == tag]
     assert cp and any(isinstance(x, str) and x.startswith("VERIFY: ABOVE TENDER") for x in cp[0])
 
 
 def test_default_occupancy_density_rounded_up_red_with_note(tmp_path):
     res = st.occupancy_check(build_reva_input(ROOT), tmp_path)
     assert res["fails"] == [] and res["people"] == res["expected"]
-    assert res["note"].startswith("Occupancy assumed: 7 p/100 m² x") and "To confirm." in res["note"]
+    assert res["note"].startswith("Occupancy assumed: 7 persons / 100 m² ×") and "To confirm." in res["note"]
 
 
 def test_language_scan_finds_forbidden_terms_and_internal_references(tmp_path):
@@ -74,28 +77,55 @@ def test_no_author_and_build_date_revision(tmp_path):
     assert all(v == "" for v in people.values())
 
 
+def _master_rows(path):
+    ws = openpyxl.load_workbook(path, data_only=True)["AHU Master"]
+    hdr = [c.value for c in ws[5]]
+    return {r[0]: dict(zip(hdr, r)) for r in ws.iter_rows(min_row=7, values_only=True) if r[0] and r[0] != "TOTAL"}
+
+
 def test_master_counts_each_ahu_once(tmp_path):
     ind = tmp_path / "in"
     ind.mkdir()
     for num, name, supply, tender in (("30", "Pharmacy", 1000.0, 5000.0), ("41", "CSSD", 500.0, 5000.0)):
         (ind / f"d{num}.json").write_text(json.dumps(dict(department=dict(number=num, name=name), ahus=[
-            dict(tag="AHU-SHARED-01", type="AHU", rooms=3, area_m2=100.0, room_supply_lps=supply, outdoor_air_lps=100.0, tender_lps=tender,
+            dict(tag="AHU-SHARED-01", type="AHU", rooms=3, area_m2=100.0, room_supply_lps=supply, outdoor_air_lps=100.0, tender_lps=tender, tender_oa_lps=2000.0,
+                 zone_rooms=6, zone_area_m2=200.0, area_ok_m2=100.0,
                  tender_source="Equipment Schedule Corr 5, page 7, AHU-SHARED-01", tender_source_id="EQS5-SHARED"),
             dict(tag=f"AHU-ONLY-{num}", type="AHU", rooms=1, area_m2=10.0, room_supply_lps=50.0, outdoor_air_lps=5.0, tender_lps=None)])))
     res = build_master(ind, tmp_path / "AHU_master_summary.xlsx", ROOT)
     assert res["departments"] == 2 and res["ahus"] == 3
     rc = recalc(tmp_path / "AHU_master_summary.xlsx", tmp_path / "rc")
     assert st.scan_errors(rc) == [] and st.language_scan(rc) == []
-    wb = openpyxl.load_workbook(rc, data_only=True)
-    rows = {r[0]: r for r in wb["AHU Master"].iter_rows(min_row=7, values_only=True) if r[0] and r[0] != "TOTAL"}
+    rows = _master_rows(rc)
     assert set(rows) == {"AHU-SHARED-01", "AHU-ONLY-30", "AHU-ONLY-41"}
     sh = rows["AHU-SHARED-01"]
-    assert sh[2] == 2 and sh[3] == 6 and sh[6] == pytest.approx(1500.0) and sh[8] == pytest.approx(1650.0)        # departments, rooms, room supply, with 10 % leakage
-    assert sh[10] == 5000 and sh[14] == pytest.approx(5000 - 1650) and sh[15] == pytest.approx((5000 - 1650) / 5000)
-    assert sh[17].startswith("Reduced 5,000 to 1,650 L/s")
-    assert rows["AHU-ONLY-30"][16] == "NO TENDER VALUE"
+    assert sh["Departments"] == 2 and sh["Rooms"] == 6 and sh["Room supply"] == pytest.approx(1500.0) and sh["Calculated airflow"] == pytest.approx(1650.0)   # with 10 % leakage
+    assert sh["Tender airflow"] == 5000 and sh["Room list of the unit"] in (None, "")
+    assert sh["Reduction = tender − calculated"] == pytest.approx(5000 - 1650) and sh["Reduction = (tender − calculated) ÷ tender"] == pytest.approx((5000 - 1650) / 5000)
+    assert sh["Remarks"].startswith("Reduced 5,000 to 1,650 L/s") and sh["Outdoor air against tender"] == "within tender outdoor air"
+    assert rows["AHU-ONLY-30"]["Against tender"] == "NO TENDER VALUE"
     fs = st.scan_formulas(tmp_path / "AHU_master_summary.xlsx")
     assert not fs["bad_funcs"] and not fs["literals"] and not fs["iferror"]
+
+
+def test_master_marks_outdoor_air_above_tender_and_states_no_reduction(tmp_path):
+    ind = tmp_path / "in"
+    ind.mkdir()
+    (ind / "d30.json").write_text(json.dumps(dict(department=dict(number="30", name="Pharmacy"), ahus=[
+        dict(tag="AHU-A-01", type="AHU", rooms=3, area_m2=100.0, room_supply_lps=1000.0, outdoor_air_lps=400.0, frac=1.0, tender_lps=5000.0, tender_oa_lps=457.0,
+             zone_rooms=3, zone_area_m2=100.0, area_ok_m2=100.0, tender_source="Equipment Schedule Corr 5, page 7, AHU-A-01", tender_source_id="EQS5-A"),
+        dict(tag="AHU-B-01", type="AHU", rooms=3, area_m2=100.0, room_supply_lps=1000.0, outdoor_air_lps=400.0, frac=0.2, tender_lps=5000.0, tender_oa_lps=457.0,
+             zone_rooms=3, zone_area_m2=100.0, area_ok_m2=100.0, tender_source="Equipment Schedule Corr 5, page 7, AHU-B-01", tender_source_id="EQS5-B")])))
+    build_master(ind, tmp_path / "m.xlsx", ROOT)
+    rc = recalc(tmp_path / "m.xlsx", tmp_path / "rc")
+    rows = _master_rows(rc)
+    a, b = rows["AHU-A-01"], rows["AHU-B-01"]
+    assert a["Outdoor air against tender"].startswith("VERIFY") and a["Reduction = tender − calculated"] in (None, "")
+    assert "above tender outdoor air 457 L/s" in a["Remarks"] and "Reduced" not in a["Remarks"]
+    assert b["Outdoor air against tender"] == "within tender outdoor air" and b["Remarks"].startswith("Reduced 5,000")
+    checks = {r[1]: r for r in openpyxl.load_workbook(rc, data_only=True)["Checks"].iter_rows(min_row=7, values_only=True) if r[1]}
+    row = checks["AHUs with outdoor air above tender outdoor air"]
+    assert row[2] == 1 and row[4] == "VERIFY"          # VERIFY, not FAIL (D-012)
 
 
 def test_master_reads_department_workbooks(tmp_path):
@@ -108,8 +138,8 @@ def test_master_reads_department_workbooks(tmp_path):
     res = build_master(ind, tmp_path / "m.xlsx", ROOT)
     rc = recalc(tmp_path / "m.xlsx", tmp_path / "rc")
     wb = openpyxl.load_workbook(rc, data_only=True)
-    row = [r for r in wb["AHU Master"].iter_rows(min_row=7, values_only=True) if r[0] == tag][0]
-    assert row[8] == pytest.approx(3036.0) and row[10] == 3500 and res["ahus"] == 1
+    row = _master_rows(rc)[tag]
+    assert row["Calculated airflow"] == pytest.approx(3036.0) and row["Tender airflow"] == 3500 and res["ahus"] == 1
 
 
 def test_common_areas_assembly_uses_default_criteria_and_lists_units(tmp_path):
@@ -123,7 +153,8 @@ def test_common_areas_assembly_uses_default_criteria_and_lists_units(tmp_path):
     assert all(r["criteria"]["code"] == "A" for r in d["rooms"] if r["criteria"])
     toilets = [r for r in d["rooms"] if r["name"] == "Toilet"]
     assert toilets and all(r["criteria"] and r["criteria"]["criteria_row"] == "Toilet" and r["criteria"].get("exhaust_ach") for r in toilets)
-    assert not any(r["criteria"] for r in d["rooms"] if r["name"] in ("ELEC", "Batt", "Common space"))
+    assert not any(r["criteria"] for r in d["rooms"] if r["name"] in ("ELEC", "Batt"))             # plant spaces: no default (R1-08)
+    assert all("Plant space" in r["gaps"]["criteria"] for r in d["rooms"] if r["name"] in ("ELEC", "Batt"))
     assert sum(1 for r in d["rooms"] if r["criteria"]) < len(d["rooms"])
     assert any(f["type"] == "ASSUMPTION" and "default criteria apply to the" in f["text"] for f in d["flags"])
     assert any(f["type"] == "OUTDOOR AIR" for f in d["fans"])
@@ -171,16 +202,17 @@ def test_unit_with_rooms_but_no_supply_counts_its_rooms_and_names_the_missing_he
     row = [r for r in wb["AHU"].iter_rows(min_row=7, values_only=True) if r[0] == "AHU-T1"][0]
     k = lambda key: row[AHU_KEYS.index(key)]
     assert k("sa_room") == 0 and k("n") == 2 and k("area") == pytest.approx(80.7) and k("area_sup") == 0 and k("noh") == 2
-    assert k("rem").startswith("Reduced 5,000 to 0 L/s") and "ceiling height is not set for 2 of 2 room(s)" in k("rem")
-    assert not k("rem").endswith(" ") and "No room" not in k("rem")
+    assert k("rem").startswith("Calculated airflow is 0 L/s. Main cause: ceiling height is not set for 2 of 2 rooms that this unit serves")
+    assert not k("rem").endswith(" ") and "No room on Room Information" not in k("rem")
     # the master summary reads the same counts and names the same cause
     wd = tmp_path / "dept"
     wd.mkdir()
     (wd / "AIGH_C2_D99_Test_Thermal_Load_Calc_RevA.xlsx").write_bytes((tmp_path / "rc" / "z.xlsx").read_bytes())
     build_master(wd, tmp_path / "m.xlsx")
     mrc = recalc(tmp_path / "m.xlsx", tmp_path / "mrc")
-    m = [r for r in openpyxl.load_workbook(mrc, data_only=True)["AHU Master"].iter_rows(min_row=7, values_only=True) if r[0] == "AHU-T1"][0]
-    assert m[3] == 2 and m[4] == pytest.approx(80.7) and m[5] == 2 and "ceiling height is not set for 2 of 2 room(s)" in m[-1]
+    m = _master_rows(mrc)["AHU-T1"]
+    assert m["Rooms"] == 2 and m["Area"] == pytest.approx(80.7) and m["Rooms with no ceiling height"] == 2
+    assert "ceiling height is not set for 2 of 2 rooms that this unit serves" in m["Remarks"]
 
 
 def test_duplicate_criteria_text_lists_each_distinct_set_of_values():

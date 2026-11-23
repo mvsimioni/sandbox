@@ -1216,7 +1216,7 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
                 room["occupancy_basis"] = "NOT SET"
                 remark.append("occupancy not set")
                 gaps["occupancy"] = ("Occupancy is not set. " + ("The RDS field is empty." if rds is not None else "No RDS row matches.") +
-                                     (f" The density table has no value for this room use ({label}). " if label else f" The room name '{d['name']}' does not say what the room is used for, so no room use fits it for the default density. ") +
+                                     (f" The density table has no value for this room use ({label.split(' (')[0]}). " if label else f" The room name '{d['name']}' does not say what the room is used for, so no room use fits it for the default density. ") +
                                      "Give the number of persons.")
         room["remark"] = ". ".join(_sentence_case(x.replace("; ", ". ")) for x in remark) + "."
         room["remark"] += " " + ROOM_THERMAL_NOTE

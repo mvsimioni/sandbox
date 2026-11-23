@@ -27,7 +27,7 @@ from openpyxl.workbook.defined_name import DefinedName
 
 from . import conf
 from .common import cf_formula, tender_remark
-from .sheets_systems import coverage_formula
+from .sheets_systems import coverage_formula, small_zone
 from .layouts import AHU_KEYS
 from .styles import CODE_STYLES, OCC_NAME, install_styles, link_to, put, setup_sheet
 
@@ -59,7 +59,9 @@ def read_department_workbook(path: Path) -> Dict[str, Any]:
                         frac=row[fi] or 0.0, zone_rooms=row[idx["zr"]], zone_area_m2=row[idx["za"]],
                         tender_lps=row[idx["sched"]], tender_source=row[idx["tsrc"]], tender_source_id=row[idx["sched_s"]],
                         rooms_specified=row[idx["nfix"]] or 0, area_ok_m2=row[idx["area_ok"]] or 0.0,
-                        tender_oa_lps=row[idx["sched_oa"]], rooms_no_criteria=row[idx["nocrit"]] or 0, area_no_criteria_m2=row[idx["area_nocrit"]] or 0.0))
+                        tender_oa_lps=row[idx["sched_oa"]], rooms_no_criteria=row[idx["nocrit"]] or 0, area_no_criteria_m2=row[idx["area_nocrit"]] or 0.0,
+                        frac_not_single_pass=row[idx["fsp"]] or 0.0, single_pass_room=row[idx["spr"]] or "", single_pass_room_supply_lps=row[idx["spl"]] or 0.0,
+                        frac_other_rooms=row[idx["spy"]] or 0.0))
     checks: Dict[str, Any] = {}
     if "Checks" in wb.sheetnames:
         for row in wb["Checks"].iter_rows(min_row=7, values_only=True):
@@ -234,7 +236,10 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
           ("code", "Code", "", 5), ("src", "Source ID", "", 12),
           ("zr", "Rooms of the unit in the zone schedule", "no.", 12), ("za", "Area of the unit in the zone schedule", "m²", 12),
           ("nfix", "Rooms specified by the MOT NSC", "no.", 12), ("aok", "Area of the rooms with a criteria row and a supply airflow", "m²", 14),
-          ("nnc", "Rooms with no criteria row", "no.", 12), ("anc", "Area of the rooms with no criteria row", "m²", 14)]
+          ("nnc", "Rooms with no criteria row", "no.", 12), ("anc", "Area of the rooms with no criteria row", "m²", 14),
+          ("fnsp", "Highest fraction of the rooms that are not single pass", "%", 14), ("spr", "Single-pass room that sets the fraction", "", 30),
+          ("spl", "Supply of that room", "L/s", 11), ("spy", "Highest fraction of the other rooms", "%", 12),
+          ("key", "Key (helper)", "", 12), ("idx", "Row (helper)", "", 8)]
     for i, (k, h, u, w) in enumerate(dh):
         col = chr(65 + i)
         put(dr, f"{col}5", h, "Header" if k not in ("name",) else "HeaderLeft")
@@ -259,6 +264,12 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
             put(dr, f"O{row}", a.get("area_ok_m2") or 0, "Input", "d1")
             put(dr, f"P{row}", a.get("rooms_no_criteria") or 0, "Input", "d0")
             put(dr, f"Q{row}", a.get("area_no_criteria_m2") or 0, "Input", "d1")
+            put(dr, f"R{row}", a.get("frac_not_single_pass") or 0, "Input", "pct1")
+            put(dr, f"S{row}", a.get("single_pass_room") or None, "Input").alignment = Alignment(horizontal="left")
+            put(dr, f"T{row}", a.get("single_pass_room_supply_lps") or 0, "Input", "d1")
+            put(dr, f"U{row}", a.get("frac_other_rooms") or 0, "Input", "pct1")
+            put(dr, f"V{row}", f'=IF(S{row}<>"",A{row}&"|"&TEXT(I{row},"0.0000"),"")', "Calc")
+            put(dr, f"W{row}", f"=ROW()", "Calc", "d0")
             put(dr, f"J{row}", "D", "Code")
             put(dr, f"K{row}", f"DEPT-{dn}", "Tag")
             link_to(dr[f"K{row}"], "Sources", f"A{src_row[f'DEPT-{dn}']}")
@@ -305,12 +316,14 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
           ("nh", "Rooms with no ceiling height", "no.", 12),
           ("sa", "Room supply", "L/s", 11), ("leak", "Duct leakage", "%", 9), ("calc", "Calculated airflow", "L/s", 11),
           ("oa", "Sum of room outdoor air", "L/s", 11), ("frac", "Highest room outdoor-air fraction", "%", 12), ("oa_rule", "AHU outdoor air = fraction × calculated airflow", "L/s", 14),
+          ("oa_mb", "Outdoor air, mass-balance basis (information only)", "L/s", 14),
           ("tender", "Tender airflow", "L/s", 11), ("toa", "Tender outdoor airflow", "L/s", 11), ("code", "Code", "", 5), ("sid", "Source ID", "", 24), ("tsrc", "Tender source", "", 40),
           ("zr", "Rooms of the unit in the zone schedule", "no.", 12), ("za", "Area of the unit in the zone schedule", "m²", 12), ("cov", "Room list of the unit", "", 36),
           ("red", "Reduction = tender − calculated", "L/s", 12), ("redp", "Reduction = (tender − calculated) ÷ tender", "%", 12),
           ("flag", "Against tender", "", 28), ("oaflag", "Outdoor air against tender", "", 28), ("rem", "Remarks", "", 70),
           ("nfix", "Rooms specified by the MOT NSC", "no.", 12), ("aok", "Area of the rooms with a criteria row and a supply airflow", "m²", 14),
-          ("nnc", "Rooms with no criteria row", "no.", 12), ("anc", "Area of the rooms with no criteria row", "m²", 14)]
+          ("nnc", "Rooms with no criteria row", "no.", 12), ("anc", "Area of the rooms with no criteria row", "m²", 14),
+          ("spnote", "Single-pass note (helper)", "", 20)]
     from openpyxl.utils import get_column_letter
     col = {k: get_column_letter(i + 1) for i, (k, *_r) in enumerate(mh)}
     for i, (k, h, u, w) in enumerate(mh):
@@ -337,6 +350,15 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
         put(am, g("oa"), f"=SUMIFS({rng('G')},{rng('A')},{g('ahu')})", "Calc", "d1")
         put(am, g("frac"), f"=_xlfn.MAXIFS({rng('I')},{rng('A')},{g('ahu')})", "Calc", "pct1")
         put(am, g("oa_rule"), f"={g('frac')}*{g('calc')}", "Calc", "d1")
+        # R1-10 decided item 3 (information only, feeds nothing): larger of (sum of room outdoor air x (1 + DuctLeakage)) and (highest fraction of the rooms that are
+        # not single pass x calculated airflow)
+        put(am, g("oa_mb"), f"=MAX({g('oa')}*(1+{g('leak')}),_xlfn.MAXIFS({rng('R')},{rng('A')},{g('ahu')})*{g('calc')})", "Calc", "d1")
+        # R1-10 decided item 2: the single-pass room that sets the fraction
+        mt = f'MATCH({g("ahu")}&"|"&TEXT({g("frac")},"0.0000"),{rng("V")},0)'
+        yy = f'MAX(INDEX({rng("U")},{mt}),_xlfn.MAXIFS({rng("I")},{rng("A")},{g("ahu")},{rng("W")},"<>"&INDEX({rng("W")},{mt})))'
+        put(am, g("spnote"), (f'=IF(ISNUMBER({mt}),"The fraction "&TEXT({g("frac")},"0.0#")&" comes from "&INDEX({rng("S")},{mt})&" (single pass, "'
+                              f'&TEXT(IF({g("sa")}>0,INDEX({rng("T")},{mt})/{g("sa")},0),"0.0 %")&" of the supply). The other rooms on this unit have a fraction of "'
+                              f'&TEXT({yy},"0.0#")&" or less.","")'), "Calc")
         toa_ = tender_oa.get(tag)
         put(am, g("toa"), toa_, "Input", "d0")
         te = tenders.get(tag)
@@ -361,18 +383,19 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
         put(am, g("red"), f'=IF(OR({g("tender")}="",{g("calc")}=0,{g("cov")}<>"",{oa_above}),"",{g("tender")}-{g("calc")})', "Calc", "d0")
         put(am, g("redp"), f'=IF(OR({g("red")}="",{g("tender")}=0),"",{g("red")}/{g("tender")})', "Calc", "pct1")
         put(am, g("flag"), (f'=IF({g("tender")}="","NO TENDER VALUE",IF({g("calc")}=0,"NOT CALCULATED",IF({g("cov")}<>"","PARTIAL ROOM LIST",'
-                            f'IF({g("calc")}>{g("tender")},"VERIFY: ABOVE TENDER",IF({g("calc")}={g("tender")},"EQUALS TENDER",IF({oa_above},"NO REDUCTION STATED: OUTDOOR AIR ABOVE TENDER","REDUCTION AGAINST TENDER"))))))'),
+                            f'IF({g("calc")}>{g("tender")},"VERIFY: ABOVE TENDER",IF({g("calc")}={g("tender")},"EQUALS TENDER",IF({oa_above},"NO REDUCTION STATED: OUTDOOR AIR ABOVE TENDER",IF(AND({g("zr")}>0,{g("zr")}<=2),"REDUCTION AGAINST TENDER: NOT CONFIRMED (OI-R206-1 OPEN)","REDUCTION AGAINST TENDER")))))))'),
             "Calc").alignment = Alignment(horizontal="left")
         put(am, g("rem"), tender_remark(g("tender"), g("calc"), g("red"), g("redp"), f'IF({g("tsrc")}="","tender airflow",{g("tsrc")})',
                                         zero="No room of the department workbooks is on this unit, or no room of it has a supply airflow.",
                                         share_note=False, partial=g("cov"), note=g("tsrc"), all_spec=f'AND({g("n")}>0,{g("nfix")}={g("n")})',
                                         oa_above=oa_above, oa_calc=g("oa_rule"), oa_tender=g("toa"), crit_partial=True,
+                                        extra=g("spnote"), small=small_zone(g("zr"), g("za")),
                                         lead=(f'IF({g("nh")}>0,"Main cause: ceiling height is not set for "&{g("nh")}&" of "&{g("n")}&" rooms that this unit serves, '
                                               f'so their air-change airflow is 0 L/s.","")')), "Remark")
     last = FIRST + max(len(tags), 1) - 1
     tr = last + 1
     put(am, f"A{tr}", "TOTAL", "ResultTag")
-    for k in ("n", "nh", "area", "sa", "calc", "oa", "oa_rule", "tender", "red"):
+    for k in ("n", "nh", "area", "sa", "calc", "oa", "oa_rule", "oa_mb", "tender", "red"):
         put(am, f"{col[k]}{tr}", f"=SUM({col[k]}{FIRST}:{col[k]}{last})", "Total", "d0" if k in ("n", "nh", "tender", "red") else "d1")
     # the percentage compares the reduction of the rows that state one with the tender of the same rows
     red_rng = f"{col['red']}{FIRST}:{col['red']}{last}"
@@ -417,6 +440,10 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
         ("AHU rows with no tender airflow", f'=COUNTIF({ahu_rng("tender")},"")', 0, '=IF(C{r}=0,"PASS","VERIFY")', "rows"),
         ("AHU rows whose room list is partial against the zone schedule", f'=COUNTIF({ahu_rng("cov")},"partial*")', 0, '=IF(C{r}=0,"PASS","VERIFY")',
          "rows; no reduction is stated for them (see the Room list of the unit column)"),
+        ("AHU rows with no criteria row for most of their rooms", f'=COUNTIF({ahu_rng("cov")},"No criteria row*")', "information", '="INFO"',
+         "rows; the calculated airflow is not known and no reduction is stated for them"),
+        ("AHU rows that state a reduction and that the zone schedule gives 2 rooms or fewer (OI-R206-1, open)", f'=COUNTIF({ahu_rng("flag")},"REDUCTION AGAINST TENDER: NOT CONFIRMED*")', "information", '="INFO"',
+         "rows; the reduction is kept as the room-list rule gives it and the Remarks column says that it is not confirmed"),
         ("Zoned area that the department workbooks do not count on the AHU rows", f"=SUMPRODUCT(({ahu_rng('za')}>{ahu_rng('area')})*({ahu_rng('za')}-{ahu_rng('area')}))", 0,
          '=IF(C{r}<=0,"PASS","VERIFY")', "m² of the zone schedule"),
         ("AHU rows whose calculated airflow is above tender", f'=COUNTIF({ahu_rng("flag")},"VERIFY*")', 0, '=IF(C{r}=0,"PASS","VERIFY")', "rows"),
@@ -503,7 +530,7 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
     r += 1
     put(rd, f"B{r}", "A unit shows a reduction against tender only when the area counted in the department workbooks is within the share ZoneCoverMin of the area that the zone "
         "schedule gives for the unit, on both sides (not below ZoneCoverMin times and not above 1 ÷ ZoneCoverMin times that area), and when the rooms that have a criteria row and a "
-        "supply airflow hold at least that share of the counted area. A unit whose zone schedule area is 0 m² is partial. Otherwise the Remarks column states 'partial: n of m zoned rooms counted' and the reduction cells stay blank. "
+        "supply airflow hold at least that share of the counted area. A unit whose zone schedule area is 0 m² is partial. Otherwise the Remarks column names the cause and the reduction cells stay blank. The cause is 'No criteria row for n of m rooms' where the rooms with no criteria row hold more than 1 − ZoneCoverMin of the counted area (the calculated airflow is not known), or 'partial:' with the two areas and the two room counts where the counted area and the zoned area differ. "
         "The percentage in the total row compares the reduction of the rows that state one with the tender of the same rows.", "TextWrap")
     rd.merge_cells(f"B{r}:H{r}")
     rd.row_dimensions[r].height = 56

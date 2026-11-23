@@ -186,7 +186,7 @@ def main(argv=None) -> int:
         from .deliver import red_formula, redp_formula, remarks_formula
         sm.cell(row=i, column=col["Reduction (L/s)"]).value = red_formula(i)
         sm.cell(row=i, column=col["Reduction (%)"]).value = redp_formula(i)
-        sm.cell(row=i, column=col["Remarks"]).value = remarks_formula(i)
+        sm.cell(row=i, column=col["Remarks"]).value = remarks_formula(i, on_drawing=False)
         note = ("Unit not on the zoning drawing. " + (f"Room supply {g(r, 'Room supply'):g} L/s plus duct leakage {float(g(r, 'Duct leakage')) * 100:g} %."
                                                      if isinstance(calc, (int, float)) and calc > 0 else "The master summary gives 0 L/s: the calculated airflow is not available."))
         sid = source(tag, row_no, r, note)

@@ -150,7 +150,8 @@ def build_workbook(data: Union[Dict[str, Any], Path, str], out: Optional[Path] =
     SB.write_sources(ctx)
     rows = SB.build_flag_rows(ctx)
     ctx.n_live = min(len(ctx.rooms), 4 * len(ctx.ahus))       # outdoor-air rule: one live flag per separated or listed room
-    ctx.n_flags = len(rows) + ctx.n_live
+    ctx.n_live_oa = len(ctx.ahus)                              # R1-10: one live VERIFY flag per unit whose outdoor air is above the tender outdoor airflow
+    ctx.n_flags = len(rows) + ctx.n_live + ctx.n_live_oa
     ctx.lay["FL"] = Layout("Flags", ["id", "type", "ref", "desc", "status", "owner", "src"], 7, ctx.n_flags)
     SB.write_checks(ctx)
     SB.write_readme(ctx)

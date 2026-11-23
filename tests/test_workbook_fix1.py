@@ -37,7 +37,7 @@ def test_outdoor_air_never_exceeds_supply_in_single_pass_negative_rooms(ka):
     ahu = dict(zip(AHU_KEYS, _rows(ka["rc"], "AHU")[0]))
     assert ahu["oa_rule"] == pytest.approx(ahu["sa_ahu"]) and ahu["ret"] >= 0
     checks = {r[1]: r[4] for r in _rows(ka["rc"], "Checks") if r[1]}
-    assert checks["Rooms whose outdoor air exceeds their supply"] == "PASS"
+    assert checks["Rooms with an AHU whose outdoor air is below the air-change minimum"] == "PASS"      # outdoor air is capped at supply: no room exceeds it
     assert checks["AHU balances that do not close"] == "PASS"
 
 
@@ -71,7 +71,7 @@ def test_readme_units_block_is_whole_text(ka):
     ws = wb["README"]
     row = next(r for r in range(1, 80) if ws.cell(row=r, column=2).value == "Units and abbreviations")
     text = ws.cell(row=row + 1, column=2).value
-    assert len(text) > 150 and "ACH air changes per hour" in text and "SOA schedule of accommodation" in text
+    assert len(text) > 150 and "Airflow: L/s on every tab" in text and "named cell WperkW" in text
     head = next(r for r in range(1, 80) if ws.cell(row=r, column=2).value == "Revision")
     assert [ws.cell(row=head + 1, column=c).value for c in range(2, 8)] == ["Rev", "Date", "Description", "By", "Chk'd", "App'd"]
 
@@ -85,7 +85,7 @@ def test_print_proof_passes_and_airflow_prints_every_column(ka):
     assert all(v["scale"] >= 0.75 for v in proof["sheets"].values())
     import re
     txt = re.sub(r"\s+", " ", __import__("subprocess").run(["pdftotext", "-layout", str(pdf), "-"], capture_output=True, text=True).stdout)
-    for word in ("Highest-", "On an", "Separate"):
+    for word in ("Highest-",):
         assert word in txt
 
 

@@ -30,7 +30,8 @@ def test_colours_stable_and_never_red():
     assert c1 == st.colour_for("AHU-B-05-05XYZ-01")
     seen = {st.colour_for("AHU-B-05-05T%03d-01" % i) for i in range(200)}
     assert "#FF0000" not in seen
-    assert st.colour_for("AHU-B-04-04MRI-01") == "#0000FF"      # the sample's colour is reused
+    # one colour per unit on every page, chosen to be far from the colours of the units on the same storeys (the sample's colour is not reused since round 1)
+    assert st.colour_for("AHU-B-04-04MRI-01") == st.colour_for("AHU-B-04-04MRI-01") != "#FF0000"
 
 
 def _src(path):

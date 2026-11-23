@@ -206,7 +206,7 @@ def write_basis(ctx: Ctx) -> None:
              "Tender airflow (Equipment Schedule Corr 5; for the MOT NSC units the MOT NSC Overall AC Equipment Schedule Corr 2; else the tender air-side schematic) is information only. It is never a target or a limit. "
              "Reduction = tender − calculated. Reduction (%) = (tender − calculated) ÷ tender. A calculated airflow above tender is marked VERIFY. "
              "A unit shows a reduction only when the rooms counted here reach the share ZoneCoverMin of the area that the zone schedule gives for the unit. "
-             "Otherwise the Remarks cell reads 'partial: n of m rooms counted' and the reduction cells stay blank. A unit whose outdoor air is above its tender outdoor airflow is marked VERIFY and shows no reduction. The other departments on the unit are counted on the AHU master summary.",
+             "Otherwise the Remarks cell names the cause ('No criteria row for n of m rooms', or 'partial:' with the two areas and the two room counts) and the reduction cells stay blank. A unit whose outdoor air is above its tender outdoor airflow is marked VERIFY and shows no reduction. The other departments on the unit are counted on the AHU master summary.",
              "Occupancy comes from the RDS. The default density by room use applies only where the RDS field is empty or the room has no RDS. "
              "It is rounded up to a whole person (red text, code A).",
              "Area used (selector AUTO, the default): the design area is the DPA designed area, else the SOA area. "
@@ -357,7 +357,8 @@ def build_flag_rows(ctx: Ctx) -> List[Dict[str, Any]]:
                 status="OPEN", owner="ACMV engineer", src="", link=("Room Information", RI.local("terminal", gi)))
         c = r.get("criteria") or {}
         if not c:
-            add(type="CONFIRM", ref=n, desc=f"{who}: no criteria row is set; the criteria cells are blank.{note('criteria')}",
+            add(type="VERIFY" if str(gaps.get("criteria", "")).startswith("Plant space") else "CONFIRM", ref=n,
+                desc=f"{who}: no criteria row is set; the criteria cells are blank.{note('criteria')}",
                 status="OPEN", owner="ACMV engineer", src="", link=("Criteria", CR.local("crit", gi)))
         elif gaps.get("criteria"):
             add(type="VERIFY", ref=n, desc=f"{who}: criteria row {c.get('criteria_row', '')}.{note('criteria')}", status="OPEN",
@@ -509,6 +510,21 @@ def write_flags(ctx: Ctx, rows: List[Dict[str, Any]]) -> None:
         put(ws, g("status"), f'=IF({used},"OPEN","")', "Text")
         put(ws, g("owner"), f'=IF({used},"ACMV engineer","")', "Text")
         put(ws, g("src"), None, "Tag")
+    # R1-10 (decided): one live VERIFY row per AHU whose calculated outdoor air is above the tender outdoor airflow (D-012). The order comes from the AHU tab (oaflg).
+    for q in range(ctx.n_live_oa):
+        i = len(rows) + ctx.n_live + q
+        g = lambda k: L.local(k, i)
+        m = f"MATCH({q + 1},{AH.rng('oaflg')},0)"
+        used = f"ISNUMBER({m})"
+        pk = lambda k: f"INDEX({AH.rng(k)},{m})"
+        put(ws, g("id"), f'=IF({used},"F-"&TEXT(ROWS($A${L.first}:$A{L.row(i)}),"000"),"")', "Tag")
+        put(ws, g("type"), f'=IF({used},"VERIFY","")', "Text")
+        put(ws, g("ref"), f'=IF({used},{pk("ahu")},"")', "Tag")
+        put(ws, g("desc"), (f'=IF({used},"AHU "&{pk("ahu")}&": outdoor air "&TEXT({pk("oa_rule")},"#,##0")&" L/s is above tender outdoor air "&TEXT({pk("sched_oa")},"#,##0")'
+                            f'&" L/s ("&IF({pk("tsrc")}="","tender airflow",{pk("tsrc")})&"). VERIFY. No reduction is stated for this unit. The tender airflow is information only.","")'), "TextWrap")
+        put(ws, g("status"), f'=IF({used},"OPEN","")', "Text")
+        put(ws, g("owner"), f'=IF({used},"ACMV engineer","")', "Text")
+        put(ws, g("src"), None, "Tag")
     r = L.last + 2
     put(ws, f"A{r}", "Live", "Tag")
     put(ws, f"D{r}", (f'="Outdoor-air rule: "&COUNTIF({AF.rng("status")},"SEPARATE")&" room(s) proposed for separation onto an FCU; "'
@@ -642,6 +658,8 @@ def write_checks(ctx: Ctx) -> None:
          '=IF(C{r}=0,"PASS","VERIFY")', "VERIFY, not FAIL: tender airflow is information only; no reduction is stated for these units"),
         ("AHUs whose room list is partial against the zone schedule", f'=COUNTIF({AH.rng("cov")},"partial*")' if ctx.ahus else "=0", "information", '="INFO"',
          "units with no reduction shown; the zoned rooms and area are on the AHU tab"),
+        ("AHUs with no criteria row for most of their rooms", f'=COUNTIF({AH.rng("cov")},"No criteria row*")' if ctx.ahus else "=0", "information", '="INFO"',
+         "units whose calculated airflow is not known; no reduction is stated for them"),
         ("Rooms linked to a room box of the tender air-side schematics", f'=COUNT({ctx.lay["CP"].rng("sch_s")})', "information", '="INFO"',
          "of the rooms on Room Information; the room boxes that match no room are on Flags"),
         ("Open flags", f'=COUNTIF({FL.rng("status")},"OPEN")', "information", '="INFO"', "see Flags"),

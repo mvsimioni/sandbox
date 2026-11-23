@@ -71,6 +71,23 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
         put(ws, g("ev"), f"=1+{g('xs')}-{g('zd')}", "Calc", "d3")
         put(ws, g("vot"), f"=IF({g('ev')}>0,{g('vou')}/{g('ev')},0)", "Calc", "d1")
         put(ws, g("oa_ms"), f"=MAX({g('oa_sum')},{g('vot')})", "Calc", "d1")
+        # R1-10 decided item 3: information only. Larger of (sum of room outdoor air x (1 + DuctLeakage)) and (highest fraction of the rooms that are not
+        # single pass x AHU supply). It feeds neither the coil duty nor the Remarks. It shows the effect of option (b) of OI-R110-1.
+        put(ws, g("fsp"), f'=_xlfn.MAXIFS({AF.rng("frac")},{crit}{inc},{AF.rng("single")},"<>Y")', "Calc", "pct1")
+        put(ws, g("oa_mb"), f"=MAX({g('oa_sum')}*(1+{g('leak')}),{g('fsp')}*{g('sa_ahu')})", "Calc", "d1")
+        # R1-10 decided item 2: the room that sets the highest fraction, when it is single pass
+        mt = f"MATCH({key},{AF.rng(cm)},0)"
+        put(ws, g("spr"), f'=IF(AND({g("frac")}>0,ISNUMBER({mt})),IF(INDEX({AF.rng("single")},{mt})="Y",INDEX({AF.rng("no")},{mt})&" "&INDEX({AF.rng("name")},{mt}),""),"")', "Calc")
+        put(ws, g("spl"), f'=IF({g("spr")}<>"",INDEX({AF.rng("supply")},{mt}),0)', "Calc", "d1")
+        put(ws, g("spy"), f'=IF({g("spr")}<>"",_xlfn.MAXIFS({AF.rng("frac")},{crit}{inc},{AF.rng("no")},"<>"&INDEX({AF.rng("no")},{mt})),0)', "Calc", "pct1")
+        put(ws, g("spnote"), (f'=IF({g("spr")}="","","The fraction "&TEXT({g("frac")},"0.0#")&" comes from "&{g("spr")}&" (single pass, "'
+                              f'&TEXT(IF({g("sa_room")}>0,{g("spl")}/{g("sa_room")},0),"0.0 %")&" of the supply). The other rooms on this unit have a fraction of "'
+                              f'&TEXT({g("spy")},"0.0#")&" or less.")'), "Calc")
+        if not after:
+            prev = f"COUNT({L.col('oaflg')}${L.first}:{L.col('oaflg')}{L.row(t - 1)})+1" if t else "1"
+        else:
+            prev = "0"
+        put(ws, g("oaflg"), (f'=IF(AND(ISNUMBER({g("sched_oa")}),{g("oa_rule")}>{g("sched_oa")}),{prev},"")' if not after else '=""'), "Calc", "d0")
         put(ws, g("ret"), f"={g('sa_ahu')}-{g('oa_rule')}", "Calc", "d1")
         put(ws, g("exh"), f"=SUMIFS({AF.rng('exhaust')},{crit}{inc})", "Calc", "d1")
         put(ws, g("relief"), f"={g('sa_ahu')}-{g('ret')}-{g('exh')}", "Calc", "d1")
@@ -124,25 +141,41 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
         inner = tender_remark(g("sched"), g("sa_ahu"), g("red"), g("redp"), f'IF({g("tsrc")}="","tender airflow",{g("tsrc")})',
                               zero="No room of this unit has a supply airflow.", crit_partial=True,
                               lead=g("leadtxt"), partial=g("cov"), note=g("tsrc"),
-                              all_spec=f'AND({g("n")}>0,{g("nfix")}={g("n")})', oa_above=oa_above, oa_calc=g("oa_rule"), oa_tender=g("sched_oa"))[1:]
+                              all_spec=f'AND({g("n")}>0,{g("nfix")}={g("n")})', oa_above=oa_above, oa_calc=g("oa_rule"), oa_tender=g("sched_oa"),
+                              extra=g("spnote"), small=small_zone(g("zr"), g("za")))[1:]
         put(ws, g("rem"), f'=IF({g("n")}=0,"No room on Room Information is served by this unit: no calculation.",{inner})', "Remark")
 
 
+def small_zone(zr: str, za: str) -> tuple:
+    """OI-R206-1 (open for Marcus, interim state): a stated reduction for a unit that the zone schedule gives 2 rooms or fewer is not a confirmed result. The text says so."""
+    return (f'AND(ISNUMBER({zr}),{zr}>0,{zr}<=2)',
+            f'"Interim, open for Marcus (OI-R206-1): the zone schedule gives this unit "&{zr}&IF({zr}=1," room"," rooms")&" ("&TEXT({za},"#,##0")&" m²). The reduction may come from an incomplete room list. It is not a confirmed result."')
+
+
 def coverage_formula(zr: str, za: str, n: str, area: str, area_ok: str, z: str, nc: str = None, nca: str = None) -> str:
-    """Excel text: empty when the room list of a unit is complete, else 'partial: ...'. The counted area must lie within the share Z of the zoned area on both
-    sides (below Z times, or above 1/Z times the zoned area, is partial), and the rooms with a criteria row and a supply airflow must hold at least the share Z of the
-    counted area. A unit that is not in the zone schedule is partial. The text says how many of the rooms are counted (D-023): 'partial: n of m rooms counted'.
-    `nc` and `nca` are the count and the area of the counted rooms that have no criteria row (R1-08, decided ruling 3)."""
+    """Excel text: empty when the room list of a unit is complete, else the cause. Order of the tests (R1-08 decided ruling 3, round 3):
+    1. the unit is not in the zone schedule: 'partial: ...';
+    2. the counted rooms that have no criteria row hold more than (1 - Z) of the counted area: 'No criteria row for n of m rooms on this unit (a m²)'. This test
+       comes before the area test: the calculated airflow is not known whatever the area, so the text must not say that the area differs;
+    3. the zone schedule gives the unit an area of 0 m²: 'partial: ...';
+    4. the counted area lies outside the share Z of the zoned area on either side (below Z times, or above 1/Z times the zoned area): 'partial: ...'. The text
+       gives the two areas and the two room counts. It does not say 'n of m rooms counted' (n can be more than m: the department workbooks count rooms that the
+       zone schedule does not hold);
+    5. the rooms with a criteria row and a supply airflow hold less than the share Z of the counted area: 'partial: ...'.
+    `nc` and `nca` are the count and the area of the counted rooms that have no criteria row."""
     if nc:
-        crit = (f'IF({area_ok}<{z}*{area},IF({nc}>0,"partial: no criteria row for "&{nc}&" of "&{n}&" rooms on this unit ("&TEXT({nca},"#,##0")&" m²)",'
-                f'"partial: only "&TEXT({area_ok},"#,##0")&" of "&TEXT({area},"#,##0")&" m² counted have a supply airflow"),"")')
+        miss = (f'IF({area_ok}<{z}*{area},"partial: only "&TEXT({area_ok},"#,##0")&" of "&TEXT({area},"#,##0")&" m² counted have a supply airflow","")')
+        nocrit = f'AND({nc}>0,{nca}>(1-{z})*{area})'
+        nct = f'"No criteria row for "&{nc}&" of "&{n}&" rooms on this unit ("&TEXT({nca},"#,##0")&" m²)"'
     else:
-        crit = (f'IF({area_ok}<{z}*{area},"partial: only "&TEXT({area_ok},"#,##0")&" of "&TEXT({area},"#,##0")&" m² counted have a criteria row and a supply airflow","")')
-    return (f'=IF({zr}="","partial: the unit is not in the zone schedule",IF({zr}=0,"partial: the unit is not in the zone schedule",'
-            f'IF(IF(ISNUMBER({za}),{za},0)=0,"partial: the zone schedule gives the unit a zoned area of 0 m² ("&{n}&" of "&{zr}&" zoned rooms counted; the room tags have no outline on the plan)",'
+        miss = (f'IF({area_ok}<{z}*{area},"partial: only "&TEXT({area_ok},"#,##0")&" of "&TEXT({area},"#,##0")&" m² counted have a criteria row and a supply airflow","")')
+        nocrit, nct = "FALSE", '""'
+    body = (f'IF(IF(ISNUMBER({za}),{za},0)=0,"partial: the zone schedule gives the unit a zoned area of 0 m² ("&{zr}&" zoned rooms; the room tags have no outline on the plan); "&{n}&" rooms counted",'
             f'IF(OR({area}<{z}*{za},{area}>{za}/{z}),'
-            f'"partial: "&{n}&" of "&{zr}&" zoned rooms counted ("&TEXT({area},"#,##0")&" m² counted, "&TEXT({za},"#,##0")&" m² zoned)",'
-            f'{crit}))))')
+            f'"partial: the department workbooks count "&{n}&" rooms ("&TEXT({area},"#,##0")&" m²); the zone schedule gives "&{zr}&" rooms ("&TEXT({za},"#,##0")&" m²)",'
+            f'{miss}))')
+    return (f'=IF({zr}="","partial: the unit is not in the zone schedule",IF({zr}=0,"partial: the unit is not in the zone schedule",'
+            f'IF({nocrit},{nct},{body})))')
 
 
 def height_lead(ctx: Ctx, *, ahu: str = None, room: str = None, fan_tag: str = None, n: str = None, noh: str = None) -> str:
@@ -185,7 +218,8 @@ def write_ahu(ctx: Ctx) -> None:
     title_block(ws, "AHU", "Airflow totalisation and coil duty per AHU. Supply = room supply + duct leakage (named cell). Outdoor air "
                 "= the outdoor-air fraction of the highest-standard room × AHU supply (rule). The plain sum and the multiple-space "
                 "value of the example are shown beside it. Rooms and Area count every room on the unit. Table B repeats the AHU without "
-                "the rooms the outdoor-air rule separates.", ctx)
+                "the rooms the outdoor-air rule separates. The column 'Outdoor air, mass-balance basis' is information only (OI-R110-1, open for Marcus): it shows the outdoor air when "
+                "the single-pass rooms are left out of the fraction. It feeds neither the coil duty nor the Remarks.", ctx)
     heads = [H("ahu", "AHU or system", "", 24), H("type", "Type", "", 9), H("n", "Rooms on this unit", "no.", 8), H("area", "Area of these rooms", "m" + U, 9),
              H("area_sup", "Area of rooms with supply", "m" + U, 9), H("vol", "Volume of rooms with supply", "m³", 9),
              H("noh", "Rooms with no ceiling height", "no.", 9), H("sa_room", "Room supply", "L/s", 10), H("leak", "Duct leakage", "%", 8),
@@ -194,7 +228,8 @@ def write_ahu(ctx: Ctx) -> None:
              H("oa_rule", "AHU outdoor air = fraction × supply", "L/s", 11), H("vou", "Vou (sum of Voc)", "L/s", 9),
              H("vps", "Vps (sum of Vsc)", "L/s", 9), H("xs", "Xs = Vou / Vps", "–", 8), H("zd", "Zd, highest Voc / Vsc", "–", 8),
              H("ev", "Ev = 1 + Xs − Zd", "–", 8), H("vot", "Vot = Vou / Ev", "L/s", 9),
-             H("oa_ms", "Outdoor air as the example: max (sum, Vot)", "L/s", 11), H("ret", "Return = AHU supply − outdoor air", "L/s", 10),
+             H("oa_ms", "Outdoor air as the example: max (sum, Vot)", "L/s", 11),
+             H("oa_mb", "Outdoor air, mass-balance basis (information only)", "L/s", 12), H("ret", "Return = AHU supply − outdoor air", "L/s", 10),
              H("exh", "Exhaust", "L/s", 9), H("relief", "Spill or relief", "L/s", 9), H("sens", "Room sensible", "kW", 9),
              H("lat", "Room latent", "kW", 9), H("rt", "Reference room temperature (first room served)", "°C", 10), H("rh", "Reference room enthalpy (first room served)", "kJ/kg", 10),
              H("oa_sens", "Outdoor air sensible", "kW", 9), H("oa_lat", "Outdoor air latent", "kW", 9), H("fan", "Fan heat", "kW", 8),
@@ -211,7 +246,10 @@ def write_ahu(ctx: Ctx) -> None:
              H("red", "Reduction = tender − calculated supply", "L/s", 11),
              H("redp", "Reduction = (tender − calculated) ÷ tender", "%", 11), H("rem", "Remarks", "", 140),
              H("nfix", "Rooms specified by the MOT NSC", "no.", 10), H("area_ok", "Area of the rooms with a criteria row and a supply airflow", "m" + U, 12),
-             H("leadtxt", "Causes proved by the cells (helper)", "", 12), H("nocrit", "Rooms with no criteria row", "no.", 10), H("area_nocrit", "Area of the rooms with no criteria row", "m" + U, 12)]
+             H("leadtxt", "Causes proved by the cells (helper)", "", 12), H("nocrit", "Rooms with no criteria row", "no.", 10), H("area_nocrit", "Area of the rooms with no criteria row", "m" + U, 12),
+             H("fsp", "Highest fraction of the rooms that are not single pass", "–", 12), H("spr", "Single-pass room that sets the fraction", "", 24),
+             H("spl", "Supply of that room", "L/s", 10), H("spy", "Highest fraction of the other rooms", "–", 12), H("spnote", "Single-pass note (helper)", "", 20),
+             H("oaflg", "Order of the units with outdoor air above tender (helper)", "no.", 12)]
     bands = {"ahu": "A. AS ZONED: AIRFLOW", "frac": "OUTDOOR AIR", "vou": "MULTIPLE SPACE (example)", "ret": "RETURN, EXHAUST, RELIEF",
              "sens": "COIL DUTY", "oa_sens_ms": "COIL DUTY ON THE EXAMPLE'S OUTDOOR-AIR BASIS", "req_t": "CHECKS", "sched": "TENDER AIRFLOW AND REDUCTION",
              "zr": "ROOM LIST OF THE UNIT"}
@@ -235,9 +273,9 @@ def write_ahu(ctx: Ctx) -> None:
         put(ws, f"A{tr}", "TOTAL", "ResultTag")
         for k in ("n", "noh", "area", "area_sup", "vol", "sa_room", "sa_ahu", "oa_sum", "oa_rule", "oa_ms", "ret", "exh", "relief", "sens", "lat",
                   "oa_sens", "oa_lat", "fan", "coil_s", "coil_l", "coil", "coil_ms", "coil_s_ms", "coil_l_ms",
-                  "oa_sens_ms", "oa_lat_ms"):
+                  "oa_sens_ms", "oa_lat_ms", "oa_mb"):
             put(ws, f"{LL.col(k)}{tr}", f"=SUM({LL.col(k)}{LL.first}:{LL.col(k)}{LL.last})", "Total",
-                "d0" if k in ("n", "noh") else ("d1" if k in ("area", "area_sup", "vol", "sa_room", "sa_ahu", "oa_sum", "oa_rule", "oa_ms", "ret", "exh", "relief") else "d2"))
+                "d0" if k in ("n", "noh") else ("d1" if k in ("area", "area_sup", "vol", "sa_room", "sa_ahu", "oa_sum", "oa_rule", "oa_ms", "oa_mb", "ret", "exh", "relief") else "d2"))
     ctx.ahu_total_row = L.last + 1
     ctx.ahu2_total_row = L2.last + 1
     if ctx.ahus:
@@ -255,7 +293,7 @@ def write_ahu(ctx: Ctx) -> None:
         cf_formula(ws, f"{L2.col('red')}{L2.first}:{L2.col('red')}{L2.last}", f'AND({L2.col("red")}{L2.first}<>"",{L2.col("red")}{L2.first}<0)', bold=False, fill="FFFFF2CC")
     group_cols(ws, L, "vou", "vot")
     group_cols(ws, L, "oa_sens_ms", "coil_ms")
-    group_cols(ws, L, "nfix", "area_nocrit", collapsed=True)
+    group_cols(ws, L, "nfix", "oaflg", collapsed=True)
     _setup(ws, ctx, L, L.idx["rem"], ctx.ahu2_total_row, "4:6", f"{L.col('crit')}{L.first}", "FF00B050")
     ws.freeze_panes = f"B{L.first}"
 

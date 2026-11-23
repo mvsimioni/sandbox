@@ -112,6 +112,8 @@ def find_blank_box(page, size_pt: Tuple[float, float], search: Tuple[float, floa
         y = search[1]
         while y + h <= search[3]:
             x0, y0, x1, y1 = [int(round(v * sc)) for v in (x, y, x + w, y + h)]
+            x0, x1 = min(x0, ii.shape[1] - 1), min(x1, ii.shape[1] - 1)          # a box wider or taller than the page is cut at the page edge
+            y0, y1 = min(y0, ii.shape[0] - 1), min(y1, ii.shape[0] - 1)
             tot = ii[y1, x1] - ii[y0, x1] - ii[y1, x0] + ii[y0, x0]
             frac = float(tot) / max((x1 - x0) * (y1 - y0), 1)
             if best is None or frac < best[1]:
@@ -510,6 +512,8 @@ def write_multi_zoning_pdf(src_pdf: Path, specs: Sequence[dict], out_pdf: Path, 
             for ud in sp.get("undrawn", []):
                 items.append(("undrawn", (ud["tag"], ud["n_rooms"], ud["departments"], ud["reason"], ud.get("airflow"))))
             items.append(("note", "No information (not filled): %d rooms, %s m²" % (un.get("unclassified_rooms", 0), _fmt_area(un.get("unclassified_area_m2", 0.0)))))
+            if sp.get("not_drawn_note"):
+                items.append(("note", sp["not_drawn_note"]))
         pages, cur, y = [], [], 96.0
         for kind, pl in items:
             h = {"storey": 22.0, "head": 18.0, "note": 16.0, "undrawn": ROW * 2 + 2}.get(kind, ROW + (ROW * 0.0))

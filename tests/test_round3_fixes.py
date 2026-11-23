@@ -81,9 +81,10 @@ def test_zone_schedule_outdoor_air_formula(tmp_path):
 def test_partial_wording_n_of_m(tmp_path):
     f = coverage_formula("B1", "C1", "D1", "E1", "F1", "G1", "H1", "I1")
     cases = [
-        ({"B1": 10, "C1": 349, "D1": 1, "E1": 12, "F1": 12, "G1": 0.9, "H1": 0, "I1": 0}, "partial: 1 of 10 zoned rooms counted"),
+        ({"B1": 10, "C1": 349, "D1": 1, "E1": 12, "F1": 12, "G1": 0.9, "H1": 0, "I1": 0}, "partial: the department workbooks count 1 rooms (12 m²); the zone schedule gives 10 rooms (349 m²)"),
+        ({"B1": 7, "C1": 2067, "D1": 8, "E1": 2527, "F1": 2527, "G1": 0.9, "H1": 8, "I1": 2527}, "No criteria row for 8 of 8 rooms on this unit (2,527 m²)"),    # the no-criteria cause comes before the area mismatch
         ({"B1": 10, "C1": 0, "D1": 10, "E1": 300, "F1": 300, "G1": 0.9, "H1": 0, "I1": 0}, "partial: the zone schedule gives the unit a zoned area of 0"),
-        ({"B1": 10, "C1": 300, "D1": 10, "E1": 300, "F1": 0, "G1": 0.9, "H1": 10, "I1": 300}, "partial: no criteria row for 10 of 10 rooms"),
+        ({"B1": 10, "C1": 300, "D1": 10, "E1": 300, "F1": 0, "G1": 0.9, "H1": 10, "I1": 300}, "No criteria row for 10 of 10 rooms"),
         ({"B1": 10, "C1": 300, "D1": 10, "E1": 300, "F1": 300, "G1": 0.9, "H1": 0, "I1": 0}, ""),
     ]
     got = _eval(tmp_path, [f] * len(cases), {})  # placeholder to prove the formula parses
@@ -94,8 +95,27 @@ def test_partial_wording_n_of_m(tmp_path):
 
 def test_no_criteria_unit_remark(tmp_path):
     f = tender_remark("A1", "B1", "C1", "D1", '"src"', partial="P1", crit_partial=True, zero="z")
-    v = _eval(tmp_path, [f], {"A1": 3000, "B1": 0, "C1": "", "D1": "", "P1": "partial: no criteria row for 22 of 22 rooms on this unit (1,107 m²)"})[0]
-    assert v.startswith("partial: no criteria row for 22 of 22 rooms on this unit (1,107 m²). The calculated airflow is not known. No reduction is stated.")
+    v = _eval(tmp_path, [f], {"A1": 3000, "B1": 0, "C1": "", "D1": "", "P1": "No criteria row for 22 of 22 rooms on this unit (1,107 m²)"})[0]
+    assert v.startswith("No criteria row for 22 of 22 rooms on this unit (1,107 m²). The calculated airflow is not known. No reduction is stated.")
+    assert "is 0 L/s" not in v and "upper limit" not in v
+
+
+def test_upper_limit_only_on_a_stated_reduction(tmp_path):
+    f = tender_remark("A1", "B1", "C1", "D1", '"src"', partial="P1", crit_partial=True, zero="z")
+    red = _eval(tmp_path, [f], {"A1": 3000, "B1": 2000, "C1": 1000, "D1": 0.333, "P1": ""})[0]
+    assert red.startswith("Reduced") and red.endswith("The reduction is an upper limit.")
+    for cells in ({"A1": 3000, "B1": 0, "P1": ""}, {"A1": 3000, "B1": 2000, "P1": "partial: x"}, {"A1": 3000, "B1": 4000, "P1": ""}, {"A1": "", "B1": 2000, "P1": ""}):
+        v = _eval(tmp_path, [f], dict(cells, C1="", D1=""))[0]
+        assert "upper limit" not in v, (cells, v)
+
+
+def test_small_zone_reduction_is_marked_not_confirmed(tmp_path):
+    from src.workbook.sheets_systems import small_zone
+    f = tender_remark("A1", "B1", "C1", "D1", '"src"', partial="P1", crit_partial=True, zero="z", small=small_zone("M1", "N1"))
+    v = _eval(tmp_path, [f], {"A1": 9000, "B1": 187, "C1": 8813, "D1": 0.979, "P1": "", "M1": 1, "N1": 33.5})[0]
+    assert v.startswith("Reduced 9,000 to 187") and "OI-R206-1" in v and "not a confirmed result" in v
+    v = _eval(tmp_path, [f], {"A1": 9000, "B1": 187, "C1": 8813, "D1": 0.979, "P1": "", "M1": 5, "N1": 300})[0]
+    assert "OI-R206-1" not in v
 
 
 # R2-01 ------------------------------------------------------------------------------------------------------
@@ -206,5 +226,11 @@ def test_units_without_polygon_are_not_in_legend_or_index():
     import pymupdf
     d = pymupdf.open(str(ROOT / "out" / "zoning" / "AIGH_IP_AHU_Zoning_LB3-L07.pdf"))
     text = "".join(p.get_text() for p in d) + "".join((a.info.get("content", "") for p in d for a in (p.annots() or [])))
+    assert "NOT DRAWN" not in text
+    assert "Not drawn" in text and "See the zone schedule" in text                       # R2-12 residual: the PDF says that the units are left out
     for tag in ("AHU-B-07-06DSOT-11", "AHU-B-07-06DSOT-12A/B", "AHU-B-07-06STER-03A/B"):
-        assert "NOT DRAWN" not in text and tag not in text, tag
+        assert tag in text, tag
+        for p in d:                                                                     # no zone, legend swatch or index row of the unit: the tag is in a note only
+            for a in p.annots() or []:
+                if tag in (a.info.get("subject") or ""):
+                    raise AssertionError(f"annotation subject {tag}")

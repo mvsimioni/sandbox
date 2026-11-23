@@ -4,7 +4,8 @@ Order of evidence (first that gives a storey wins), recorded per unit in the res
 1. ``dept_units.json`` (explicit entry, with its evidence text);
 2. the DPA unit name equals a stacking-diagram IP-block cell of the department (``ip_units`` of ``assemble``);
 3. a governing SOA unit code of the department (``soa_rooms.csv`` dept_no + unit_zone_code) that is a DPA unit
-   (``fpu_department_no``), when the department has exactly one IP storey in LB3-L07 in the stacking diagram.
+   (``fpu_department_no``), when the department has exactly one IP storey in LB3-L07 in the stacking diagram. A unit whose name is the text of a
+   cell of the OP block of the stacking diagram is not an IP unit and is listed as excluded.
 A unit with none of these is returned in ``unresolved`` and is not used.
 """
 
@@ -55,8 +56,14 @@ def resolve_units(key: str, stack: List[Dict[str, str]], dpa_units: Dict[str, Li
     storeys = sorted({storey_code(s["storey"]) for s in stack if s.get("dept_no") and key in [dept_key(x) for x in s["dept_no"].split(";")]
                       and s["block"].startswith("IP")} & set(scope))
     unresolved: List[str] = []
+    norm = lambda t: re.sub(r"[^a-z0-9]", "", (t or "").lower())
+    op_cells = {norm(s.get("department_as_written")) for s in stack if s.get("dept_no") and key in [dept_key(x) for x in s["dept_no"].split(";")]
+                and not s["block"].startswith("IP")}
     for code in sorted(soa_unit_codes - {""}):
         if code in units or code in explicit_units or code not in dpa_units:
+            continue
+        if norm(dpa_units[code][0].get("fpu_department_name")) in op_cells:        # the unit name is the text of a cell of the OP block: not an IP unit
+            excluded.append(dict(unit=code, reason="DPA unit name equals a stacking-diagram cell of the OP block."))
             continue
         if len(storeys) == 1:
             units[code] = dict(storey=storeys[0], basis="SOA unit code + stacking diagram storey",

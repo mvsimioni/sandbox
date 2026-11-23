@@ -1213,7 +1213,11 @@ def stage_pdf(storeys: Sequence[str]) -> dict:
                       "legend_title": "AHU zoning, %s (%s): AHU zones and ventilation classes" % (info["storey_label"], info["drawing"]),
                       "sheet_note": "Each zone is the sum of the rooms that one AHU or one class serves. Fill opacity 0.35. Each AHU or class has its own layer. Room outlines are on the layer 'Rooms (measured)' (off). "
                                     "%d rooms have no information and are not filled (%.0f m2). %d room tags have no closed area on the plan and are not drawn." % (
-                          summ["unclassified_rooms"], summ["unclassified_area_m2"], summ["rooms_no_polygon"])})
+                          summ["unclassified_rooms"], summ["unclassified_area_m2"], summ["rooms_no_polygon"]) + (
+                          (" Not drawn, no closed outline on the plan: %s. The zone schedule gives the reason." % ", ".join(u["tag"] for u in summ["undrawn_units"]))
+                          if summ.get("undrawn_units") else ""),
+                      "not_drawn_note": ("Not drawn (no closed outline on the plan, so no zone and no legend row): %s. See the zone schedule."
+                                         % ", ".join(u["tag"] for u in summ["undrawn_units"])) if summ.get("undrawn_units") else ""})
         summaries[key] = summ
     out = out_pdf_path(storeys)
     manifest = wp.write_multi_zoning_pdf(root / BG_PDF, specs, out, "AIGH IP AHU zoning, %s to %s" % (storeys[0], storeys[-1]))

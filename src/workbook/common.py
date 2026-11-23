@@ -117,24 +117,31 @@ def group_cols(ws, lay: Layout, first_key: str, last_key: str, collapsed: bool =
         dim.hidden = collapsed
 
 
-THERMAL_NOTE = ("Calculated airflow and coil duty do not include lighting, small power, equipment or envelope gains. The reduction is an upper limit.")
+THERMAL_NOTE_SHORT = "Calculated airflow and coil duty do not include lighting, small power, equipment or envelope gains."
+THERMAL_NOTE = THERMAL_NOTE_SHORT + " The reduction is an upper limit."      # only on a text that states a reduction
 ROOM_THERMAL_NOTE = ("Thermal load: occupants only. Lighting, small power, equipment and envelope gains are not included, because no approved value is available. "
                      "The thermal-load airflow is a lower limit.")
 
 
 def tender_remark(tender: str, calc: str, red: str, redp: str, src: str, what: str = "airflow", zero: str = "", lead: str = '""',
                   share_note: bool = True, partial: str = None, note: str = None, all_spec: str = None, thermal: bool = True,
-                  oa_above: str = None, oa_calc: str = None, oa_tender: str = None, crit_partial: bool = False) -> str:
+                  oa_above: str = None, oa_calc: str = None, oa_tender: str = None, crit_partial: bool = False,
+                  extra: str = None, small: tuple = None) -> str:
     """Remarks formula of the D-013 columns, built from the cells of the same row.
 
     Tender airflow is information only: it is never a target or a cap. A calculated value below it is a reduction, not a failure;
     a calculated value above it is flagged VERIFY (D-012).
 
     `lead` is an Excel text expression put before the list of causes: a cause that the cells prove, for example a missing ceiling
-    height (then every air-change airflow of the room is 0), is named first, so that the reduction is not put down to other causes."""
+    height (then every air-change airflow of the room is 0), is named first, so that the reduction is not put down to other causes.
+    `extra` is an Excel text expression (empty text when it does not apply) added at the end of every result text (R1-10: the single-pass room that sets the
+    fraction). `small` is (condition, text expression): a text added to a stated reduction for a unit whose zone is one or two small rooms (OI-R206-1, open).
+    The sentence 'The reduction is an upper limit.' is on a text that states a reduction and on no other."""
     causes = ("Causes to examine: area basis, air-change or thermal criteria, duct leakage of "
               "\"&TEXT(DuctLeakage,\"0.0 %\")&\" against \"&TEXT(TenderLeakage,\"0.0 %\")&\" on the tender schematics, outdoor-air rule.")
-    zero_b = f'IF({calc}=0,"Calculated airflow is 0 L/s. "&IF({lead}="","{zero}",{lead}),' if zero else ""
+    sn = f'&" {THERMAL_NOTE_SHORT}"' if thermal else ""
+    fn = f'&" {THERMAL_NOTE}"' if thermal else ""
+    zero_b = f'IF({calc}=0,"Calculated airflow is 0 L/s. "&IF({lead}="","{zero}",{lead}){sn},' if zero else ""
     lead_sp = f'IF({lead}="","",{lead}&" ")'
     # R1-10 (decided): outdoor air above the tender outdoor airflow is a VERIFY on every unit. The sentence is added to every result text, and the
     # reduction of the supply is not worded as a result for such a unit.
@@ -148,32 +155,33 @@ def tender_remark(tender: str, calc: str, red: str, redp: str, src: str, what: s
              if share_note else "")
     zero_e = ")" if zero else ""
     # D-012 and D-013: a reduction is a result only when the room list of the unit is complete. `partial` is an Excel text expression that is
-    # empty when it is complete and otherwise reads "partial: n of m zoned rooms, x of y m²". No reduction is stated for a partial unit.
+    # empty when it is complete and otherwise names the cause ('No criteria row for n of m rooms ...' or 'partial: ...'). No reduction is stated then.
     if partial and crit_partial:
-        # criteria incomplete (D-023): the calculated airflow is the sum of rooms that have no criteria row, so it is not known
-        pre = (f'IF(ISNUMBER(SEARCH("no criteria row",{partial})),{partial}&". The calculated airflow is not known. No reduction is stated. Tender "&TEXT({tender},"#,##0")&" L/s ("&{src}&"). "&{oa_part}{lead_sp},')
+        # criteria incomplete (R1-08, decided ruling 3): the calculated airflow is not known, so no reduction is stated
+        pre = (f'IF(ISNUMBER(SEARCH("no criteria row for",{partial})),{partial}&". The calculated airflow is not known. No reduction is stated. Tender "&TEXT({tender},"#,##0")&" L/s ("&{src}&"). "&{oa_part}"{THERMAL_NOTE_SHORT}",')
         pre_e = ")"
     else:
         pre, pre_e = "", ""
     if partial:
         part = (f'IF({partial}<>"",{partial}&". Tender "&TEXT({tender},"#,##0")&" L/s ("&{src}&"). Calculated for the counted rooms: "'
-                f'&TEXT({calc},"#,##0")&" L/s. No reduction is stated until the room list of the unit is complete. "&IF({calc}>{tender},"The calculated airflow of the counted rooms is above the tender airflow: VERIFY. ","")&{oa_part}{lead_sp}&"{share}",')
+                f'&TEXT({calc},"#,##0")&" L/s. No reduction is stated until the room list of the unit is complete. "&IF({calc}>{tender},"The calculated airflow of the counted rooms is above the tender airflow: VERIFY. ","")&{oa_part}{lead_sp}&"{share}"{sn},')
         part_e = ")"
     else:
         part, part_e = "", ""
     none_t = f'IF({note}="","No tender {what} found.","No tender {what} used. "&{note}&".")' if note else f'"No tender {what} found."'
     spec_text = "Rooms are specified by the MOT NSC. The difference is the duct leakage allowance and rooms not counted."
     tail = f'IF({all_spec},"{spec_text}","{share}{causes}")' if all_spec else f'"{share}{causes}"'
+    small_t = f'&IF({small[0]}," "&{small[1]},"")' if small else ""
     reduced = (f'"Reduced "&TEXT({tender},"#,##0")&" to "&TEXT({calc},"#,##0")&" L/s (−"&TEXT({redp},"0.0%")&", −"&TEXT({red},"#,##0")'
-               f'&" L/s) against tender ("&{src}&"). "&{lead_sp}&{tail}')
+               f'&" L/s) against tender ("&{src}&"). "&{lead_sp}&{tail}{small_t}{fn}')
     if oa_above:
         reduced = (f'IF({oa_above},"Supply "&TEXT({calc},"#,##0")&" L/s against tender "&TEXT({tender},"#,##0")&" L/s ("&{src}&"). "&{oa_s}&'
-                   f'"No reduction is stated for this unit until the outdoor air is checked. "&{lead_sp}&{tail},{reduced})')
-    body = (f'IF({tender}="",{none_t},IF({tender}=0,"Tender {what} is 0 L/s ("&{src}&"). Calculated "&TEXT({calc},"#,##0")&" L/s. No reduction is defined.",{pre}{zero_b}'
+                   f'"No reduction is stated for this unit until the outdoor air is checked. "&{lead_sp}&{tail}{sn},{reduced})')
+    body = (f'IF({tender}="",{none_t}{sn},IF({tender}=0,"Tender {what} is 0 L/s ("&{src}&"). Calculated "&TEXT({calc},"#,##0")&" L/s. No reduction is defined."{sn},{pre}{zero_b}'
             f'{part}IF({calc}>{tender},"VERIFY: calculated "&TEXT({calc},"#,##0")&" L/s is above tender "&TEXT({tender},"#,##0")&" L/s (+"'
-            f'&TEXT({calc}/{tender}-1,"0.0%")&") ("&{src}&")."{oa_add},'
-            f'IF({calc}={tender},"Calculated "&TEXT({calc},"#,##0")&" L/s equals tender ("&{src}&")."{oa_add},'
+            f'&TEXT({calc}/{tender}-1,"0.0%")&") ("&{src}&")."{oa_add}{sn},'
+            f'IF({calc}={tender},"Calculated "&TEXT({calc},"#,##0")&" L/s equals tender ("&{src}&")."{oa_add}{sn},'
             f'{reduced})){part_e}){zero_e}{pre_e})')
-    if thermal:
-        return f'=({body})&" {THERMAL_NOTE}"'
+    if extra:
+        return f'=({body})&IF({extra}<>"", " "&{extra}, "")'
     return "=" + body
