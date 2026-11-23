@@ -379,12 +379,14 @@ A row that passes only one of the two tests for an increase says so in its note.
 - VAV boxes and venturi valves are not compared. The workbooks have no rows for them.
 - On crowded sheets, a call-out can be far from its value. The leader line can cross room boxes.
 - The sheet IP-BH-00100 has no mark-up. Its tags are above level 07 and outside the zoning.
-- The sheets IP-BH-07140 and IP-BH-07141 carry the MOT ACMV title. Their units are not operating theatres, so the sheets are marked up.
-  The engineer must confirm this.
+- The sheets IP-BH-07140 and IP-BH-07141 carry the MOT ACMV title. Their units are in the MOT NSC schedule.
+  The set lists them and does not mark them up. Decision D-074 is open: the engineer must confirm this.
 - The 98 FCU lines with no tag have no workbook data. Their airflows show as not given.
   One line has no room and no storey. It stays on the list of missing systems.
-- On sheets IP-BH-05067 and IP-BH-05068, some values carry the placeholder ID CH-APPD-NONE.
-  The change list has no row yet for AHU-B-06-06STAFF-01.
+- The unit AHU-B-06-06STAFF-01 is on the working sheet IP-BH-06068. The App D sheet IP-BH-05067 keeps its room boxes and refers to that sheet for the unit.
+- An increase of 5 L/s or less is not marked up. The drawn value stays.
+- A mark-up on a unit with a room list that the workbooks over-count says so in its call-out. Check the room list before you apply it.
+- The sheet IP-BH-05079 lists the schedule items that no App D layout shows. It has no schematic.
 - The air balance is tested on the workbook values, not on the drawn rooms. A drawn room does not show its pressure offset.
 - Rooms that take make-up air by transfer are listed, not tested.
 - An independent check of a sample of systems is still to do.

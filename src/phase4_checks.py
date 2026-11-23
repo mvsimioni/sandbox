@@ -123,8 +123,11 @@ def check_p4_units(ctx) -> Tuple[str, List[str]]:
             add(re.split(r";\s*", re.sub(r"^AHU group:\s*", "", r["unit"])), "marked up " + r["sheet"])
     dreg = {r["drawing_number"]: r for r in drawing_register()}
     for s in rv.i.systems:
-        if s.get("source_set") == "working" and s["sheet"] in dreg and s["sheet"] not in marked:
-            add([a["tag"]["value"] for a in s["ahus"]], "reviewed, no mark-up " + s["sheet"])
+        if s.get("source_set") == "working" and s["sheet"] in dreg:
+            add([a["tag"]["value"] for a in s["ahus"]], ("marked up " if s["sheet"] in marked else "reviewed, no mark-up ") + s["sheet"])
+    for tg, inf in rv.unit_info.items():
+        for sh_ in inf.get("sheets_found", []):          # a unit that a working sheet prints by its tag
+            add([tg], "drawn on " + sh_)
     for r in rcsv(NEWD / "missing_systems_coverage.csv"):
         add([r["item"]], "new drawing " + r["drawing"])
     for p in sorted(glob.glob(str(NEWD / "appd_L0*_coverage.csv"))):
@@ -488,7 +491,8 @@ def system_balance() -> Dict[str, Any]:
     from src.schematics.review import tag_keys
     rowkeys = set()
     for r in review().rows:           # every row of the update workbook, with or without a change ID
-        if r["row_type"] == "AHU total" and r["quantity"] == "Supply airflow":
+        if (r["row_type"] == "AHU total" and r["quantity"] == "Supply airflow") or \
+                r["quantity"] == "Unit drawn on the sheet, not in the zone schedule":
             for u in re.split(r";\s*", re.sub(r"^AHU group:\s*", "", r["unit"])):
                 rowkeys |= set(tag_keys(u))
     n = ok = mot = near = 0
