@@ -16,8 +16,8 @@ from typing import Dict, List
 DECISIONS = Path("out/qa/decisions_needed.md")
 OUT = Path("out/qa/open_items_for_marcus.md")
 
-# decision numbers that the list takes from decisions_needed.md when their status is open
-FROM_DECISIONS_AFTER = 19
+# every decision that is open in decisions_needed.md is listed. The rulings file names some of them with an OI id: both ids are printed.
+ALIASES = {"D-020": "OI-04-5"}
 
 HEAD = """# Open items for Marcus
 
@@ -37,18 +37,24 @@ VERIFICATION_ITEMS: List[tuple] = [
     ("OI-13-3", "Minimum for the occupancy round-up.", "D-017 rounds the default count up to a whole person with no limit. Hand-wash bays are ruled as circulation (0 persons). Options for other small rooms: (a) no limit (interim); (b) no round-up below a set area (for example 2 m²); (c) round up only when the calculated count is at least a set value (for example 0.5)."),
     ("OI-13-4", "RDS \"n/a\" in occupied rooms.", "D-018 reads \"n/a\" as 0 persons. Rooms with an occupied use and \"n/a\" or \"0\" are flagged VERIFY with the text \"RDS occupancy taken as 0 persons\". Options: (a) keep D-018 and flag them VERIFY (interim); (b) where the room use is occupied, treat \"n/a\" as empty and use the ASHRAE default (red, Remarks note)."),
     ("OI-13-5", "Innovation Lab (D44 ITEC 05.07.01) criteria.", "No booklet exists for 43/44 (D-010) and the RDS gives no air-change rate, so the room has no air-change airflow. Options: (a) give a criteria row (for example the Admin Workspace office row, as D-009 did for AN-ED, or a laboratory row); (b) leave it with no criteria, flagged (interim)."),
-    ("OI-R1-03", "Department circulation: D-011 default (final verification R1-03).",
+    ("OI-R103-1", "Department circulation: D-011 default (final verification R1-03).",
      "Rooms named Circulation (D04 2,228 m², D11 1,689 m², D23 1,044 m² and others) have no booklet row in most departments. D-011 gives a default for the common areas (neutral, 2 outdoor air ACH, 6 total ACH, class 2) and says nothing about department circulation. Options: (a) apply the D-011 default to department circulation that no booklet row covers (code A, flagged); (b) leave it with no criteria and listed (interim). Room types that a booklet row names are mapped (code A, \"Confirm the mapping\") and the ones that no row names are listed on Basis of Design and Flags."),
-    ("OI-R1-08", "Plant-room criteria (final verification R1-08).",
+    ("OI-R108-1", "Plant-room criteria (final verification R1-08).",
      "Plant, electrical, comms and riser rooms have no booklet row, so they have no criteria row and no air-change airflow. Options: (a) give a plant-room criteria row (ventilation or cooling by the plant list, code A); (b) leave them with no criteria and listed (interim); (c) take their loads from the schedule of equipment as a narrow exception to D-008."),
-    ("OI-R1-10", "Single-pass room in the AHU outdoor-air fraction (final verification R1-10).",
+    ("OI-R108-2", "Unit of the D00 spaces that lie over an open zoning conflict (final verification R1-08).",
+     "CA-L03-023 takes AHU-B-03-ELECRM-01A/B from the plan room L03-R011 (the later dated document, IP-BH-06031 Rev 2; conflict CF-0034 is open, VERIFY). CA-L04-020 has no unit: the plan room L04-R267 is 'no information' (App D draws the fans OAF/EAF-B-04-04AHU-02A/B only; conflict CF-0044 is open). Options: (a) keep both as they are (interim); (b) confirm or give the unit when the conflicts are closed. The D00 workbook and the zone schedule must keep agreeing."),
+    ("OI-R110-1", "Single-pass room in the AHU outdoor-air fraction (final verification R1-10).",
      "A room with single-pass air (100 % outdoor air, for example a negative-pressure utility at 20 air changes) sets the highest outdoor-air fraction of its unit, and the outdoor-air rule takes that fraction times the whole unit supply. Options: (a) keep the rule as built (interim; the room is named on AHU); (b) leave single-pass rooms out of the fraction and add their outdoor air as a separate duty; (c) separate the room onto its own unit or FCU under the outdoor-air rule."),
-    ("OI-R1-11", "Outdoor air per area as a supply floor (data centre rooms).",
+    ("OI-R111-1", "Outdoor air per area as a supply floor (data centre rooms).",
      "The booklet gives the outdoor air of the data-centre rooms as L/s per m². Both engines now take it as a floor of the room supply. Confirm that the floor is the intended reading, or give the other: the outdoor air as a separate duty on the FCU tab."),
-    ("OI-R1-12", "Anaesthesia preparation rooms of the emergency theatres.",
+    ("OI-R112-1", "Anaesthesia preparation rooms of the emergency theatres.",
      "MSOT 04.01.05 is on AHU-B-07-05MOTE-01A/B and MSOT 04.01.06 is on -02A/B, each with the theatre that it serves (04.02.07 and 04.02.08, IP-BH-16054 and Appendix J). Confirm that the drawing agrees."),
-    ("OI-R1-14", "Tag AHU-B-07-05MOTHYB-02.",
+    ("OI-R114-1", "Tag AHU-B-07-05MOTHYB-02.",
      "The MOT NSC schedule of modes (Appendix J, theatre MSOT 05.02.12) names this unit. The MOT NSC Overall AC Equipment Schedule lists only AHU-B-07-05MOTHYB-01, and the zone schedule does not show it. Options: (a) the tag is correct and the schedule is incomplete; (b) the tag is an error for AHU-B-07-05MOTHYB-01. No tender airflow is used until you confirm."),
+    ("OI-R211-1", "Rooms with no room use for the default occupancy (round 2, R2-11).",
+     "The room-use rules (D-017) now map more names (for example change rooms, nursing rooms, command centres, reporting rooms, recycling rooms, multipurpose rooms and the Appendix D abbreviation M&E). The rooms that remain with occupancy 'NOT SET' are listed on Flags with the reason: locker rooms (the density table has no row for them) and names that do not say what the room is used for. Options: (a) keep them listed (interim); (b) add a density row for lockers; (c) give the number of persons for each listed room."),
+    ("OI-R212-1", "Three L06 units that have rooms and no zone polygon (round 2, R2-12).",
+     "AHU-B-07-06DSOT-11, AHU-B-07-06DSOT-12A/B and AHU-B-07-06STER-03A/B have room tags in an open region of the L06 plan (no closed outline). They have a zoned area of 0 m², so they have no zone on the zoning PDF and no legend or index row there. The zone schedule keeps them with the reason and shows no reduction. Options: (a) keep as it is (interim); (b) measure the open region on the plan to give the zones an outline."),
 ]
 
 
@@ -64,11 +70,12 @@ def parse_decisions(text: str) -> List[Dict[str, str]]:
 def render(decisions: List[Dict[str, str]]) -> str:
     lines = [HEAD]
     lines.append("## Open decisions of `decisions_needed.md`\n")
-    open_d = [d for d in decisions if d.get("Status", "").strip() == "open" and int(d["id"][2:]) > FROM_DECISIONS_AFTER]
+    open_d = [d for d in decisions if d.get("Status", "").strip() == "open"]
     for d in open_d:
-        lines.append(f"**{d['id']} {d['title']}** (open). {d.get('Context', '')} Options: {d.get('Options', '')}. Interim state: {d.get('Provisional value', '')}.\n")
+        lines.append(f"**{d['id']}{(' / ' + ALIASES[d['id']]) if d['id'] in ALIASES else ''} {d['title']}** (open). {d.get('Context', '')} Options: {d.get('Options', '')}. Interim state: {d.get('Provisional value', '')}.\n")
     lines.append("## From the final verification (22 and 23 Nov 2026)\n")
-    lines.append("Rulings and evidence for OI-04, OI-05 and OI-13: `out/qa/final_verification_rulings.md`. Each item gives the options and the interim state of the deliverables until you decide.\n")
+    lines.append("Id scheme: OI-<finding>-<n>, as in `out/qa/final_verification_rulings.md` (F-04 is OI-04-n, R1-08 is OI-R108-n, R2-11 is OI-R211-n). Decisions keep their D id. "
+                 "Rulings and evidence: `out/qa/final_verification_rulings.md`. Each item gives the options and the interim state of the deliverables until you decide.\n")
     for i, t, x in VERIFICATION_ITEMS:
         lines.append(f"**{i} {t}** {x}\n")
     return "\n".join(lines)
@@ -78,8 +85,12 @@ def main() -> int:
     decisions = parse_decisions(DECISIONS.read_text(encoding="utf-8"))
     text = render(decisions)
     OUT.write_text(text, encoding="utf-8")
-    open_ids = [d["id"] for d in decisions if d.get("Status", "").strip() == "open" and int(d["id"][2:]) > FROM_DECISIONS_AFTER]
+    open_ids = [d["id"] for d in decisions if d.get("Status", "").strip() == "open"]
     missing = [i for i in open_ids if i not in text]
+    rulings = Path("out/qa/final_verification_rulings.md")
+    if rulings.exists():                       # one id scheme: every OI id that a ruling names is an item here (a range 'OI-04-1 to OI-04-4' names both ends)
+        rid = set(re.findall(r"OI-[A-Z]?\d+-\d+", rulings.read_text(encoding="utf-8")))
+        missing += sorted(i for i in rid if i not in text)
     print(f"wrote {OUT}: {len(VERIFICATION_ITEMS)} items and {len(open_ids)} open decisions ({', '.join(open_ids)}); missing {missing}")
     return 1 if missing else 0
 

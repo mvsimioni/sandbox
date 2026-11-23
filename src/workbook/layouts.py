@@ -223,7 +223,7 @@ AHU_KEYS = ["ahu", "type", "n", "area", "area_sup", "vol", "noh", "sa_room", "le
             "vou", "vps", "xs", "zd", "ev", "vot", "oa_ms", "ret", "exh", "relief",
             "sens", "lat", "rt", "rh", "oa_sens", "oa_lat", "fan", "coil_s", "coil_l", "coil", "wm2",
             "oa_sens_ms", "oa_lat_ms", "coil_s_ms", "coil_l_ms", "coil_ms", "req_t", "sched", "sched_oa",
-            "sched_c", "sched_s", "tsrc", "zr", "za", "zc", "zs", "cov", "red", "redp", "rem", "nfix", "area_ok"]
+            "sched_c", "sched_s", "tsrc", "zr", "za", "zc", "zs", "cov", "red", "redp", "rem", "nfix", "area_ok", "leadtxt", "nocrit", "area_nocrit"]
 FCU_KEYS = ["k", "no", "name", "ahu", "why", "area", "sens_kw", "lat_kw", "supply", "oa", "oasrc", "oaby", "oacond", "oa_t", "oa_h",
             "oa_sens", "oa_lat", "coil_s", "coil_l", "coil", "cap_sched", "cap_drawn", "cap", "flag",
             "tender", "tsrc", "calc", "red", "redp", "rem"]

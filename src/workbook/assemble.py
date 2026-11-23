@@ -38,6 +38,7 @@ SCOPE_STOREYS = ("LB3", "B3", "B2", "B1", "L01", "L02", "L03", "L04", "L05", "L0
 # occupancy.density_default.per_100m2 in the project configuration). The mapping is an assumption and is stated on Basis of Design.
 USE_RULES: List[Tuple[str, str, str]] = [
     (r"hand ?-?wash|scrub bay|scrub up", "corridor_circulation", "hand-wash bays (a recess of the corridor, not an occupied room)"),
+    (r"change room|change cubicle", "toilet", "changing rooms (including the lockers that they hold)"),
     (r"^(?!.*(?:smart|self pick)).*locker", "", "locker rooms (the density table has no row for them)"),
     (r"operator room", "office", "operator rooms (staff workstations of a server room)"),
     (r"lecture|\blect\b", "lecture_classroom", "lecture rooms and lecture theatres"),
@@ -46,7 +47,8 @@ USE_RULES: List[Tuple[str, str, str]] = [
     (r"plant|\bups\b|compressor|riser|shaft|\bahu\b|electrical|comms|server|\bpts\b|\bdb\b|substation|generator|switch ?room|battery|"
      r"transformer|rainwater|\btank\b|\bpump|water treatment|equipment room|automation system|filter room|fire suppression|gas cylinder|control panel|machine room", "plant_room", "plant, equipment, electrical and communication rooms"),
     (r"cleaner|cleaning|janitor|linen|\bstore\b|storage|stock|refrigerat|archive|trolley|bulk|warehouse|\bstr\b|refuse|disposal|waste|"
-     r"loading bay|deboxing|equipment store|pigeon|utility|cold room|storeroom|inventory|manual library|cart staging|receiving", "storage", "stores, cleaners rooms and utility rooms"),
+     r"loading bay|deboxing|equipment store|pigeon|utility|cold room|storeroom|inventory|manual library|cart staging|receiving|\bppe\b|recycl|outreach supplies|"
+     r"equipment under repair|clean up room|chemical wate|detergent|\bdi water", "storage", "stores, cleaners rooms, utility rooms and waste rooms"),
     (r"corridor|circulation|lobby|airlock|air lock|sound lock|vestibule|lift|concourse|\bcorr\b|agv bay|^bay\s*-|(?:c-arm|amr|bed|stroller|wheelchair) park", "corridor_circulation",
      "corridors, lobbies, airlocks and bays that are recesses of a corridor"),
     (r"workroom|work room", "office", "clinical work rooms"),
@@ -54,12 +56,13 @@ USE_RULES: List[Tuple[str, str, str]] = [
     (r"recovery|\bicu\b|\bhdu\b|intensive", "recovery_icu", "recovery and intensive care"),
     (r"patient bay|\bbay\b.*(?:acute|edtu|resus|p2|holding)|isolation|acute|resus|ward|bed room|1-bed|single bed|patient room|\bholding\b", "patient_room", "patient rooms and patient bays"),
     (r"theatre|operating", "operating_room", "operating theatres"),
-    (r"procedure|treatment|therapeutic|examination|exam room|consult|endoscop|scan|clinic|triage|medication room", "medical_procedure", "procedure and consulting rooms"),
-    (r"pantry|break|tea point|kitchenette|lounge|bev|staff accommodation|rest room|staff room", "break_room_pantry", "pantries, break rooms and staff rooms"),
-    (r"meeting|conference|focus|interview|huddle|roll call", "conference_meeting", "meeting rooms"),
-    (r"office|\boff\b|workstation|write-up|writeup|admin|technician|workspace|desk|supervisor|control room|lactation|nurse station|staff station|workshop|workroom|work room",
-     "office", "offices, workstations and small private rooms"),
-    (r"x-?ray|\bmri\b|ultrasound|\bct\b|fluoro|angio|mammo|cath lab|nuclear|\bpet\b|dexa|imaging|radiograph", "medical_procedure",
+    (r"procedure|treatment|therapeutic|examination|exam room|consult|endoscop|scan|clinic|triage|medication room|screening", "medical_procedure", "procedure, screening and consulting rooms"),
+    (r"pantry|break|tea point|kitchenette|lounge|bev|staff accommodation|rest room|staff room|sleep pod", "break_room_pantry", "pantries, break rooms, staff rooms and sleep pods"),
+    (r"meeting|conference|focus|interview|huddle|roll call|multipurpose|multi-purpose", "conference_meeting", "meeting rooms and multipurpose rooms"),
+    (r"pre-?function|foyer", "reception_waiting", "pre-function areas and foyers"),
+    (r"office|\boff\b|workstation|write-up|writeup|admin|technician|workspace|desk|supervisor|control room|lactation|nursing room|nurse station|staff station|workshop|workroom|work room|"
+     r"command centre|research room|reporting room|\blis room|projection room", "office", "offices, workstations and small private rooms"),
+    (r"x-?ray|\bmri\b|ultrasound|\bct\b|fluoro|angio|mammo|cath lab|nuclear|\bpet\b|dexa|\bbmd\b|imaging|radiograph", "medical_procedure",
      "imaging rooms (nearest listed use: procedure room)"),
     (r"simulation|training|\btrg\b|classroom|seminar", "classroom_training", "training rooms"),
     (r"picking|repackag|automation|asrs|ipas|gown|ante ?room|extemporaneous|compounding|sterile prep|pharmacy|controlled drug|drug room|"
@@ -82,6 +85,7 @@ APPD_ABBREVIATIONS: Dict[str, str] = {
     "proc": "procedure room", "int": "interview room", "nurs": "nurse station", "tech": "technician", "wkshp": "workshop",
     "agv": "agv bay", "ll": "lift lobby", "tll": "lift lobby", "iso": "isolation", "off": "office", "lect": "lecture", "rm": "room",
     "str": "store", "trg": "training room", "rtl": "retail", "refuse": "refuse store", "cln": "cleaner room", "lounge": "lounge",
+    "multi": "multipurpose room",
 }
 
 
@@ -259,7 +263,7 @@ def room_use(name: str) -> Tuple[Optional[str], str]:
 
 def _expand_abbreviations(low: str) -> str:
     """Name with each Appendix D abbreviation spelled out (for the use mapping only)."""
-    words = re.split(r"(\W+)", low)
+    words = re.split(r"([^a-z0-9&]+)", low)
     return "".join(APPD_ABBREVIATIONS.get(w, w) for w in words)
 
 
@@ -773,7 +777,8 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
     base = build_reva_input(root)
     people = conf.people(root)
     densities = conf.occupancy_cfg(root).get("per_100m2") or {}
-    criteria = [r for r in _read(root / REG / "criteria.csv") if r["dept_no"].lstrip("0") == key.lstrip("0")]
+    all_criteria = _read(root / REG / "criteria.csv")
+    criteria = [r for r in all_criteria if r["dept_no"].lstrip("0") == key.lstrip("0")]
     polygons = load_polygons(root)
     zones = load_zone_assignments(root)
     rds_all = [r for r in _read(root / REG / "rds_rooms.csv") if r["dept_no"].lstrip("0") == key.lstrip("0")]
@@ -1101,6 +1106,17 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
                 room["criteria"] = dc
                 crit_stats[f"{dc['criteria_row']} (Data Centre booklet)"].append(number)
                 crit_done = True
+        if not crit_done and key.lstrip("0") == "31" and d["storey"] == "L02" and d["unit"] == "ANWSIP2" and re.match(r"^Office\b", d["name"]):
+            # the L02 admin neighbourhood area is future EDTU and is treated as office: the office row of the Admin Workspace booklet (dept 47), ED part
+            orow = next((c for c in all_criteria if c["dept_no"].lstrip("0") == "47" and c["room_type_as_printed"].strip() == "ED Admin Workspace Office"), None)
+            if orow is not None:
+                csid = add_src(f"CRIT-31-{_norm(orow['room_type_as_printed'])}"[:60], document=_doc(orow["source_file"]), issue=orow.get("department_label", "booklet"),
+                               page=f"page {orow['booklet_page']}", location=orow.get("bbox", ""), text_as_read=criteria_text(orow),
+                               method="Value read from the DD Booklet criteria table", confidence=str(orow.get("confidence", "")))
+                room["criteria"] = criteria_from_row(orow, csid, "room type mapped", "A",
+                                                     f"Future EDTU, treated as office. Booklet room type '{orow['room_type_as_printed']}' (page {orow['booklet_page']}) of the Admin Workspace booklet. Confirm the mapping.")
+                crit_stats[orow["room_type_as_printed"] + " (mapped)"].append(number)
+                crit_done = True
         if not crit_done:
             mp = cm.mapped_row(key, d["name"], number, criteria, _regime)
             if mp is not None:
@@ -1200,7 +1216,7 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
                 room["occupancy_basis"] = "NOT SET"
                 remark.append("occupancy not set")
                 gaps["occupancy"] = ("Occupancy is not set. " + ("The RDS field is empty." if rds is not None else "No RDS row matches.") +
-                                     (f" The density table has no value for this room use ({label}). " if label else " No room use fits the room name for the default density. ") +
+                                     (f" The density table has no value for this room use ({label}). " if label else f" The room name '{d['name']}' does not say what the room is used for, so no room use fits it for the default density. ") +
                                      "Give the number of persons.")
         room["remark"] = ". ".join(_sentence_case(x.replace("; ", ". ")) for x in remark) + "."
         room["remark"] += " " + ROOM_THERMAL_NOTE

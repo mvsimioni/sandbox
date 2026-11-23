@@ -19,18 +19,17 @@ def _run(args, timeout=300):
     return res
 
 
-def set_application(path: Path, name: str = "Microsoft Excel") -> None:
-    """Write the application name of the file properties (docProps/app.xml). The recalculation tool writes its own name there: the issued files carry the
-    name of the spreadsheet format instead (D-015: no tool name in a deliverable)."""
+def set_application(path: Path, name: str = "") -> None:
+    """Clean the file properties (docProps/app.xml, core.xml). The recalculation tool and the writer library put their own names and versions there. The issued
+    files carry no tool name and no tool version (D-015, R2-13): Application is empty and AppVersion is removed."""
     path = Path(path)
     tmp = path.with_suffix(".tmp.xlsx")
     with zipfile.ZipFile(path) as zin, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
         for item in zin.infolist():
             data = zin.read(item.filename)
             if item.filename == "docProps/app.xml":
-                txt = data.decode("utf-8")
-                txt = re.sub(r"<Application>.*?</Application>", f"<Application>{name}</Application>", txt, flags=re.S)
-                data = txt.encode("utf-8")
+                data = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" '
+                        f'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>{name}</Application></Properties>').encode("utf-8")
             elif item.filename == "docProps/core.xml":                  # British English, as the deliverable text is
                 txt = data.decode("utf-8")
                 if "<dc:language>" in txt:

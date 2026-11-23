@@ -645,7 +645,7 @@ def evidence_for_room(room: dict, sd: StoreyData, wm: WingModel, abb: Abbreviati
             if q < 0.6:
                 continue
             df, why = dept_factor(canon_depts(r["pod_or_suite"]), wing_d, name_d, storey_d)
-            for t in re.split(r"\s*[;,]\s*", r["ahu_pahu_tag"]):
+            for t in re.split(r"\s*[;,|]\s*", r["ahu_pahu_tag"]):
                 if t.startswith(("AHU", "PAHU")):
                     cands.append(Cand("schematic", "AHU", t, zone_key(t), q * df * 0.8,
                                       f'Plan name "{p}" matches "{r["room_name_printed"]}" in the MOT NSC theatre table ({r["page_or_sheet"]}). Name match {q:.2f}. {cap(why)}.',

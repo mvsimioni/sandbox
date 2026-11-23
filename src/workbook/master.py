@@ -58,7 +58,8 @@ def read_department_workbook(path: Path) -> Dict[str, Any]:
                         room_supply_lps=row[idx["sa_room"]] or 0.0, outdoor_air_lps=row[idx["oa_sum"]] or 0.0,
                         frac=row[fi] or 0.0, zone_rooms=row[idx["zr"]], zone_area_m2=row[idx["za"]],
                         tender_lps=row[idx["sched"]], tender_source=row[idx["tsrc"]], tender_source_id=row[idx["sched_s"]],
-                        rooms_specified=row[idx["nfix"]] or 0, area_ok_m2=row[idx["area_ok"]] or 0.0))
+                        rooms_specified=row[idx["nfix"]] or 0, area_ok_m2=row[idx["area_ok"]] or 0.0,
+                        tender_oa_lps=row[idx["sched_oa"]], rooms_no_criteria=row[idx["nocrit"]] or 0, area_no_criteria_m2=row[idx["area_nocrit"]] or 0.0))
     checks: Dict[str, Any] = {}
     if "Checks" in wb.sheetnames:
         for row in wb["Checks"].iter_rows(min_row=7, values_only=True):
@@ -155,10 +156,13 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
     tenders: Dict[str, Dict[str, Any]] = {}
     flags: List[Dict[str, str]] = []
     types: Dict[str, str] = {}
+    tender_oa: Dict[str, float] = {}
     for r in recs:
         dn = r["department"]["number"]
         for a in r["ahus"]:
             types.setdefault(a["tag"], a.get("type") or "AHU")
+            if a.get("tender_oa_lps") not in (None, "") and a["tag"] not in tender_oa:
+                tender_oa[a["tag"]] = float(a["tender_oa_lps"])
             t = a.get("tender_lps")
             if t not in (None, ""):
                 prev = tenders.get(a["tag"])
@@ -229,7 +233,8 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
           ("nh", "Rooms with no ceiling height", "no.", 11), ("frac", "Highest room outdoor-air fraction", "%", 12),
           ("code", "Code", "", 5), ("src", "Source ID", "", 12),
           ("zr", "Rooms of the unit in the zone schedule", "no.", 12), ("za", "Area of the unit in the zone schedule", "m²", 12),
-          ("nfix", "Rooms specified by the MOT NSC", "no.", 12), ("aok", "Area of the rooms with a criteria row and a supply airflow", "m²", 14)]
+          ("nfix", "Rooms specified by the MOT NSC", "no.", 12), ("aok", "Area of the rooms with a criteria row and a supply airflow", "m²", 14),
+          ("nnc", "Rooms with no criteria row", "no.", 12), ("anc", "Area of the rooms with no criteria row", "m²", 14)]
     for i, (k, h, u, w) in enumerate(dh):
         col = chr(65 + i)
         put(dr, f"{col}5", h, "Header" if k not in ("name",) else "HeaderLeft")
@@ -252,6 +257,8 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
             put(dr, f"M{row}", a.get("zone_area_m2") or 0, "Input", "d1")
             put(dr, f"N{row}", a.get("rooms_specified") or 0, "Input", "d0")
             put(dr, f"O{row}", a.get("area_ok_m2") or 0, "Input", "d1")
+            put(dr, f"P{row}", a.get("rooms_no_criteria") or 0, "Input", "d0")
+            put(dr, f"Q{row}", a.get("area_no_criteria_m2") or 0, "Input", "d1")
             put(dr, f"J{row}", "D", "Code")
             put(dr, f"K{row}", f"DEPT-{dn}", "Tag")
             link_to(dr[f"K{row}"], "Sources", f"A{src_row[f'DEPT-{dn}']}")
@@ -293,17 +300,19 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
     put(am, "A1", "AHU Master", "Title")
     put(am, "A2", "Each AHU once, sorted by storey and tag. Room supply is the sum over the departments; calculated airflow adds the duct leakage. "
         "Outdoor air is the highest room outdoor-air fraction of any department on the unit × the calculated airflow. Tender airflow is information only: "
-        "it is never a target or a limit. A calculated airflow above tender is marked VERIFY.", "Note")
+        "it is never a target or a limit. A calculated airflow above tender is marked VERIFY. Outdoor air above the tender outdoor airflow is marked VERIFY and shows no reduction.", "Note")
     mh = [("ahu", "AHU or system", "", 28), ("type", "Type", "", 9), ("nd", "Departments", "no.", 13), ("n", "Rooms", "no.", 8), ("area", "Area", "m²", 10),
           ("nh", "Rooms with no ceiling height", "no.", 12),
           ("sa", "Room supply", "L/s", 11), ("leak", "Duct leakage", "%", 9), ("calc", "Calculated airflow", "L/s", 11),
           ("oa", "Sum of room outdoor air", "L/s", 11), ("frac", "Highest room outdoor-air fraction", "%", 12), ("oa_rule", "AHU outdoor air = fraction × calculated airflow", "L/s", 14),
-          ("tender", "Tender airflow", "L/s", 11), ("code", "Code", "", 5), ("sid", "Source ID", "", 24), ("tsrc", "Tender source", "", 40),
+          ("tender", "Tender airflow", "L/s", 11), ("toa", "Tender outdoor airflow", "L/s", 11), ("code", "Code", "", 5), ("sid", "Source ID", "", 24), ("tsrc", "Tender source", "", 40),
           ("zr", "Rooms of the unit in the zone schedule", "no.", 12), ("za", "Area of the unit in the zone schedule", "m²", 12), ("cov", "Room list of the unit", "", 36),
           ("red", "Reduction = tender − calculated", "L/s", 12), ("redp", "Reduction = (tender − calculated) ÷ tender", "%", 12),
-          ("flag", "Against tender", "", 28), ("rem", "Remarks", "", 70),
-          ("nfix", "Rooms specified by the MOT NSC", "no.", 12), ("aok", "Area of the rooms with a criteria row and a supply airflow", "m²", 14)]
-    col = {k: chr(65 + i) for i, (k, *_r) in enumerate(mh)}
+          ("flag", "Against tender", "", 28), ("oaflag", "Outdoor air against tender", "", 28), ("rem", "Remarks", "", 70),
+          ("nfix", "Rooms specified by the MOT NSC", "no.", 12), ("aok", "Area of the rooms with a criteria row and a supply airflow", "m²", 14),
+          ("nnc", "Rooms with no criteria row", "no.", 12), ("anc", "Area of the rooms with no criteria row", "m²", 14)]
+    from openpyxl.utils import get_column_letter
+    col = {k: get_column_letter(i + 1) for i, (k, *_r) in enumerate(mh)}
     for i, (k, h, u, w) in enumerate(mh):
         put(am, f"{col[k]}5", h, "HeaderLeft" if k in ("tsrc", "rem", "flag") else "Header")
         put(am, f"{col[k]}6", u or None, "Unit")
@@ -320,12 +329,16 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
         put(am, g("nh"), f"=SUMIFS({rng('H')},{rng('A')},{g('ahu')})", "Calc", "d0")
         put(am, g("nfix"), f"=SUMIFS({rng('N')},{rng('A')},{g('ahu')})", "Calc", "d0")
         put(am, g("aok"), f"=SUMIFS({rng('O')},{rng('A')},{g('ahu')})", "Calc", "d1")
+        put(am, g("nnc"), f"=SUMIFS({rng('P')},{rng('A')},{g('ahu')})", "Calc", "d0")
+        put(am, g("anc"), f"=SUMIFS({rng('Q')},{rng('A')},{g('ahu')})", "Calc", "d1")
         put(am, g("sa"), f"=SUMIFS({rng('F')},{rng('A')},{g('ahu')})", "Calc", "d1")
         put(am, g("leak"), "=DuctLeakage", "Link", "pct1")
         put(am, g("calc"), f"={g('sa')}*(1+{g('leak')})", "Result", "d1")
         put(am, g("oa"), f"=SUMIFS({rng('G')},{rng('A')},{g('ahu')})", "Calc", "d1")
         put(am, g("frac"), f"=_xlfn.MAXIFS({rng('I')},{rng('A')},{g('ahu')})", "Calc", "pct1")
         put(am, g("oa_rule"), f"={g('frac')}*{g('calc')}", "Calc", "d1")
+        toa_ = tender_oa.get(tag)
+        put(am, g("toa"), toa_, "Input", "d0")
         te = tenders.get(tag)
         if te:
             put(am, g("tender"), te["lps"], "Input", "d0")
@@ -342,15 +355,18 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
             flags.append(dict(type="VERIFY", ref=tag, text=f"AHU {tag}: no tender airflow is used. " + (str(note_) + "." if note_ else "No department workbook gives one.")))
         put(am, g("zr"), f"=_xlfn.MAXIFS({rng('L')},{rng('A')},{g('ahu')})", "Calc", "d0")
         put(am, g("za"), f"=_xlfn.MAXIFS({rng('M')},{rng('A')},{g('ahu')})", "Calc", "d1")
-        put(am, g("cov"), coverage_formula(g("zr"), g("za"), g("n"), g("area"), g("aok"), "ZoneCoverMin"), "Calc").alignment = Alignment(horizontal="left")
-        put(am, g("red"), f'=IF(OR({g("tender")}="",{g("calc")}=0,{g("cov")}<>""),"",{g("tender")}-{g("calc")})', "Calc", "d0")
+        put(am, g("cov"), coverage_formula(g("zr"), g("za"), g("n"), g("area"), g("aok"), "ZoneCoverMin", g("nnc"), g("anc")), "Calc").alignment = Alignment(horizontal="left")
+        oa_above = f'AND(ISNUMBER({g("toa")}),{g("oa_rule")}>{g("toa")})'
+        put(am, g("oaflag"), f'=IF(NOT(ISNUMBER({g("toa")})),"not scheduled",IF({oa_above},"VERIFY: ABOVE TENDER OUTDOOR AIR","within tender outdoor air"))', "Calc").alignment = Alignment(horizontal="left")
+        put(am, g("red"), f'=IF(OR({g("tender")}="",{g("calc")}=0,{g("cov")}<>"",{oa_above}),"",{g("tender")}-{g("calc")})', "Calc", "d0")
         put(am, g("redp"), f'=IF(OR({g("red")}="",{g("tender")}=0),"",{g("red")}/{g("tender")})', "Calc", "pct1")
         put(am, g("flag"), (f'=IF({g("tender")}="","NO TENDER VALUE",IF({g("calc")}=0,"NOT CALCULATED",IF({g("cov")}<>"","PARTIAL ROOM LIST",'
-                            f'IF({g("calc")}>{g("tender")},"VERIFY: ABOVE TENDER",IF({g("calc")}={g("tender")},"EQUALS TENDER","REDUCTION AGAINST TENDER")))))'),
+                            f'IF({g("calc")}>{g("tender")},"VERIFY: ABOVE TENDER",IF({g("calc")}={g("tender")},"EQUALS TENDER",IF({oa_above},"NO REDUCTION STATED: OUTDOOR AIR ABOVE TENDER","REDUCTION AGAINST TENDER"))))))'),
             "Calc").alignment = Alignment(horizontal="left")
         put(am, g("rem"), tender_remark(g("tender"), g("calc"), g("red"), g("redp"), f'IF({g("tsrc")}="","tender airflow",{g("tsrc")})',
-                                        zero="Calculated airflow is 0 L/s: no room of the department workbooks is on this unit, or no room of it has a supply airflow.",
+                                        zero="No room of the department workbooks is on this unit, or no room of it has a supply airflow.",
                                         share_note=False, partial=g("cov"), note=g("tsrc"), all_spec=f'AND({g("n")}>0,{g("nfix")}={g("n")})',
+                                        oa_above=oa_above, oa_calc=g("oa_rule"), oa_tender=g("toa"), crit_partial=True,
                                         lead=(f'IF({g("nh")}>0,"Main cause: ceiling height is not set for "&{g("nh")}&" of "&{g("n")}&" rooms that this unit serves, '
                                               f'so their air-change airflow is 0 L/s.","")')), "Remark")
     last = FIRST + max(len(tags), 1) - 1
@@ -364,6 +380,7 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
     put(am, f"{col['redp']}{tr}", f'=IF(SUMPRODUCT(--ISNUMBER({red_rng}),{ten_rng})=0,"",SUM({red_rng})/SUMPRODUCT(--ISNUMBER({red_rng}),{ten_rng}))', "Total", "pct1")
     put(am, f"{col['rem']}{tr}", "Reduction (%) of the total row = the sum of the reductions divided by the tender of the same rows (the rows that state a reduction). The tender total above is the tender of all rows.", "Note")
     cf_formula(am, f"{col['flag']}{FIRST}:{col['flag']}{last}", f'LEFT({col["flag"]}{FIRST},6)="VERIFY"', bold=False, fill="FFFFF2CC")
+    cf_formula(am, f"{col['oaflag']}{FIRST}:{col['oaflag']}{last}", f'LEFT({col["oaflag"]}{FIRST},6)="VERIFY"', bold=False, fill="FFFFF2CC")
     am.freeze_panes = f"B{FIRST}"
     ahu_rng = lambda c: f"'AHU Master'!${col[c]}${FIRST}:${col[c]}${last}"
 
@@ -403,6 +420,9 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
         ("Zoned area that the department workbooks do not count on the AHU rows", f"=SUMPRODUCT(({ahu_rng('za')}>{ahu_rng('area')})*({ahu_rng('za')}-{ahu_rng('area')}))", 0,
          '=IF(C{r}<=0,"PASS","VERIFY")', "m² of the zone schedule"),
         ("AHU rows whose calculated airflow is above tender", f'=COUNTIF({ahu_rng("flag")},"VERIFY*")', 0, '=IF(C{r}=0,"PASS","VERIFY")', "rows"),
+        ("AHUs with outdoor air above tender outdoor air", f'=COUNTIF({ahu_rng("oaflag")},"VERIFY*")', 0, '=IF(C{r}=0,"PASS","VERIFY")',
+         "rows; VERIFY, not FAIL: tender airflow is information only; no reduction is stated for them"),
+        ("AHU rows with no tender outdoor airflow", f'=COUNTIF({ahu_rng("oaflag")},"not scheduled")', "information", '="INFO"', "rows; the outdoor air is not compared for them"),
         ("Rooms with no ceiling height", f"=SUM({ahu_rng('nh')})", 0, '=IF(C{r}=0,"PASS","VERIFY")', "rooms"),
         ("Source IDs that do not resolve on Sources",
          f"=SUMPRODUCT(({rng('K')}<>\"\")*(COUNTIF('Sources'!$A${FIRST}:$A${FIRST + len(srcs) - 1},{rng('K')})=0))", 0, '=IF(C{r}=0,"PASS","FAIL")', "IDs"),
@@ -448,7 +468,7 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
     r += 1
     for t in ("Each AHU is counted once across the department workbooks. The department workbooks give the room supply that each department takes from the AHU.",
               "Tender airflow comes from the Equipment Schedule (Corr 5), or from the tender air-side schematic where the schedule has no row. It is information only.",
-              "Reduction = tender − calculated. Reduction (%) = (tender − calculated) ÷ tender. A calculated airflow above tender is marked VERIFY."):
+              "Reduction = tender − calculated. Reduction (%) = (tender − calculated) ÷ tender. A calculated airflow above tender is marked VERIFY. Where the calculated outdoor air is above the tender outdoor airflow, the unit is marked VERIFY and shows no reduction."):
         put(rd, f"B{r}", t, "TextWrap")
         rd.merge_cells(f"B{r}:H{r}")
         rd.row_dimensions[r].height = 28
@@ -483,7 +503,7 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
     r += 1
     put(rd, f"B{r}", "A unit shows a reduction against tender only when the area counted in the department workbooks is within the share ZoneCoverMin of the area that the zone "
         "schedule gives for the unit, on both sides (not below ZoneCoverMin times and not above 1 ÷ ZoneCoverMin times that area), and when the rooms that have a criteria row and a "
-        "supply airflow hold at least that share of the counted area. Otherwise the Remarks column states 'partial: ...' and the reduction cells stay blank. "
+        "supply airflow hold at least that share of the counted area. A unit whose zone schedule area is 0 m² is partial. Otherwise the Remarks column states 'partial: n of m zoned rooms counted' and the reduction cells stay blank. "
         "The percentage in the total row compares the reduction of the rows that state one with the tender of the same rows.", "TextWrap")
     rd.merge_cells(f"B{r}:H{r}")
     rd.row_dimensions[r].height = 56

@@ -72,10 +72,11 @@ def check_workbook(xlsx: Path, work: Path = None) -> int:
     import tempfile
     import openpyxl
     from .recalc import recalc
-    from .selftest import language_scan, scan_errors, scan_formulas
+    from .selftest import language_scan, properties_scan, scan_errors, scan_formulas, template_text_scan
     work = work or Path(tempfile.mkdtemp(prefix="wbcheck_"))
     rc = recalc(xlsx, work)
     errs, lang, fs = scan_errors(rc), language_scan(rc), scan_formulas(xlsx)
+    tmpl, props = template_text_scan(rc), properties_scan(rc)
     wb = openpyxl.load_workbook(rc, data_only=True)
     rooms = sum(1 for r in wb["Room Information"].iter_rows(min_row=7, values_only=True) if r[0]) if "Room Information" in wb.sheetnames else 0
     fl = [r for r in wb["Flags"].iter_rows(min_row=7, values_only=True) if r[0]] if "Flags" in wb.sheetnames else []
@@ -84,14 +85,18 @@ def check_workbook(xlsx: Path, work: Path = None) -> int:
     for r in fl:
         by_type[r[1]] = by_type.get(r[1], 0) + 1
     print(f"{xlsx.name}: rooms {rooms}; flags {len(fl)} {by_type}; formulas {fs['n_formula']}; error values {len(errs)}; "
-          f"forbidden terms or internal references {len(lang)}; typed numbers {len(fs['literals'])}; unlisted functions {len(fs['bad_funcs'])}; "
+          f"forbidden terms or internal references {len(lang)}; template text in cells {len(tmpl)}; tool names in properties {len(props)}; typed numbers {len(fs['literals'])}; unlisted functions {len(fs['bad_funcs'])}; "
           f"checks FAIL {sum(1 for _, s in checks if s == 'FAIL')}, VERIFY {sum(1 for _, s in checks if s == 'VERIFY')}")
     for e in errs[:5]:
         print("  error", e)
     for e in lang[:5]:
         print("  language", e)
+    for e in tmpl[:5]:
+        print("  template text", e)
+    for e in props[:5]:
+        print("  properties", e)
     print("  recalculated copy:", rc)
-    return 0 if not errs and not lang and not fs["bad_funcs"] and not fs["literals"] else 1
+    return 0 if not errs and not lang and not tmpl and not props and not fs["bad_funcs"] and not fs["literals"] else 1
 
 
 if __name__ == "__main__":

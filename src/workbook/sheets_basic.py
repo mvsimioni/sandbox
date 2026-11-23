@@ -206,7 +206,7 @@ def write_basis(ctx: Ctx) -> None:
              "Tender airflow (Equipment Schedule Corr 5; for the MOT NSC units the MOT NSC Overall AC Equipment Schedule Corr 2; else the tender air-side schematic) is information only. It is never a target or a limit. "
              "Reduction = tender − calculated. Reduction (%) = (tender − calculated) ÷ tender. A calculated airflow above tender is marked VERIFY. "
              "A unit shows a reduction only when the rooms counted here reach the share ZoneCoverMin of the area that the zone schedule gives for the unit. "
-             "Otherwise the Remarks cell reads 'partial: n of m zoned rooms, x of y m²' and the reduction cells stay blank. The other departments on the unit are counted on the AHU master summary.",
+             "Otherwise the Remarks cell reads 'partial: n of m rooms counted' and the reduction cells stay blank. A unit whose outdoor air is above its tender outdoor airflow is marked VERIFY and shows no reduction. The other departments on the unit are counted on the AHU master summary.",
              "Occupancy comes from the RDS. The default density by room use applies only where the RDS field is empty or the room has no RDS. "
              "It is rounded up to a whole person (red text, code A).",
              "Area used (selector AUTO, the default): the design area is the DPA designed area, else the SOA area. "
@@ -638,6 +638,8 @@ def write_checks(ctx: Ctx) -> None:
         ("Rooms the rule would still separate after four rounds", f"=SUM({AF.rng('trg4')})-SUM({AF.rng('lst4')})", 0, '=IF(C{r}<=0,"PASS","FAIL")', "rounds converged"),
         ("AHUs whose scheduled supply is below the calculated AHU supply", f'=SUMPRODUCT(({AH.rng("sched")}<>"")*({AH.rng("sched")}<{AH.rng("sa_ahu")}))', 0,
          '=IF(C{r}=0,"PASS","VERIFY")', ""),
+        ("AHUs whose outdoor air is above the tender outdoor airflow", (f'=SUMPRODUCT(--ISNUMBER({AH.rng("sched_oa")}),--({AH.rng("oa_rule")}>{AH.rng("sched_oa")}))' if ctx.ahus else "=0"), 0,
+         '=IF(C{r}=0,"PASS","VERIFY")', "VERIFY, not FAIL: tender airflow is information only; no reduction is stated for these units"),
         ("AHUs whose room list is partial against the zone schedule", f'=COUNTIF({AH.rng("cov")},"partial*")' if ctx.ahus else "=0", "information", '="INFO"',
          "units with no reduction shown; the zoned rooms and area are on the AHU tab"),
         ("Rooms linked to a room box of the tender air-side schematics", f'=COUNT({ctx.lay["CP"].rng("sch_s")})', "information", '="INFO"',

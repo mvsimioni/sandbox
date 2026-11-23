@@ -602,11 +602,34 @@ def write_multi_zoning_pdf(src_pdf: Path, specs: Sequence[dict], out_pdf: Path, 
     out_pdf = Path(out_pdf)
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
     doc.set_metadata({"title": title, "author": AUTHOR, "subject": "AHU zoning", "creator": "", "producer": "", "keywords": ""})
+    scrub_tool_names(doc)
     doc.save(str(out_pdf), garbage=0, deflate=True)
     doc.close()
+    patch_writer_comment(Path(out_pdf))
     return {"pages": manifest_pages, "layers": layers, "page_map": page_map, "colours": colours,
             "expected_layers": [l["name"] for l in layers],
             "expected_tags": {str(o + (n_index - 1)): v for o, v in expected_tags.items()}, "n_index_pages": n_index}
+
+
+def scrub_tool_names(doc) -> None:
+    """No tool name in the document properties (R2-13): the Info dictionary and the XMP packet carry none, the catalog has no Info entry, and the layers
+    (optional content groups) name the author of the document as their creator, not the writer."""
+    for xref, _v in doc.get_ocgs().items():
+        doc.xref_set_key(xref, "Usage/CreatorInfo/Creator", "(%s)" % AUTHOR)
+    doc.del_xml_metadata()
+    try:
+        doc.xref_set_key(doc.pdf_catalog(), "Info", "null")
+    except Exception:
+        pass
+
+
+def patch_writer_comment(pdf: Path) -> None:
+    """The writer prints a comment line under the header ('% Written by ...'). It is replaced by blanks of the same length, so every byte offset stays valid."""
+    import re as _re
+    b = pdf.read_bytes()
+    nb = _re.sub(rb"(?m)^%[ ]*Written by [^\r\n]*", lambda m: b"%" + b" " * (len(m.group(0)) - 1), b, count=1)
+    if nb != b:
+        pdf.write_bytes(nb)
 
 
 def verify_multi_zoning_pdf(out_pdf: Path, src_pdf: Path, page_map: Sequence[Tuple[int, int, str]], expect_layers: Sequence[str],

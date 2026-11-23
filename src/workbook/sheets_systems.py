@@ -54,6 +54,8 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
         put(ws, g("noh"), f'=COUNTIFS({crit}{inc},{ctx.lay["RI"].rng("h")},"")', "Calc", "d0")
         put(ws, g("nfix"), f"=COUNTIFS({crit}{inc},{AF.rng('fix')},1)", "Calc", "d0")
         put(ws, g("area_ok"), f'=SUMPRODUCT(--({AF.rng("ahu")}={key}){mask},--({AF.rng("supply")}>0),--({ctx.lay["CR"].rng("crit")}<>""),{AF.rng("area")})', "Calc", "d1")
+        put(ws, g("nocrit"), f'=SUMPRODUCT(--({AF.rng("ahu")}={key}){mask},--({ctx.lay["CR"].rng("crit")}=""))', "Calc", "d0")
+        put(ws, g("area_nocrit"), f'=SUMPRODUCT(--({AF.rng("ahu")}={key}){mask},--({ctx.lay["CR"].rng("crit")}=""),{AF.rng("area")})', "Calc", "d1")
         put(ws, g("sa_room"), f"=SUMIFS({AF.rng('supply')},{crit}{inc})", "Calc", "d1")
         put(ws, g("leak"), "=DuctLeakage", "Link", "pct1")
         put(ws, g("sa_ahu"), f"={g('sa_room')}*(1+{g('leak')})", "Result", "d1")
@@ -105,32 +107,42 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
         else:
             A = ctx.lay["AH"]
             put(ws, g("sched"), f'=IF({A.local("sched", t)}="","",{A.local("sched", t)})', "Link", "d0")
+            put(ws, g("sched_oa"), f'=IF({A.local("sched_oa", t)}="","",{A.local("sched_oa", t)})', "Link", "d0")
             put(ws, g("tsrc"), f'=IF({A.local("tsrc", t)}="","",{A.local("tsrc", t)})', "Link")
             put(ws, g("zr"), f'=IF({A.local("zr", t)}="","",{A.local("zr", t)})', "Link", "d0")
             put(ws, g("za"), f'=IF({A.local("za", t)}="","",{A.local("za", t)})', "Link", "d1")
         if not after:
             # the room list of the unit is complete when the rooms counted here reach ZoneCoverMin of the zoned area (or, where the zone has no
             # measured area, when every zoned room is counted). Until then no reduction is stated.
-            put(ws, g("cov"), coverage_formula(g("zr"), g("za"), g("n"), g("area"), g("area_ok"), "ZoneCoverMin"), "Calc").alignment = Alignment(horizontal="left")
+            put(ws, g("cov"), coverage_formula(g("zr"), g("za"), g("n"), g("area"), g("area_ok"), "ZoneCoverMin", g("nocrit"), g("area_nocrit")), "Calc").alignment = Alignment(horizontal="left")
         else:
             put(ws, g("cov"), f'={ctx.lay["AH"].local("cov", t)}', "Link").alignment = Alignment(horizontal="left")
-        put(ws, g("red"), f'=IF(OR({g("sched")}="",{g("n")}=0,{g("sa_ahu")}=0,{g("cov")}<>""),"",{g("sched")}-{g("sa_ahu")})', "Calc", "d0")
+        oa_above = f'AND(ISNUMBER({g("sched_oa")}),{g("oa_rule")}>{g("sched_oa")})'
+        put(ws, g("red"), f'=IF(OR({g("sched")}="",{g("n")}=0,{g("sa_ahu")}=0,{g("cov")}<>"",{oa_above}),"",{g("sched")}-{g("sa_ahu")})', "Calc", "d0")
         put(ws, g("redp"), f'=IF(OR({g("red")}="",{g("sched")}=0),"",{g("red")}/{g("sched")})', "Calc", "pct1")
+        put(ws, g("leadtxt"), "=" + height_lead(ctx, ahu=g("ahu"), n=g("n"), noh=g("noh")), "Calc")
         inner = tender_remark(g("sched"), g("sa_ahu"), g("red"), g("redp"), f'IF({g("tsrc")}="","tender airflow",{g("tsrc")})',
-                              zero="Calculated airflow is 0 L/s: no room of this unit has a supply airflow.",
-                              lead=height_lead(ctx, ahu=g("ahu"), n=g("n"), noh=g("noh")), partial=g("cov"), note=g("tsrc"),
-                              all_spec=f'AND({g("n")}>0,{g("nfix")}={g("n")})')[1:]
+                              zero="No room of this unit has a supply airflow.", crit_partial=True,
+                              lead=g("leadtxt"), partial=g("cov"), note=g("tsrc"),
+                              all_spec=f'AND({g("n")}>0,{g("nfix")}={g("n")})', oa_above=oa_above, oa_calc=g("oa_rule"), oa_tender=g("sched_oa"))[1:]
         put(ws, g("rem"), f'=IF({g("n")}=0,"No room on Room Information is served by this unit: no calculation.",{inner})', "Remark")
 
 
-def coverage_formula(zr: str, za: str, n: str, area: str, area_ok: str, z: str) -> str:
+def coverage_formula(zr: str, za: str, n: str, area: str, area_ok: str, z: str, nc: str = None, nca: str = None) -> str:
     """Excel text: empty when the room list of a unit is complete, else 'partial: ...'. The counted area must lie within the share Z of the zoned area on both
     sides (below Z times, or above 1/Z times the zoned area, is partial), and the rooms with a criteria row and a supply airflow must hold at least the share Z of the
-    counted area. A unit that is not in the zone schedule is partial."""
+    counted area. A unit that is not in the zone schedule is partial. The text says how many of the rooms are counted (D-023): 'partial: n of m rooms counted'.
+    `nc` and `nca` are the count and the area of the counted rooms that have no criteria row (R1-08, decided ruling 3)."""
+    if nc:
+        crit = (f'IF({area_ok}<{z}*{area},IF({nc}>0,"partial: no criteria row for "&{nc}&" of "&{n}&" rooms on this unit ("&TEXT({nca},"#,##0")&" m²)",'
+                f'"partial: only "&TEXT({area_ok},"#,##0")&" of "&TEXT({area},"#,##0")&" m² counted have a supply airflow"),"")')
+    else:
+        crit = (f'IF({area_ok}<{z}*{area},"partial: only "&TEXT({area_ok},"#,##0")&" of "&TEXT({area},"#,##0")&" m² counted have a criteria row and a supply airflow","")')
     return (f'=IF({zr}="","partial: the unit is not in the zone schedule",IF({zr}=0,"partial: the unit is not in the zone schedule",'
-            f'IF(IF({za}>0,OR({area}<{z}*{za},{area}>{za}/{z}),{n}<{zr}),'
-            f'"partial: "&{n}&" rooms, "&TEXT({area},"#,##0")&" m² counted against "&{zr}&" zoned rooms, "&TEXT({za},"#,##0")&" m²",'
-            f'IF({area_ok}<{z}*{area},"partial: only "&TEXT({area_ok},"#,##0")&" of "&TEXT({area},"#,##0")&" m² counted have a criteria row and a supply airflow",""))))')
+            f'IF(IF(ISNUMBER({za}),{za},0)=0,"partial: the zone schedule gives the unit a zoned area of 0 m² ("&{n}&" of "&{zr}&" zoned rooms counted; the room tags have no outline on the plan)",'
+            f'IF(OR({area}<{z}*{za},{area}>{za}/{z}),'
+            f'"partial: "&{n}&" of "&{zr}&" zoned rooms counted ("&TEXT({area},"#,##0")&" m² counted, "&TEXT({za},"#,##0")&" m² zoned)",'
+            f'{crit}))))')
 
 
 def height_lead(ctx: Ctx, *, ahu: str = None, room: str = None, fan_tag: str = None, n: str = None, noh: str = None) -> str:
@@ -198,7 +210,8 @@ def write_ahu(ctx: Ctx) -> None:
              H("zc", "Code", "", 5), H("zs", "Source ID", "", 11), H("cov", "Room list of the unit", "", 40),
              H("red", "Reduction = tender − calculated supply", "L/s", 11),
              H("redp", "Reduction = (tender − calculated) ÷ tender", "%", 11), H("rem", "Remarks", "", 140),
-             H("nfix", "Rooms specified by the MOT NSC", "no.", 10), H("area_ok", "Area of the rooms with a criteria row and a supply airflow", "m" + U, 12)]
+             H("nfix", "Rooms specified by the MOT NSC", "no.", 10), H("area_ok", "Area of the rooms with a criteria row and a supply airflow", "m" + U, 12),
+             H("leadtxt", "Causes proved by the cells (helper)", "", 12), H("nocrit", "Rooms with no criteria row", "no.", 10), H("area_nocrit", "Area of the rooms with no criteria row", "m" + U, 12)]
     bands = {"ahu": "A. AS ZONED: AIRFLOW", "frac": "OUTDOOR AIR", "vou": "MULTIPLE SPACE (example)", "ret": "RETURN, EXHAUST, RELIEF",
              "sens": "COIL DUTY", "oa_sens_ms": "COIL DUTY ON THE EXAMPLE'S OUTDOOR-AIR BASIS", "req_t": "CHECKS", "sched": "TENDER AIRFLOW AND REDUCTION",
              "zr": "ROOM LIST OF THE UNIT"}
@@ -230,6 +243,8 @@ def write_ahu(ctx: Ctx) -> None:
     if ctx.ahus:
         cf_formula(ws, f"{L.col('req_t')}{L.first}:{L.col('req_t')}{L.last}",
                    f"AND({L.col('req_t')}{L.first}<SupplyTemp,{L.col('sa_room')}{L.first}>0)")
+        cf_formula(ws, f"{L.col('sched_oa')}{L.first}:{L.col('sched_oa')}{L.last}",
+                   f'AND(ISNUMBER({L.col("sched_oa")}{L.first}),{L.col("oa_rule")}{L.first}>{L.col("sched_oa")}{L.first})', bold=False, fill="FFFFF2CC")
         cf_formula(ws, f"{L.col('sched')}{L.first}:{L.col('sched')}{L.last}",
                    f'AND({L.col("sched")}{L.first}<>"",{L.col("sched")}{L.first}<{L.col("sa_ahu")}{L.first})', bold=False, fill="FFFFF2CC")
     list_validation(ws, f"{L.col('type')}{L.first}:{L.col('type')}{L.last}", "ListSystemType")
@@ -240,7 +255,7 @@ def write_ahu(ctx: Ctx) -> None:
         cf_formula(ws, f"{L2.col('red')}{L2.first}:{L2.col('red')}{L2.last}", f'AND({L2.col("red")}{L2.first}<>"",{L2.col("red")}{L2.first}<0)', bold=False, fill="FFFFF2CC")
     group_cols(ws, L, "vou", "vot")
     group_cols(ws, L, "oa_sens_ms", "coil_ms")
-    group_cols(ws, L, "nfix", "area_ok", collapsed=True)
+    group_cols(ws, L, "nfix", "area_nocrit", collapsed=True)
     _setup(ws, ctx, L, L.idx["rem"], ctx.ahu2_total_row, "4:6", f"{L.col('crit')}{L.first}", "FF00B050")
     ws.freeze_panes = f"B{L.first}"
 

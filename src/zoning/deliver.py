@@ -150,7 +150,8 @@ README = [
     ("If neither source has a figure, the cell is blank and the source column gives the reason.", ""),
     ("The Calculated airflow column holds the supply airflow in L/s from AHU_master_summary.xlsx (tab AHU Master): the room supply of the department workbooks that carry rooms on the unit, plus the duct leakage. The Calculated airflow source ID column points to the Sources sheet, which names the master row and the department workbooks. The values are numbers: they do not update when a workbook changes.", ""),
     ("Reduction (L/s) = Tender airflow minus Calculated airflow. Reduction (%) = Reduction divided by Tender airflow. Both are formulas and stay blank where the tender airflow or the calculated airflow is blank, or where the room list of the unit is partial.", ""),
-    ("Room list of the unit: the department workbooks add up only the rooms that they hold. The cell reads 'partial: ...' when the counted area is less than the share 0.9 of the zoned area of the unit, or more than 1 divided by 0.9 of it, or when the rooms that have a criteria row and a supply airflow hold less than the share 0.9 of the counted area. A partial unit shows no reduction. Its Remarks cell states the tender and the calculated airflow of the counted rooms only.", ""),
+    ("Room list of the unit: the department workbooks add up only the rooms that they hold. The cell reads 'partial: n of m zoned rooms counted' when the zoned area of the unit is 0 m², or when the counted area is less than the share 0.9 of the zoned area of the unit, or more than 1 divided by 0.9 of it, or when the rooms that have a criteria row and a supply airflow hold less than the share 0.9 of the counted area. A partial unit shows no reduction. Its Remarks cell states the tender and the calculated airflow of the counted rooms only.", ""),
+    ("Tender outdoor airflow is the outdoor airflow of the same schedule row (Outdoor Airflow / Min), or of the tender air-side schematic where the schedule has none. Calculated outdoor air is the outdoor air of the unit in AHU_master_summary.xlsx. Where the calculated outdoor air is above the tender outdoor air, the Remarks cell says VERIFY and the unit shows no reduction. Both columns are blank where no figure exists.", ""),
     ("The calculated airflow and the reduction include occupants only. Lighting, small power, equipment and envelope gains are not included, so the reduction is an upper limit.", ""),
     ("The Remarks cell is a formula. It states the tender airflow, the calculated airflow and the change. If the calculated airflow is more than the tender airflow, the Remarks cell starts with VERIFY.", ""),
     ("Schematic and schedule airflows are for comparison only. They do not set the zone.", ""),
@@ -160,6 +161,38 @@ README = [
     ("AHU tags and served rooms: air-side department schematics, Equipment Schedule SCH/1 (Corr 5), Appendix D ACMV for Common Areas, and the DD Booklets, as cited for each room.", ""),
     ("Diagnostic Imaging on L04: RFI-ME-0233 governs. Other departments: the later dated document governs and the difference is shown in the Remarks column.", ""),
 ]
+
+
+def oa_above_f(i: int) -> str:
+    """Excel boolean: calculated outdoor air (column U) above the tender outdoor airflow (column T) of row i."""
+    return f"AND(ISNUMBER(T{i}),ISNUMBER(U{i}),U{i}>T{i})"
+
+
+def red_formula(i: int, zoned: bool = False) -> str:
+    z = ('G%d=0,' % i) if zoned else ""
+    return '=IF(OR(I%d="",K%d="",S%d<>"",%s%s),"",I%d-K%d)' % (i, i, i, z, oa_above_f(i), i, i)
+
+
+def redp_formula(i: int) -> str:
+    return '=IF(OR(L%d="",I%d=0),"",L%d/I%d)' % (i, i, i, i)
+
+
+NO_POLYGON_NOTE = ("No zone polygon: the room tags of this unit lie in an open region that has no closed outline, so the zoned area is 0 m² and the unit is not drawn "
+                   "on the zoning PDF. No reduction is stated. ")
+
+
+def remarks_formula(i: int, zoned: bool = False) -> str:
+    """Remarks of the AHU summary. A reduction is worded only when the room list of the unit is complete (partial: n of m rooms counted) and the outdoor air is not above the
+    tender outdoor airflow (R1-10: VERIFY on every unit)."""
+    oa = ('IF({oa},"Outdoor air "&TEXT(U{r},"#,##0")&" L/s is above tender outdoor air "&TEXT(T{r},"#,##0")&" L/s ("&J{r}&"). VERIFY. ","")').format(oa=oa_above_f(i), r=i)
+    f = ('=(IF(I{r}="",J{r}&".",IF(K{r}="","Tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). Calculated airflow not available. "&' + oa + ',' 
+         'IF(K{r}>I{r},"VERIFY: increase from "&TEXT(I{r},"#,##0")&" to "&TEXT(K{r},"#,##0")&" L/s (+"&TEXT((K{r}-I{r})/I{r},"0.0 %")&") against tender ("&J{r}&"). "&' + oa + ',' 
+         'IF(S{r}<>"",S{r}&". Tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). Calculated for the counted rooms: "&TEXT(K{r},"#,##0")&" L/s. No reduction is stated until the room list of the unit is complete. "&' + oa + ',' 
+         'IF(' + oa_above_f(i) + ',"Supply "&TEXT(K{r},"#,##0")&" L/s against tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). "&' + oa + '&"No reduction is stated for this unit until the outdoor air is checked.",' 
+         '"Reduced "&TEXT(I{r},"#,##0")&" to "&TEXT(K{r},"#,##0")&" L/s (−"&TEXT((I{r}-K{r})/I{r},"0.0 %")&") against tender ("&J{r}&")."))))))&" "&"' + THERMAL_NOTE + '"').format(r=i)
+    if zoned:
+        f = '=IF(G%d=0,"%s","")&' % (i, NO_POLYGON_NOTE) + f[1:]
+    return f
 
 
 def build_xlsx(storeys: List[str], out: Path) -> dict:
@@ -200,8 +233,9 @@ def build_xlsx(storeys: List[str], out: Path) -> dict:
     sm = wb.create_sheet("AHU summary")
     heads = ["AHU or FCU tag", "Type", "Departments", "Storeys served", "Plant level", "Rooms", "Area (m²)", "Lowest room confidence",
              "Tender airflow (L/s)", "Tender airflow source", "Calculated airflow (L/s)", "Reduction (L/s)", "Reduction (%)", "Remarks", "Code",
-             "Calculated airflow source ID", "Rooms counted in the department workbooks", "Area counted in the department workbooks (m²)", "Room list of the unit"]
-    widths = [26, 7, 30, 12, 24, 8, 10, 11, 12, 40, 12, 12, 11, 62, 6, 16, 12, 12, 40]
+             "Calculated airflow source ID", "Rooms counted in the department workbooks", "Area counted in the department workbooks (m²)", "Room list of the unit",
+             "Tender outdoor airflow (L/s)", "Calculated outdoor air (L/s)"]
+    widths = [26, 7, 30, 12, 24, 8, 10, 11, 12, 40, 12, 12, 11, 62, 6, 16, 12, 12, 40, 12, 12]
     _head(sm, 1, heads, widths)
     n_no_tender = 0
     tender_conf: List[dict] = []
@@ -218,14 +252,9 @@ def build_xlsx(storeys: List[str], out: Path) -> dict:
         typ = re.match(r"^([A-Z]+)", tags[0]).group(1)
         row = [u["tag"], typ, "; ".join(sorted(u["depts"])) or "no information", ", ".join(u["storeys"]), plant_level(tags[0]), u["n"], round(u["area"], 1), u["conf"],
                val, src, None,
-               '=IF(OR(I%d="",K%d="",S%d<>""),"",I%d-K%d)' % (i, i, i, i, i),
-               '=IF(OR(L%d="",I%d=0),"",L%d/I%d)' % (i, i, i, i),
-               ('=(IF(I{r}="",J{r}&".",IF(K{r}="","Tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). Calculated airflow not available.",'
-                'IF(K{r}>I{r},"VERIFY: increase from "&TEXT(I{r},"#,##0")&" to "&TEXT(K{r},"#,##0")&" L/s (+"&TEXT((K{r}-I{r})/I{r},"0.0 %")&") against tender ("&J{r}&").",'
-                'IF(S{r}<>"",S{r}&". Tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). Calculated for the counted rooms: "&TEXT(K{r},"#,##0")&" L/s. No reduction is stated until the room list of the unit is complete.",'
-                '"Reduced "&TEXT(I{r},"#,##0")&" to "&TEXT(K{r},"#,##0")&" L/s (−"&TEXT((I{r}-K{r})/I{r},"0.0 %")&") against tender ("&J{r}&")."))))&" "&"' + THERMAL_NOTE + '"').format(r=i),
-               "D" if val is not None else None, None, None, None, None]
-        styles_ = ["Tag", "Text", "TextWrap", "Text", "TextWrap", "Calc", "Calc", "Calc", "Input", "TextWrap", "Input", "Calc", "Calc", "Remark", "Code", "Tag", "Calc", "Calc", "TextWrap"]
+               red_formula(i, True), redp_formula(i), remarks_formula(i, True),
+               "D" if val is not None else None, None, None, None, None, None, None]
+        styles_ = ["Tag", "Text", "TextWrap", "Text", "TextWrap", "Calc", "Calc", "Calc", "Input", "TextWrap", "Input", "Calc", "Calc", "Remark", "Code", "Tag", "Calc", "Calc", "TextWrap", "Input", "Calc"]
         for j, v in enumerate(row, 1):
             c = sm.cell(row=i, column=j, value=v)
             c.style = styles_[j - 1]
@@ -240,13 +269,16 @@ def build_xlsx(storeys: List[str], out: Path) -> dict:
         sm.cell(row=i, column=11).number_format = _FMT_INT
         sm.cell(row=i, column=12).number_format = _FMT_INT
         sm.cell(row=i, column=13).number_format = _FMT_PCT
+        sm.cell(row=i, column=20).number_format = _FMT_INT
+        sm.cell(row=i, column=21).number_format = _FMT_INT
         sm.row_dimensions[i].height = 28
     last = len(order) + 1
     sm.freeze_panes = "B2"
     sm.auto_filter.ref = "A1:%s%d" % (get_column_letter(len(heads)), last)
     sm.conditional_formatting.add("N2:N%d" % last, FormulaRule(formula=['LEFT($N2,6)="VERIFY"'], fill=PatternFill("solid", bgColor=AMBER, fgColor=AMBER)))
     sm.conditional_formatting.add("H2:H%d" % last, FormulaRule(formula=["$H2<0.9"], fill=PatternFill("solid", bgColor=AMBER, fgColor=AMBER)))
-    sm.conditional_formatting.add("A2:S%d" % last, FormulaRule(formula=["MOD(ROW(),2)=0"], fill=PatternFill("solid", bgColor="FFF4F4F4", fgColor="FFF4F4F4")))
+    sm.conditional_formatting.add("T2:T%d" % last, FormulaRule(formula=["AND(ISNUMBER($T2),ISNUMBER($U2),$U2>$T2)"], fill=PatternFill("solid", bgColor=AMBER, fgColor=AMBER)))
+    sm.conditional_formatting.add("A2:U%d" % last, FormulaRule(formula=["MOD(ROW(),2)=0"], fill=PatternFill("solid", bgColor="FFF4F4F4", fgColor="FFF4F4F4")))
     _print_setup(sm, len(heads), last, 1, "AHU summary", date)
 
     # ---- storey sheets ---------------------------------------------------------------------------

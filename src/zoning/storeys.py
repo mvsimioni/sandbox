@@ -1209,7 +1209,7 @@ def stage_pdf(storeys: Sequence[str]) -> dict:
             if st_["area_m2"] > 0 and abs(st_["poly_m2"] - st_["area_m2"]) > 0.02 * st_["area_m2"] + 1.0:
                 area_warnings.append("%s zone %s: polygon %.1f m2 vs rooms %.1f m2" % (key, zk, st_["poly_m2"], st_["area_m2"]))
         specs.append({"key": key, "label": info["storey_label"], "drawing": info["drawing"], "page_index": info["page0"], "zones": zones, "zone_stats": stats,
-                      "rooms": rooms_ann, "unclassified": summ, "airflow": airflow, "undrawn": summ.get("undrawn_units", []),
+                      "rooms": rooms_ann, "unclassified": summ, "airflow": airflow, "undrawn": [],   # a unit with no zone polygon is neither in the legend nor in the index (the zone schedule gives the reason)
                       "legend_title": "AHU zoning, %s (%s): AHU zones and ventilation classes" % (info["storey_label"], info["drawing"]),
                       "sheet_note": "Each zone is the sum of the rooms that one AHU or one class serves. Fill opacity 0.35. Each AHU or class has its own layer. Room outlines are on the layer 'Rooms (measured)' (off). "
                                     "%d rooms have no information and are not filled (%.0f m2). %d room tags have no closed area on the plan and are not drawn." % (

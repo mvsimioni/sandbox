@@ -138,6 +138,36 @@ def language_scan(path: Path, root: Path = Path(".")) -> List[Tuple[str, str, st
     return hits
 
 
+TOOL_NAMES = re.compile(r"openpyxl|libre ?office|pymupdf|mupdf|pdfplumber|reportlab|\bpython\b|microsoft excel|\bclaude\b|anthropic|\bcairo\b|\bskia\b|chromium", re.I)
+
+
+def template_text_scan(path: Path) -> List[Tuple[str, str, str]]:
+    """Template text left in a cell (R2-05): a '{' or '}' in the text of any cell, or in the recalculated value of a formula. A placeholder such as
+    'No tender {what} found.' is a fault. The path should be a recalculated file, so that the values of the formulas are present."""
+    hits: List[Tuple[str, str, str]] = []
+    wb = openpyxl.load_workbook(path, data_only=True)
+    for ws in wb:
+        for row in ws.iter_rows():
+            for c in row:
+                if isinstance(c.value, str) and ("{" in c.value or "}" in c.value):
+                    hits.append((ws.title, c.coordinate, c.value[:80]))
+    return hits
+
+
+def properties_scan(path: Path) -> List[Tuple[str, str]]:
+    """Tool names in the file properties of a workbook (R2-13): every docProps part of the package."""
+    import zipfile
+    hits: List[Tuple[str, str]] = []
+    with zipfile.ZipFile(path) as z:
+        for n in z.namelist():
+            if n.startswith("docProps/") and n.endswith(".xml"):
+                txt = re.sub(r"<[^>]+>", " ", z.read(n).decode("utf-8", "replace"))
+                m = TOOL_NAMES.search(txt)
+                if m:
+                    hits.append((n, m.group(0)))
+    return hits
+
+
 def _patterns(root: Path = Path(".")) -> List[Tuple[str, "re.Pattern[str]"]]:
     from .conf import forbidden_terms
     pats = [(t, re.compile(r"\b" + re.escape(t) + r"(s|es)?\b", 0 if t == "AI" else re.I)) for t in forbidden_terms(root)]

@@ -36,6 +36,16 @@ def space_name(raw: str) -> str:
     return " / ".join(keep) if keep else "Common space"
 
 
+# Plant names (R1-08, decided ruling 1): a part of an outline name (split at " / ") that is one of these, whole part and any case, makes the outline a plant space.
+# A plant space does not take the circulation default of the common areas.
+PLANT_NAME = re.compile(r"^(?:AHU(?: room| space)?|PAHU|FAHU|LV|HV|(?:LV|HV) switch(?: ?room|rm)|Switchrm|Tfr|Transformer|UPS|Batt(?:ery)?|Elec(?:trical)?|"
+                        r"MG\b.*plant.*|Compressor|Vacuum plant|Generator|Chiller|Pump room)$", re.I)
+
+
+def plant_names(name: str) -> List[str]:
+    return [x.strip() for x in re.split(r"\s/\s", name) if x.strip() and PLANT_NAME.match(x.strip())]
+
+
 def unit_tags(field: str) -> List[str]:
     """Tags of a 'tag [ann n, d pt]; tag [...]' field, nearest first."""
     out: List[str] = []
@@ -99,7 +109,7 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
 
     booklet = _read(root / REG / "criteria.csv")
     crit_cache: Dict[str, Any] = {}
-    n_default = n_booklet = n_none = 0
+    n_default = n_booklet = n_none = n_plant = 0
     none_names: List[str] = []
 
     def criteria_for(name: str, number: str, is_ac: bool = False):
@@ -108,6 +118,8 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
         space, as a whole (code A); it is not split and no single name sets its criteria."""
         key = (name.lower(), is_ac)
         parts_ = [x.strip() for x in re.split(r"\s/\s", name) if x.strip()] or [name]
+        if key not in crit_cache and plant_names(name):
+            crit_cache[key] = (None, "plant")
         if key not in crit_cache and is_ac and (len(parts_) >= 2 or name == "Common space"):
             c_ = dict(crit)
             if len(parts_) >= 2:
@@ -149,12 +161,22 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
 
     # unit of each space: the class of the zone schedule for the plan rooms inside the App D outline (never a tag that is drawn inside it)
     zone_rows = load_zone_assignments(root)
+    from . import appd_outlines as ao
+    outlines = ao.load_outlines(root)
     class_of_space: Dict[Any, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
     for st_key in STOREYS.values():
         pr = _read(root / REG / f"room_polygons_{st_key}.csv") if (root / REG / f"room_polygons_{st_key}.csv").exists() else []
-        for r in pr:
+        inside = ao.rooms_inside(root, st_key, outlines, pr)          # a plan room lies in an outline when its label point is inside it (building mm)
+        taken = set()
+        for idx, prs in inside.items():
+            for r in prs:
+                za = zone_rows.get(st_key, {}).get(r["room_id"])
+                if za is not None:
+                    class_of_space[(st_key, idx)][(za.get("class") or "").strip() or "no information"] += _f(r.get("a_area_m2")) or 1.0
+                    taken.add((idx, r["room_id"]))
+        for r in pr:                                                 # the one-to-one area match of the zoning adds a room that the label point does not place
             za = zone_rows.get(st_key, {}).get(r["room_id"])
-            if r.get("appd_annotation_index") and za is not None:
+            if r.get("appd_annotation_index") and za is not None and (r["appd_annotation_index"], r["room_id"]) not in taken:
                 class_of_space[(st_key, r["appd_annotation_index"])][(za.get("class") or "").strip() or "no information"] += _f(r.get("a_area_m2")) or 1.0
     type_of = {_norm(e["tag_normalised"]): e["type"] for e in equip}
     rooms: List[Dict[str, Any]] = []
@@ -193,6 +215,13 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
                 n_default += 1
             else:
                 n_booklet += 1
+        elif kind == "plant":
+            n_none += 1
+            n_plant += 1
+            none_names.append(name)
+            room["gaps"]["criteria"] = (f"Plant space (names: {', '.join(plant_names(name))}). No criteria row is set: the circulation default does not apply to plant spaces. "
+                                        "The airflow comes from the equipment heat, which is not known.")
+            room["remark"] += "; plant space: no criteria row, airflow not calculated"
         else:
             n_none += 1
             none_names.append(name)
@@ -241,7 +270,8 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
         else:
             room["occupancy_basis"] = "NOT SET"
             room["remark"] += "; occupancy not set"
-            room["gaps"]["occupancy"] = "Occupancy is not set. No RDS applies to the common areas. No room use fits the space name for the default density."
+            room["gaps"]["occupancy"] = ("Occupancy is not set. No RDS applies to the common areas. " + (f"The name '{name}' does not say what the space is used for, so no room use fits it for the default density."
+                                         if name != "Common space" else "The outline has no name on the drawing, so no room use fits it for the default density.") + " Give the number of persons.")
         room["remark"] = room["remark"].rstrip(".") + ". " + ROOM_THERMAL_NOTE
         room["_space"] = s
         rooms.append(room)
@@ -333,6 +363,9 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
         flags.append(dict(type="CONFIRM", ref="README", text="Author, checker and approver of the revision block are not given. They are left blank.", source="ASM-DEFAULT"))
     sp = list(base["space_types"]) + [dict(name="UNCLASSIFIED", room_t_c=base["space_types"][0]["room_t_c"], room_h_kjkg=base["space_types"][0]["room_h_kjkg"],
                                            code="A", source="ASM-DEFAULT")]
+    if n_plant:
+        flags.append(dict(type="VERIFY", ref="Criteria", text=f"{n_plant} spaces are plant spaces (names such as AHU, LV, HV, transformer, UPS, battery, MG plant). "
+                          "Plant and electrical rooms have no criteria row. Their airflow is not calculated and is not zero.", source=""))
     storeys = sorted({r["storey"] for r in rooms})
     data = dict(base)
     data.update(
@@ -347,6 +380,7 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
                         taken="Default criteria row", source=csid)],
         key_flags=[f["text"] for f in flags[:3]],
         criteria_origin=["Room criteria: a space takes the most frequent booklet row of its room type where a booklet prints it. Circulation, corridor and lobby spaces that no booklet row covers take the default. Any other space has no criteria. All of this is an assumption, to confirm.",
+                         "Plant and electrical rooms have no criteria row. Their airflow is not calculated and is not zero.",
                          "Occupancy: the default density by room use, rounded up, because no RDS applies to the common areas."])
     data["constants"] = dict(base["constants"])
     data["assemble_stats"] = dict(rooms=len(rooms), skipped_spaces=len(skipped), spaces_with_unit=n_unit, spaces_with_dpa_area=n_dpa, units=len(ahus),

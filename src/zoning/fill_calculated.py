@@ -72,6 +72,7 @@ def main(argv=None) -> int:
     col = {h: i + 1 for i, h in enumerate(heads)}
     col_k, col_i, col_src = col["Calculated airflow (L/s)"], col["Tender airflow (L/s)"], col[SRC_HEAD]
     col_ts, col_code = col["Tender airflow source"], col["Code"]
+    col_toa, col_oa = col["Tender outdoor airflow (L/s)"], col["Calculated outdoor air (L/s)"]
     col_q, col_r, col_s = col["Rooms counted in the department workbooks"], col["Area counted in the department workbooks (m²)"], col["Room list of the unit"]
     coverage: List[dict] = []
     if "Sources" in wb.sheetnames:
@@ -132,6 +133,9 @@ def main(argv=None) -> int:
             sm.cell(row=i, column=col_s).value = cov_ or None
             coverage.append(dict(unit=str(tag), zone_rooms=sm.cell(row=i, column=6).value, zone_area_m2=sm.cell(row=i, column=7).value, counted_rooms=g(r, "Rooms"),
                                  counted_area_m2=round(float(g(r, "Area") or 0), 1), status=cov_ or "complete"))
+            toa_m, oa_m = g(r, "Tender outdoor airflow"), g(r, "AHU outdoor air = fraction × calculated airflow")
+            sm.cell(row=i, column=col_toa).value = float(toa_m) if isinstance(toa_m, (int, float)) else None
+            sm.cell(row=i, column=col_oa).value = round(float(oa_m), 1) if isinstance(calc, (int, float)) and calc > 0 and isinstance(oa_m, (int, float)) else None
             if isinstance(calc, (int, float)) and calc > 0:
                 k.value = round(float(calc), 1)
                 note = f"Room supply {g(r, 'Room supply'):g} L/s plus duct leakage {float(g(r, 'Duct leakage')) * 100:g} %."
@@ -176,10 +180,13 @@ def main(argv=None) -> int:
         sm.cell(row=i, column=col_s).value = cov_ or None
         coverage.append(dict(unit=tag, zone_rooms=None, zone_area_m2=None, counted_rooms=g(r, "Rooms"), counted_area_m2=round(float(g(r, "Area") or 0), 1),
                              status=cov_ or "complete (unit not on the zoning drawing)"))
-        sm.cell(row=i, column=col["Reduction (L/s)"]).value = f'=IF(OR(I{i}="",K{i}="",S{i}<>""),"",I{i}-K{i})'
-        sm.cell(row=i, column=col["Reduction (%)"]).value = f'=IF(OR(L{i}="",I{i}=0),"",L{i}/I{i})'
-        sm.cell(row=i, column=col["Remarks"]).value = (sm.cell(row=2, column=col["Remarks"]).value.replace("I2", f"I{i}").replace("J2", f"J{i}")
-                                                       .replace("K2", f"K{i}").replace("S2", f"S{i}"))
+        toa_m, oa_m = g(r, "Tender outdoor airflow"), g(r, "AHU outdoor air = fraction × calculated airflow")
+        sm.cell(row=i, column=col_toa).value = float(toa_m) if isinstance(toa_m, (int, float)) else None
+        sm.cell(row=i, column=col_oa).value = round(float(oa_m), 1) if isinstance(calc, (int, float)) and calc > 0 and isinstance(oa_m, (int, float)) else None
+        from .deliver import red_formula, redp_formula, remarks_formula
+        sm.cell(row=i, column=col["Reduction (L/s)"]).value = red_formula(i)
+        sm.cell(row=i, column=col["Reduction (%)"]).value = redp_formula(i)
+        sm.cell(row=i, column=col["Remarks"]).value = remarks_formula(i)
         note = ("Unit not on the zoning drawing. " + (f"Room supply {g(r, 'Room supply'):g} L/s plus duct leakage {float(g(r, 'Duct leakage')) * 100:g} %."
                                                      if isinstance(calc, (int, float)) and calc > 0 else "The master summary gives 0 L/s: the calculated airflow is not available."))
         sid = source(tag, row_no, r, note)
@@ -191,6 +198,7 @@ def main(argv=None) -> int:
     last = sm.max_row
     sm.auto_filter.ref = f"A1:{get_column_letter(len(heads))}{last}"
     sm.print_area = f"A1:{get_column_letter(len(heads))}{last}"
+    sm.conditional_formatting.add(f"T2:T{last}", FormulaRule(formula=["AND(ISNUMBER($T2),ISNUMBER($U2),$U2>$T2)"], fill=PatternFill("solid", bgColor="FCE8B2", fgColor="FCE8B2")))
     sm.conditional_formatting.add(f"N2:N{last}", FormulaRule(formula=['LEFT($N2,6)="VERIFY"'], fill=PatternFill("solid", bgColor="FCE8B2", fgColor="FCE8B2")))
     from ..workbook.styles import setup_sheet
     so_last = sid_n + 1
