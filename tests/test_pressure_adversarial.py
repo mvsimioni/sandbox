@@ -186,10 +186,10 @@ def test_free_space_next_to_an_extreme_external_still_brackets() -> None:
 
 
 def test_selftest_prints_every_known_answer(capsys: pytest.CaptureFixture[str]) -> None:
-    """The table carries one line per known answer and all five spec groups."""
+    """The table carries one line per known answer and all groups."""
     assert pm.run_selftest() == 0
     out = capsys.readouterr().out
-    for marker in ("1 limit conversion", "2 small room", "3 gaps", "4 anteroom", "5 suite"):
+    for marker in ("1 limit conversion", "2 small room", "3 sensitivity", "4 room -15 Pa", "5 room -30 Pa", "6 ensuite", "7 room -70 Pa"):
         assert marker in out
     assert out.count(" ok") == 21 and "MISS" not in out
 

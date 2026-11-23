@@ -169,40 +169,33 @@ SMALL_SURFACE = pm.internal_surface(1.88 * 2.94, 2 * (1.88 + 2.94), 3.0)
 LARGE_SURFACE = pm.internal_surface(3.97 * 4.83, 2 * (3.97 + 4.83), 3.0)
 
 
-def test_known_answer_anteroom(reva_data):
+def test_known_answer_room_at_minus_15_pa(reva_data):
+    """D-028: envelope only, no door data. Offset needed = envelope leakage at the set pressure; design offset = 2.5 x surface."""
     data = _base(reva_data)
-    data["pressure_nodes"] = [{"tag": "CORRIDOR", "pressure_pa": 0.0}, {"tag": "SHAFT", "pressure_pa": 0.0},
-                              {"tag": "ROOM30", "pressure_pa": -30.0}]
-    data["rooms"] = [_room("ANTE", 5.5, regime="NEGATIVE", pa=-15, suite="S1", surface_override_m2=SMALL_SURFACE, doors=[
-        {"id": "d1", "to": "CORRIDOR", "seal": "hinged"},
-        {"id": "d2", "to": "SHAFT", "fixed_flow_m3h": -10.2},      # 10.2 m3/h in from the shaft
-        {"id": "d3", "to": "ROOM30", "seal": "sliding"}])]
+    data["pressure_nodes"] = [{"tag": "CORRIDOR", "pressure_pa": 0.0}]
+    data["rooms"] = [_room("ANTE", 5.5, regime="NEGATIVE", pa=-15, suite="S1", surface_override_m2=SMALL_SURFACE, doors=[])]
     out = th.recompute(data)
     p = out["rooms"][0]["pressure"]
-    assert p["offset_needed_m3h"] == pytest.approx(61.3, abs=0.2)
+    assert p["offset_needed_m3h"] == pytest.approx(45.7, abs=0.2)
     assert p["design_offset_m3h"] == pytest.approx(99.9, abs=0.2)
-    assert p["ratio"] == pytest.approx(1.63, abs=0.01)
+    assert p["ratio"] == pytest.approx(2.19, abs=0.01)
     assert p["offset_kind"] == "exhaust"
 
 
-def test_known_answer_isolation_suite(reva_data):
+def test_known_answer_room_and_ensuite(reva_data):
     data = _base(reva_data)
-    data["pressure_nodes"] = [{"tag": "CORRIDOR", "pressure_pa": 0.0}, {"tag": "ANTE", "pressure_pa": -15.0}]
+    data["pressure_nodes"] = [{"tag": "CORRIDOR", "pressure_pa": 0.0}]
     data["rooms"] = [
-        _room("ROOM", 19.2, regime="NEGATIVE", pa=-30, suite="S2", surface_override_m2=LARGE_SURFACE, doors=[
-            {"id": "d1", "to": "CORRIDOR", "seal": "bed_width"}, {"id": "d2", "to": "ANTE", "seal": "sliding"},
-            {"id": "d3", "to": "ENS", "seal": "sliding"}]),
+        _room("ROOM", 19.2, regime="NEGATIVE", pa=-30, suite="S2", surface_override_m2=LARGE_SURFACE, doors=[]),
         _room("ENS", 8.0, regime="NEGATIVE", pa=-31, suite="S2", surface_override_m2=37.5, doors=[]),
     ]
     p = {r["number"]: r["pressure"] for r in th.recompute(data)["rooms"]}
-    # envelope 163.5 and 68.7 m3/h at 30 and 31 Pa: check through the surfaces
-    assert pm.envelope_leak(LARGE_SURFACE, 30) == pytest.approx(163.5, abs=0.2)
-    assert pm.envelope_leak(37.5, 31) == pytest.approx(68.7, abs=0.2)
-    total_needed = p["ROOM"]["offset_needed_m3h"] + p["ENS"]["offset_needed_m3h"]
-    total_design = p["ROOM"]["design_offset_m3h"] + p["ENS"]["design_offset_m3h"]
-    assert total_needed == pytest.approx(273.5, abs=0.2)
-    assert total_design == pytest.approx(321.6, abs=0.2)
-    assert total_design / total_needed == pytest.approx(1.18, abs=0.01)
+    assert p["ROOM"]["offset_needed_m3h"] == pytest.approx(163.5, abs=0.2)
+    assert p["ENS"]["offset_needed_m3h"] == pytest.approx(68.7, abs=0.2)
+    assert p["ROOM"]["design_offset_m3h"] == pytest.approx(227.9, abs=0.2)
+    assert p["ENS"]["design_offset_m3h"] == pytest.approx(93.8, abs=0.2)
+    assert p["ROOM"]["ratio"] == pytest.approx(1.39, abs=0.01)
+    assert p["ENS"]["ratio"] == pytest.approx(1.36, abs=0.01)
 
 
 def test_pressure_geometry_route_and_airflow_offset(reva_data):

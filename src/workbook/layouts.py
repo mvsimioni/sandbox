@@ -170,8 +170,8 @@ def ps_keys() -> Tuple[List[str], int]:
     printed = ["node", "kind", "name", "suite", "set", "set_c", "set_s", "perim", "perim_c", "perim_s", "area", "h", "ovr",
                "ovr_c", "ovr_s", "surf", "limit", "n", "supply", "exhaust", "pfin", "env_in", "env_out", "gap_in",
                "gap_out", "fix_in", "fix_out", "air_in", "air_out", "kindoff", "needed", "design", "tighter", "ratio",
-               "status", "spec_off", "spec_chk", "off_lps", "design_lps", "needed_n50", "needed_n75", "needed_g2", "ratio_n50", "ratio_n75",
-               "ratio_g2", "flag_s", "upa", "resid", "note"]
+               "status", "spec_off", "spec_chk", "off_lps", "design_lps", "needed_n50", "needed_n75", "ratio_n50", "ratio_n75",
+               "flag_s", "upa", "resid", "note"]
     helpers = [f"p{k}" for k in range(NPASS + 1)] + ["lk", "negf", "bsum"] + [f"u{k}" for k in range(NBIS + 1)]
     return printed + helpers, len(printed)
 
@@ -224,7 +224,7 @@ AHU_KEYS = ["ahu", "type", "n", "area", "area_sup", "vol", "noh", "sa_room", "le
             "sens", "lat", "rt", "rh", "oa_sens", "oa_lat", "fan", "coil_s", "coil_l", "coil", "wm2",
             "oa_sens_ms", "oa_lat_ms", "coil_s_ms", "coil_l_ms", "coil_ms", "req_t", "sched", "sched_oa",
             "sched_c", "sched_s", "tsrc", "zr", "za", "zc", "zs", "cov", "red", "redp", "rem", "nfix", "area_ok", "leadtxt", "nocrit", "area_nocrit",
-            "fsp", "spr", "spl", "spy", "spnote", "oaflg"]
+            "fsp", "spr", "spl", "spy", "spnote", "oaflg", "nok"]
 FCU_KEYS = ["k", "no", "name", "ahu", "why", "area", "sens_kw", "lat_kw", "supply", "oa", "oasrc", "oaby", "oacond", "oa_t", "oa_h",
             "oa_sens", "oa_lat", "coil_s", "coil_l", "coil", "cap_sched", "cap_drawn", "cap", "flag",
             "tender", "tsrc", "calc", "red", "redp", "rem"]

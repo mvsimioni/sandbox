@@ -159,7 +159,9 @@ class MotTheatres:
                         "the schematic box of the same pod and room kind is used")
         if not hits:
             return None
-        sp = self._spec(hits[0], f"operating theatre {number}, unit {tag}{note}")
+        sp = self._spec(hits[0], f"operating theatre {number}")
+        sp["modes_tag"] = tag
+        sp["tag_conflict"] = note.lstrip("; ")
         sp["sch_tags"] = self._tags(hits[0]["ahu_pahu_tag"])
         sp["pod"] = pod
         return sp
@@ -184,7 +186,7 @@ class MotTheatres:
         hits = [r for r in rows if set(self._tags(r["ahu_pahu_tag"])) & set(th["sch_tags"])]
         if not hits:
             return None
-        sp = self._spec(hits[0], f"anaesthesia preparation room {number}, unit {th['sch_tags'][0]}")
+        sp = self._spec(hits[0], f"anaesthesia preparation room {number}")
         sp["sch_tags"] = th["sch_tags"]
         sp["unit_tag"] = self.theatre_ahu.get(tnum)      # the unit pair of the theatre that the preparation room serves (the schematic header is shared by all the units of the pod)
         return sp

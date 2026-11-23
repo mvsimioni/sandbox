@@ -372,9 +372,33 @@ def _usable_plan_name(name: str) -> bool:
     return bool(w) and not all(x in GENERIC_PLAN_NAMES for x in w)
 
 
+def _dpa_area(d: Dict[str, Any]) -> float:
+    return float(d.get("ref_area") or d.get("dpa_area") or 0.0)
+
+
+def area_plausible(cands: Sequence[Dict[str, Any]], group: Sequence[Dict[str, Any]], ratio: float, each: bool = False) -> Tuple[bool, float, Optional[float]]:
+    """Area plausibility of a unit link (R3-02). `cands` are the DPA rooms that the link gives the unit of `group` (plan rooms).
+
+    The total design area of the DPA rooms (a typical room counted as many times as its quantity) must be within the factor `ratio` of the total measured area of
+    the plan rooms, on both sides. With `each` (the department rule: the counts differ) the design area of each DPA room must be within the factor `ratio` of the area
+    of at least one plan room of the group. Where a plan room has no measured area, or the DPA rooms have no area, the test cannot be made and the link stands.
+    Returns (plausible, total DPA area, total plan area or None)."""
+    dpa_total = sum(_dpa_area(d) * int(d.get("typical_count") or 1) for d in cands)
+    areas = [p.get("area") for p in group]
+    if not dpa_total or not areas or any(a is None or a <= 0 for a in areas):
+        return True, dpa_total, None
+    plan_total = float(sum(areas))
+    if each:
+        ok = all(any(1.0 / ratio <= _dpa_area(d) / float(a) <= ratio for a in areas) for d in cands if _dpa_area(d))
+    else:
+        ok = 1.0 / ratio <= dpa_total / plan_total <= ratio
+    return ok, dpa_total, plan_total
+
+
 def plan_links(dpa_rooms: Sequence[Dict[str, Any]], plan_rooms: Sequence[Dict[str, Any]], excluded: Iterable[str],
                score: Callable[[str, str], float], tag_cols: Tuple[str, ...], kinds: Iterable[str], min_score: float = 0.85,
-               rule_min_score: float = 0.95) -> Dict[str, Dict[str, Any]]:
+               rule_min_score: float = 0.95, max_area_ratio: Optional[float] = None,
+               rejected: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Dict[str, Any]]:
     """Zoning links for the DPA rooms that the strict room match left unmatched (`excluded` holds the numbers that are already linked).
 
     1. 'name and count': the plan rooms of the storey whose name fits the DPA room name (name or abbreviation, `score` >= `min_score`), taken as
@@ -386,6 +410,9 @@ def plan_links(dpa_rooms: Sequence[Dict[str, Any]], plan_rooms: Sequence[Dict[st
        to be the same (`rule_min_score`), not only to contain it: 'AGV Dispatch (OT)' is not 'AGV Dispatch'.
     A plan room with no measured area (a tag of a leaked region, a tag with no closed region) takes part: only its adjudicated AHU is used.
     A plan name that is generic ('Room', 'Area') links nothing. A group whose plan rooms carry different AHUs links nothing: nothing is forced.
+    Area plausibility (R3-02, with `max_area_ratio`): a link needs the total design area of the DPA rooms and the measured area of the plan rooms within that factor
+    (for the department rule: the design area of the room within that factor of one plan room of the group). A link that fails is not made and is appended to
+    `rejected` (dicts with the DPA room numbers, the plan room ids, the basis and the two areas).
     Returns number -> {basis ('name and count' | 'department rule'), plan: [plan rooms], value (tag or class), tag, kind, n_dpa, n_plan}."""
     excluded = set(excluded)
     out: Dict[str, Dict[str, Any]] = {}
@@ -411,6 +438,13 @@ def plan_links(dpa_rooms: Sequence[Dict[str, Any]], plan_rooms: Sequence[Dict[st
             vals = {_class_value(p, tag_cols, kinds) for p in g}
             if n_dpa != len(g) or len(vals) != 1:
                 continue
+            if max_area_ratio:
+                ok_, dt_, pt_ = area_plausible(cands, g, max_area_ratio)
+                if not ok_:
+                    if rejected is not None:
+                        rejected.append(dict(dpa=[d["number"] for d in cands], plan=[p["poly"]["room_id"] for p in g], plan_name=g[0]["name"], basis="name and count",
+                                             dpa_area=dt_, plan_area=pt_))
+                    continue
             tag, kind = plan_system(g[0]["zone"], tag_cols, kinds)
             sat[k] = (next(iter(vals)), tag, kind)
             sat_n[k] = n_dpa
@@ -434,6 +468,13 @@ def plan_links(dpa_rooms: Sequence[Dict[str, Any]], plan_rooms: Sequence[Dict[st
             if len(vals) != 1:
                 continue
             tag, kind = plan_system(g[0]["zone"], tag_cols, kinds)
+            if max_area_ratio:
+                ok_, dt_, pt_ = area_plausible([d], g, max_area_ratio, each=True)
+                if not ok_:
+                    if rejected is not None:
+                        rejected.append(dict(dpa=[d["number"]], plan=[p["poly"]["room_id"] for p in g], plan_name=g[0]["name"], basis="department rule",
+                                             dpa_area=dt_, plan_area=pt_))
+                    continue
             out[d["number"]] = dict(basis="department rule", plan=list(g), value=next(iter(vals)), tag=tag, kind=kind,
                                     n_dpa=sum(int(x.get("typical_count") or 1) for x in d_st if fit[x["number"]] == fit[d["number"]]), n_plan=len(g))
     return out

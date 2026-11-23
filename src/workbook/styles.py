@@ -30,6 +30,15 @@ try:
 except Exception:                                                  # configuration unreadable: built-in values
     OCC_STYLE = dict(font_colour="FFC00000", named_style="Assumption-Occupancy", code="A")
 OCC_NAME = OCC_STYLE["named_style"]
+try:
+    from .conf import load_style as _load_style, presumed_style as _presumed_style
+    LOAD_STYLE = _load_style()
+    PRES_STYLE = _presumed_style()
+except Exception:
+    LOAD_STYLE = dict(font_colour="FFC00000", named_style="Assumption-Load", code="A")
+    PRES_STYLE = dict(font_colour="FF00B050", font_italic=True, named_style="Presumed-Criteria", code="A")
+LOAD_NAME = LOAD_STYLE["named_style"]        # D-025: plug load and lighting assumed from ASHRAE (red text)
+PRES_NAME = PRES_STYLE["named_style"]        # D-026: criteria presumed from the same space in another department (italic green)
 
 HAIR = Side(style="hair", color="FF808080")
 THIN = Side(style="thin", color="FF404040")
@@ -48,7 +57,7 @@ CODE_STYLES: Dict[str, tuple] = {
 # styles allowed for a code letter (tag and total variants)
 CODE_ALLOWED: Dict[str, set] = {
     "D": {"Input", "InputTag"}, "M": {"Input", "InputTag"}, "S": {"Specified", "SpecifiedTag"},
-    "A": {"Assumption", "AssumptionTag", OCC_NAME}, "C": {"Calc", "CalcTag"}, "L": {"Link", "LinkTag"},
+    "A": {"Assumption", "AssumptionTag", OCC_NAME, LOAD_NAME, PRES_NAME}, "C": {"Calc", "CalcTag"}, "L": {"Link", "LinkTag"},
     "R": {"Result", "Total", "ResultTag"}, "K": {"Check"},
 }
 
@@ -128,6 +137,8 @@ def install_styles(wb) -> None:
         _ns("Assumption", _font(color=BLUE), fill=FILL_ASSUME, align=right),
         _ns("AssumptionTag", _font(color=BLUE, name=MONO), fill=FILL_ASSUME, align=left),
         _ns(OCC_STYLE["named_style"], _font(color=OCC_STYLE["font_colour"]), fill=FILL_ASSUME, align=right),
+        _ns(LOAD_STYLE["named_style"], _font(color=LOAD_STYLE["font_colour"]), fill=FILL_ASSUME, align=right),
+        _ns(PRES_STYLE["named_style"], _font(color=PRES_STYLE["font_colour"], italic=bool(PRES_STYLE.get("font_italic", True))), align=right),
         _ns("Calc", _font(), align=right),
         _ns("CalcTag", _font(name=MONO), align=left),
         _ns("Link", _font(color=GREEN), align=right),

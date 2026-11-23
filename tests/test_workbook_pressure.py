@@ -49,30 +49,37 @@ def test_known_answers_through_node_and_path_tables(ka):
 
 
 def test_matches_pressure_module_for_every_space(ka):
+    """D-028: every room is its own envelope-only space: the node table agrees with the pressure module."""
     n = _nodes(ka["rc"])
-    suite = pm.Suite("ka", [pm.Space("ANTE", -15, n["ANTE"]["surf"]), pm.Space("ROOM", -30, n["ROOM"]["surf"]), pm.Space("ENSUITE", -31, 37.5)],
-                     [pm.Link("ANTE", "CORRIDOR", gap_area_m2=pm.cm2_to_m2(15)), pm.Link("ANTE", "SHAFT", fixed_flow_m3h=-10.2),
-                      pm.Link("ANTE", "ROOM", gap_area_m2=pm.cm2_to_m2(10)), pm.Link("ROOM", "CORRIDOR", gap_area_m2=pm.cm2_to_m2(20)),
-                      pm.Link("ROOM", "ENSUITE", gap_area_m2=pm.cm2_to_m2(10))], externals={"CORRIDOR": 0, "SHAFT": 0}).solve()
+    suite = pm.Suite("ka", [pm.Space("ANTE", -15, n["ANTE"]["surf"]), pm.Space("ROOM", -30, n["ROOM"]["surf"]), pm.Space("ENSUITE", -31, 37.5)], [], externals={}).solve()
     for name in ("ANTE", "ROOM", "ENSUITE"):
         r = suite.space(name)
         w = n[name]
         assert w["needed"] == pytest.approx(r.offset_needed, abs=0.05), name
         assert w["design"] == pytest.approx(r.design_offset, abs=0.05)
         assert w["env_in"] == pytest.approx(r.envelope_in, abs=0.05)
-        assert w["gap_in"] == pytest.approx(r.gap_in, abs=0.05)
-        assert w["gap_out"] == pytest.approx(r.gap_out, abs=0.05)
+        assert w["gap_in"] == 0 and w["gap_out"] == 0
         assert w["kindoff"].lower() == r.offset_kind
         assert w["ratio_n50"] == pytest.approx(r.ratio_n050, rel=0.02)
         assert w["ratio_n75"] == pytest.approx(r.ratio_n075, rel=0.02)
 
 
-def test_uncontrolled_pressure_matches_bisection(ka):
-    n = _nodes(ka["rc"])
-    suite = pm.Suite("ka", [pm.Space("ANTE", -15, n["ANTE"]["surf"])],
-                     [pm.Link("ANTE", "CORRIDOR", gap_area_m2=pm.cm2_to_m2(15)), pm.Link("ANTE", "SHAFT", fixed_flow_m3h=-10.2),
-                      pm.Link("ANTE", "ROOM", gap_area_m2=pm.cm2_to_m2(10))], externals={"CORRIDOR": 0, "SHAFT": 0, "ROOM": -30}).solve()
-    assert n["ANTE"]["upa"] == pytest.approx(suite.space("ANTE").uncontrolled_pa, abs=0.05)
+def test_no_door_columns_or_door_wording_on_the_pressure_tab(ka):
+    wb = openpyxl.load_workbook(ka["rc"], data_only=True)
+    text = " ".join(str(c.value) for row in wb["Pressure"].iter_rows() for c in row if isinstance(c.value, str)).lower()
+    assert "no door data" not in text and "gaps × 2" not in text and "door gaps:" not in text
+
+
+def test_perimeter_from_the_area_where_no_outline(tmp_path):
+    """No measured outline: perimeter = 4 x square root of the area (named cell PerimFactor, code A)."""
+    data = st.ka_input()
+    data["rooms"][0]["pressure"] = dict(data["rooms"][0]["pressure"], perimeter_m=None, perimeter_rule="factor")
+    build_workbook(data, tmp_path / "p.xlsx")
+    rc = recalc(tmp_path / "p.xlsx", tmp_path / "rc")
+    n = _nodes(rc)
+    area = n["ANTE"]["area"]
+    assert n["ANTE"]["perim"] == pytest.approx(4 * area ** 0.5, abs=0.01)
+    assert n["ANTE"]["perim_c"] == "A"
 
 
 def test_free_space_newton_matches_exact_solution(tmp_path):
@@ -84,6 +91,7 @@ def test_free_space_newton_matches_exact_solution(tmp_path):
                             doors=[dict(id="D9", to="ROOM", kind="door louvre (free area)", gap_cm2=200.0, code="D", source="KA-8.3"),
                                    dict(id="D10", to="CORRIDOR", kind="door", gap_cm2=15.0, code="D", source="KA-8.3")])
     data["rooms"].append(free)
+    data["pressure_nodes"].append(dict(tag="CORRIDOR", description="Corridor", pressure_pa=0, code="S", source="GEN-PRESSURE"))
     build_workbook(data, tmp_path / "f.xlsx")
     rc = recalc(tmp_path / "f.xlsx", tmp_path / "rc")
     n = _nodes(rc)

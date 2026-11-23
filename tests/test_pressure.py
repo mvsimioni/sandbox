@@ -48,50 +48,68 @@ def test_small_room_surface_and_envelope() -> None:
     assert envelope_leak(SMALL, 15) == pytest.approx(45.7, abs=TOL_M3H)
 
 
-@pytest.mark.parametrize("cm2,pa,expected", [(15, 15, 16.2), (10, 15, 10.8), (20, 30, 30.5)])
-def test_gap_flows(cm2: float, pa: float, expected: float) -> None:
-    assert gap_flow(cm2_to_m2(cm2), pa) == pytest.approx(expected, abs=TOL_M3H)
+def test_sensitivity_exponents_known_answers() -> None:
+    assert envelope_leak(SMALL, 15, n=0.50) == pytest.approx(54.7, abs=TOL_M3H)
+    assert envelope_leak(SMALL, 15, n=0.75) == pytest.approx(40.5, abs=TOL_M3H)
 
 
-def test_anteroom_case_4() -> None:
+def test_room_at_minus_15_pa_case_4() -> None:
+    """D-028: the envelope is the only air path. Offset needed = envelope leakage at the set pressure; design offset = 2.5 x surface."""
     res = pm.known_answer_anteroom().solve().space("ANTE")
     assert res.envelope_in == pytest.approx(45.7, abs=TOL_M3H)
-    assert res.gap_in == pytest.approx(16.2, abs=TOL_M3H)
-    assert res.fixed_in == pytest.approx(10.2, abs=1e-9)
-    assert res.gap_out == pytest.approx(10.8, abs=TOL_M3H)
+    assert res.gap_in == 0.0 and res.gap_out == 0.0 and res.fixed_in == 0.0
     assert res.offset_kind == "exhaust"
-    assert res.offset_needed == pytest.approx(61.3, abs=TOL_M3H)
+    assert res.offset_needed == pytest.approx(45.7, abs=TOL_M3H)
     assert res.design_offset == pytest.approx(99.9, abs=TOL_M3H)
-    assert res.ratio == pytest.approx(1.63, abs=TOL_RATIO)
+    assert res.ratio == pytest.approx(2.19, abs=TOL_RATIO)
     assert res.status == "PASS"
 
 
-def test_suite_case_5() -> None:
+def test_room_and_ensuite_case_5_and_6() -> None:
     result = pm.known_answer_suite().solve()
-    assert result.space("ROOM").envelope_in == pytest.approx(163.5, abs=TOL_M3H)
-    assert result.space("ENSUITE").envelope_in == pytest.approx(68.7, abs=TOL_M3H)
-    assert result.offset_needed == pytest.approx(273.5, abs=TOL_M3H)
-    assert result.design_offset == pytest.approx(321.6, abs=TOL_M3H)
-    assert result.ratio == pytest.approx(1.18, abs=TOL_RATIO)
-    assert result.status == "VERIFY"
-    # The internal door between room and ensuite cancels in the suite total.
     room, ensuite = result.space("ROOM"), result.space("ENSUITE")
-    assert room.gap_out == pytest.approx(ensuite.gap_in, abs=1e-9)
-    assert room.offset_needed + ensuite.offset_needed == pytest.approx(result.offset_needed, abs=1e-9)
+    assert room.offset_needed == pytest.approx(163.5, abs=TOL_M3H)
+    assert room.design_offset == pytest.approx(227.9, abs=TOL_M3H)
+    assert room.ratio == pytest.approx(1.39, abs=TOL_RATIO)
+    assert ensuite.offset_needed == pytest.approx(68.7, abs=TOL_M3H)
+    assert ensuite.design_offset == pytest.approx(93.8, abs=TOL_M3H)
+    assert ensuite.ratio == pytest.approx(1.36, abs=TOL_RATIO)
+    assert room.status == "PASS" and ensuite.status == "PASS"
+    assert result.offset_needed == pytest.approx(room.offset_needed + ensuite.offset_needed, abs=1e-9)
 
 
-def test_suite_total_independent_of_internal_gap() -> None:
-    base = pm.known_answer_suite().solve()
-    wide = Suite(
-        "wide door",
+def test_room_at_minus_70_pa_fails_case_7() -> None:
+    res = Suite("KA-7", [Space("HIGH", -70.0, SMALL)], [], externals={}).solve().space("HIGH")
+    assert res.offset_needed == pytest.approx(124.4, abs=TOL_M3H)
+    assert res.ratio == pytest.approx(0.80, abs=TOL_RATIO)
+    assert res.status == "FAIL"
+
+
+def test_envelope_only_offset_is_leakage_with_n_065() -> None:
+    """The deliverable method: 2.5 m3/h per m2 at 50 Pa, converted to the set pressure with n = 0.65, no door gap."""
+    for pa in (5, 15, 30, 70):
+        res = Suite("T", [Space("R", -float(pa), SMALL)], [], externals={}).solve().space("R")
+        assert res.offset_needed == pytest.approx(2.5 * SMALL * (pa / 50.0) ** 0.65, abs=1e-6)
+        assert res.design_offset == pytest.approx(2.5 * SMALL, abs=1e-9)
+
+
+def _suite_with_doors(internal_gap_cm2: float) -> Suite:
+    """Engine property test (the method of the deliverables uses no doors): a suite with door links, to show that an internal door cancels."""
+    return Suite(
+        "doors",
         [Space("ROOM", -30.0, LARGE), Space("ENSUITE", -31.0, 37.5)],
         [
             Link("CORRIDOR", "ROOM", gap_area_m2=cm2_to_m2(20)),
             Link("ANTE", "ROOM", gap_area_m2=cm2_to_m2(10)),
-            Link("ROOM", "ENSUITE", gap_area_m2=cm2_to_m2(200)),
+            Link("ROOM", "ENSUITE", gap_area_m2=cm2_to_m2(internal_gap_cm2)),
         ],
         externals={"CORRIDOR": 0.0, "ANTE": -15.0},
     ).solve()
+
+
+def test_suite_total_independent_of_internal_gap() -> None:
+    base = _suite_with_doors(10)
+    wide = _suite_with_doors(200)
     assert wide.offset_needed == pytest.approx(base.offset_needed, abs=1e-9)
     assert wide.space("ROOM").offset_needed < base.space("ROOM").offset_needed
 
@@ -99,23 +117,6 @@ def test_suite_total_independent_of_internal_gap() -> None:
 # --------------------------------------------------------------------------- #
 # Elementary helpers and sign conventions
 # --------------------------------------------------------------------------- #
-def test_units_and_door_gap_helpers() -> None:
-    assert lps(3600.0) == pytest.approx(1000.0)
-    assert pm.m3h(lps(123.4)) == pytest.approx(123.4)
-    assert unsealed_door_gap_area(0.9, 2.1) * 1e4 == pytest.approx(240.0, abs=5.0)
-    assert unsealed_door_gap_area(0.6, 1.8) * 1e4 == pytest.approx(190.0, abs=5.0)
-    assert pm.SEALED_GAP_CM2["hinged_sealed"] == 15
-    assert pm.SEALED_GAP_CM2["sliding_sealed"] == 10
-    assert pm.SEALED_GAP_CM2["bed_width_sealed"] == 20
-    assert pm.SEALED_GAP_CM2["shaft_access_sealed"] == 10
-    assert pm.sealed_gap_area("hinged") == pytest.approx(0.0015)
-    assert pm.sealed_gap_area("shaft_access_sealed") == pytest.approx(0.0010)
-    with pytest.raises(KeyError):
-        pm.sealed_gap_area("revolving")
-    assert tighter_room_offset(SMALL) == pytest.approx(1.0 * SMALL)
-    assert pm.design_offset(SMALL) == pytest.approx(2.5 * SMALL)
-
-
 def test_magnitudes_and_zero_pressure() -> None:
     assert envelope_leak(40.0, -15) == pytest.approx(envelope_leak(40.0, 15))
     assert envelope_leak(40.0, 0) == 0.0
@@ -258,7 +259,7 @@ def test_sensitivity_directions_below_50_pa() -> None:
     assert res.ratio is not None
     # Below 50 Pa a smaller exponent means more envelope leakage, so a lower ratio; and vice versa.
     assert res.ratio_n050 < res.ratio < res.ratio_n075
-    assert res.ratio_gaps_x2 < res.ratio
+    assert res.ratio_gaps_x2 == pytest.approx(res.ratio, abs=1e-9)        # no door gap in the method: doubling the gaps changes nothing
     assert res.flagged is False and res.status == "PASS"
     # With no control the design offset (larger than needed) pulls the room below its set point.
     assert res.uncontrolled_pa is not None and res.uncontrolled_pa < -15.0
@@ -267,10 +268,8 @@ def test_sensitivity_directions_below_50_pa() -> None:
 def test_sensitivity_exponents_match_direct_calculation() -> None:
     res = pm.known_answer_anteroom().solve().space("ANTE")
     for attr, n in (("ratio_n050", 0.50), ("ratio_n075", 0.75)):
-        needed = envelope_leak(SMALL, 15, n=n) + 16.2 + 10.2 - 10.8
+        needed = envelope_leak(SMALL, 15, n=n)
         assert getattr(res, attr) == pytest.approx(99.9 / needed, abs=0.02)
-    doubled = 45.7 + 2 * 16.2 + 10.2 - 2 * 10.8
-    assert res.ratio_gaps_x2 == pytest.approx(99.9 / doubled, abs=0.02)
 
 
 def test_uncontrolled_pressure_balances_design_offset() -> None:
@@ -313,8 +312,8 @@ def test_to_rows_shape() -> None:
     assert len(rows) == 3 and rows[-1]["space"] == "SUITE TOTAL"
     for row in rows:
         assert tuple(row) == pm.ROW_FIELDS
-    assert rows[-1]["offset_needed_m3h"] == pytest.approx(273.5, abs=TOL_M3H)
-    assert rows[-1]["offset_needed_lps"] == pytest.approx(lps(273.5), abs=0.1)
+    assert rows[-1]["offset_needed_m3h"] == pytest.approx(163.5 + 68.7, abs=TOL_M3H)
+    assert rows[-1]["offset_needed_lps"] == pytest.approx(lps(163.5 + 68.7), abs=0.1)
     assert rows[0]["status"] in ("PASS", "VERIFY", "FAIL") and rows[0]["flagged"] in ("y", "n")
     assert pm.to_rows(result) == rows
 
@@ -485,8 +484,8 @@ def test_mixed_sign_suite_total_reports_per_kind() -> None:
 
 
 def test_single_kind_suite_total_still_cancels_internal_links() -> None:
-    """R-05 guard: the known-answer suite keeps its exhaust-only total, ratio and note."""
-    result = pm.known_answer_suite().solve()
+    """R-05 guard: a suite with an internal link keeps its exhaust-only total, ratio and note (engine property; the deliverables use no door links)."""
+    result = _suite_with_doors(10)
     assert result.offset_kind == "exhaust" and result.supply_needed == 0.0
     assert result.exhaust_needed == pytest.approx(273.5, abs=TOL_M3H)
     assert "internal links cancel" in result.to_rows()[-1]["notes"]

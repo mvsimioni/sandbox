@@ -47,3 +47,23 @@ def people(root: Path = ROOT) -> Dict[str, str]:
 def revision_date(root: Path = ROOT) -> str:
     given = (config(root).get("workbook") or {}).get("revision_date")
     return str(given) if given else datetime.date.today().isoformat()
+
+
+def internal_loads_cfg(root: Path = ROOT) -> Dict[str, Any]:
+    """Plug-load and lighting densities by room use (D-025) with the style and the Remarks template."""
+    return config(root).get("internal_loads") or {}
+
+
+def load_style(root: Path = ROOT) -> Dict[str, Any]:
+    st = internal_loads_cfg(root).get("style") or {}
+    return dict(font_colour=st.get("font_colour", "FFC00000"), named_style=st.get("named_style", "Assumption-Load"), code=st.get("code", "A"))
+
+
+def presumed_cfg(root: Path = ROOT) -> Dict[str, Any]:
+    return config(root).get("presumed_criteria") or {}
+
+
+def presumed_style(root: Path = ROOT) -> Dict[str, Any]:
+    st = presumed_cfg(root).get("style") or {}
+    return dict(font_colour=st.get("font_colour", "FF00B050"), font_italic=bool(st.get("font_italic", True)),
+                named_style=st.get("named_style", "Presumed-Criteria"), code=st.get("code", "A"))

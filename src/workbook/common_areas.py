@@ -17,8 +17,10 @@ from typing import Any, Dict, List, Optional
 
 from . import conf
 from .common import ROOM_THERMAL_NOTE
-from .assemble import (REG, _expand_abbreviations, _f, _norm, _read, _tag_candidates, _tender_for_tag, criteria_from_row, criteria_text, load_zone_assignments,
+from .assemble import (REG, _expand_abbreviations, _f, _norm, _read, _tag_candidates, _tender_for_tag, criteria_from_row, criteria_text, load_use, load_zone_assignments,
                        match_criteria, room_use, zone_key, zone_totals)
+from .linking import split_code
+from .presume import Presumption
 from .build import build_workbook
 from .reva import build_reva_input
 
@@ -107,6 +109,18 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
                 air_class=str(circ.get("air_class")) if circ.get("air_class") is not None else None, filter=circ.get("filter"), source=csid, code="A",
                 remark="No booklet row covers the common areas: default for circulation, corridor and lobby spaces.")
 
+    il = conf.internal_loads_cfg(root)
+    plug_tab, light_tab = il.get("plug_w_m2") or {}, il.get("lighting_w_m2") or {}
+    add_src("ASM-PLUG", document="ASHRAE Handbook, Fundamentals: nonresidential cooling and heating load calculations, plug-load densities by space type", issue="edition to confirm",
+            page="plug-load tables", location="W/m² by space type", text_as_read="plug-load densities by room use, taken as listed in the project design basis",
+            method="Value taken from the project design basis. No project document gives a plug load", confidence="medium")
+    add_src("ASM-LIGHT", document="ASHRAE Standard 90.1: space-by-space lighting power density", issue="edition to confirm", page="space-by-space method table",
+            location="W/m² by space type", text_as_read="lighting power densities by room use, taken as listed in the project design basis",
+            method="Value taken from the project design basis. No project document gives a lighting load", confidence="medium")
+    add_src("ASM-EQUIP", document="Workbook defaults", issue="", page="", location="equipment gain",
+            text_as_read="equipment gain 0 W: no equipment list is in the scope", method="Assumption, to confirm", confidence="low")
+    pres = Presumption(root, room_use, split_code)
+    n_presumed = n_loads = n_loads_missing = 0
     booklet = _read(root / REG / "criteria.csv")
     crit_cache: Dict[str, Any] = {}
     n_default = n_booklet = n_none = n_plant = 0
@@ -223,10 +237,38 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
                                         "The airflow comes from the equipment heat, which is not known.")
             room["remark"] += "; plant space: no criteria row, airflow not calculated"
         else:
-            n_none += 1
-            none_names.append(name)
-            room["gaps"]["criteria"] = ("No booklet room type fits this space and it is not a circulation, corridor or lobby space. "
-                                        "No criteria are set: only its thermal load can set an airflow.")
+            hit, why_p = (None, "")
+            if len(re.split(r"\s/\s", name)) < 2 and name != "Common space" and room_use(name)[0] is not None:
+                hit, why_p = pres.find("99", name)         # D-026: the same space in the closest other department (the common areas have no booklet of their own)
+            if hit:
+                prow = hit["row"]
+                dep_label = prow.get("department_label") or f"department {hit['department']}"
+                psid = add_src(f"CRP-00-{hit['department']}-{_norm(prow['room_type_as_printed'])}"[:60], document=Path(prow["source_file"]).name, issue=prow.get("department_label", "booklet"),
+                               page=f"page {prow['booklet_page']}", location=prow.get("bbox", ""), text_as_read=criteria_text(prow),
+                               method="Value read from the DD Booklet criteria table of a department", confidence=str(prow.get("confidence", "")))
+                ptpl = str((conf.presumed_cfg(root).get("remarks_template")) or "Presumed criteria: taken from {department} booklet p{page}, {row}. No row in this department. To confirm.")
+                ptxt = ptpl.format(department=dep_label, page=prow["booklet_page"], row=prow["room_type_as_printed"])
+                room["criteria"] = criteria_from_row(prow, psid, hit["how"], "A", ptxt + f" Match: {hit['how']}.")
+                room["criteria"]["presumed"] = True
+                room["remark"] += "; " + ptxt.rstrip(".")
+                n_presumed += 1
+            else:
+                n_none += 1
+                none_names.append(name)
+                room["gaps"]["criteria"] = ("No booklet room type fits this space and it is not a circulation, corridor or lobby space. "
+                                            "No criteria are set: only its thermal load can set an airflow." + (f" {why_p[0].upper()}{why_p[1:]}." if why_p else ""))
+        # D-028: a space with a pressure target in Pa is calculated on Pressure from its internal surface. The perimeter is the perimeter of the App D outline of the
+        # space, else 4 x the square root of the area (assumed, flagged).
+        c_ = room["criteria"] or {}
+        pa_ = next((c_[k] for k in ("pressure_pa_tender", "pressure_pa_working", "pressure_pa_booklet") if c_.get(k) is not None), None)
+        if pa_ is not None:
+            ol = outlines.get((st, str(s["annotation_index"])))
+            if ol is not None and ol.length > 0:
+                room["pressure"] = dict(mode="controlled", suite=number, perimeter_m=round(ol.length / 1000.0, 3), prov=["M", sid], doors=[])
+            else:
+                room["pressure"] = dict(mode="controlled", suite=number, perimeter_m=None, perimeter_rule="factor", prov=["A", "GEN-PRESSURE"], doors=[])
+                room["gaps"]["perimeter"] = ("The perimeter for the internal surface is 4 × the square root of the area, assumed: no App D outline measures this space. "
+                                             "Confirm the outline.")
         zc = class_of_space.get((st, s["annotation_index"]))
         if zc:
             cls, _a = max(zc.items(), key=lambda kv: kv[1])
@@ -272,6 +314,17 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
             room["remark"] += "; occupancy not set"
             room["gaps"]["occupancy"] = ("Occupancy is not set. No RDS applies to the common areas. " + (f"The name '{name}' does not say what the space is used for, so no room use fits it for the default density."
                                          if name != "Common space" else "The outline has no name on the drawing, so no room use fits it for the default density.") + " Give the number of persons.")
+        lk, _lw = load_use(name)
+        if len(re.split(r"\s/\s", name)) >= 2 and cc is not None and kind == "default":
+            lk, _lw = "corridor_circulation", "corridor circulation (outline with several names)"
+        if lk and lk in plug_tab and lk in light_tab:
+            room["lighting_w_m2"], room["small_power_w_m2"] = float(light_tab[lk]), float(plug_tab[lk])
+            room["prov"]["lighting"], room["prov"]["small_power"] = ["A", "ASM-LIGHT"], ["A", "ASM-PLUG"]
+            room["load_basis"], room["load_use"] = "ASHRAE", _lw
+            n_loads += 1
+        else:
+            room["gaps"]["loads"] = ("Lighting and small power are not set. The name does not say what the space is used for, so no ASHRAE room use fits it. Give the room use or the values.")
+            n_loads_missing += 1
         room["remark"] = room["remark"].rstrip(".") + ". " + ROOM_THERMAL_NOTE
         room["_space"] = s
         rooms.append(room)
@@ -358,7 +411,10 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
         if a.get("list_without_rooms"):
             flags.append(dict(type="VERIFY", ref=a["tag"], text=f"Unit {a['tag']} is marked on App D but no space of this workbook carries it. It is listed with its tender airflow and no calculation.", source=""))
     flags.append(dict(type="CONFIRM", ref="Envelope", text="Envelope rows are not set. Every space is treated as internal, with no glazing, wall or roof gain.", source="ASM-DEFAULT"))
-    flags.append(dict(type="CONFIRM", ref="Room Information", text="Lighting, small power, equipment and operation time are not set: no document gives them. The ceiling height is the flagged default.", source="ASM-DEFAULT"))
+    flags.append(dict(type="CONFIRM", ref="Room Information", text="Lighting and small power are ASHRAE values for the room use (red cells): no project document gives them. Equipment gain is 0 W and operation time "
+                      "is not set: no document gives them. The ceiling height is the flagged default.", source="ASM-PLUG"))
+    if n_presumed:
+        flags.append(dict(type="ASSUMPTION", ref="Criteria", text=f"{n_presumed} spaces take presumed criteria: the row of the same space in the closest department (italic green). To confirm.", source="CIRC-DEFAULT"))
     if not all(people.values()):
         flags.append(dict(type="CONFIRM", ref="README", text="Author, checker and approver of the revision block are not given. They are left blank.", source="ASM-DEFAULT"))
     sp = list(base["space_types"]) + [dict(name="UNCLASSIFIED", room_t_c=base["space_types"][0]["room_t_c"], room_h_kjkg=base["space_types"][0]["room_h_kjkg"],
@@ -379,11 +435,13 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
                    dict(document="Project design basis: default criteria for circulation, corridor and lobby spaces", role="Criteria", issue="22 Nov 2026",
                         taken="Default criteria row", source=csid)],
         key_flags=[f["text"] for f in flags[:3]],
-        criteria_origin=["Room criteria: a space takes the most frequent booklet row of its room type where a booklet prints it. Circulation, corridor and lobby spaces that no booklet row covers take the default. Any other space has no criteria. All of this is an assumption, to confirm.",
+        criteria_origin=["Room criteria: a space takes the most frequent booklet row of its room type where a booklet prints it. Circulation, corridor and lobby spaces that no booklet row covers take the default. A named space with a room use takes the row of the same space in the closest department (presumed criteria, italic green). Any other space has no criteria. All of this is an assumption, to confirm.",
                          "Plant and electrical rooms have no criteria row. Their airflow is not calculated and is not zero.",
-                         "Occupancy: the default density by room use, rounded up, because no RDS applies to the common areas."])
+                         "Occupancy: the default density by room use, rounded up, because no RDS applies to the common areas.",
+                         "Lighting and small power: the ASHRAE value of the room use (plug load: ASHRAE Handbook, Fundamentals; lighting: ASHRAE 90.1), because no project document gives them. Plug load / lighting in W/m² by room use: " +
+                         "; ".join(f"{k.replace('_', ' ')} {plug_tab[k]:g} / {light_tab[k]:g}" for k in plug_tab if k in light_tab) + "."])
     data["constants"] = dict(base["constants"])
-    data["assemble_stats"] = dict(rooms=len(rooms), skipped_spaces=len(skipped), spaces_with_unit=n_unit, spaces_with_dpa_area=n_dpa, units=len(ahus),
+    data["assemble_stats"] = dict(rooms=len(rooms), criteria_presumed=n_presumed, criteria_residue=n_none, loads_ashrae=n_loads, loads_missing=n_loads_missing, skipped_spaces=len(skipped), spaces_with_unit=n_unit, spaces_with_dpa_area=n_dpa, units=len(ahus),
                                   units_with_tender=sum(1 for a in ahus if a.get("sched_supply_lps") is not None), exhaust_fans=len(fans),
                                   fans_with_tender=sum(1 for f in fans if f.get("scheduled_lps") is not None))
     return data

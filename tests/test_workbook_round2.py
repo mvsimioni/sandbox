@@ -35,8 +35,8 @@ def test_calculated_above_tender_is_verify_not_fail_and_tender_never_caps(tmp_pa
     from src.workbook.layouts import AHU_KEYS
     row = [r for r in wb["AHU"].iter_rows(min_row=7, values_only=True) if r[0] == tag][0]
     k = lambda key: row[AHU_KEYS.index(key)]
-    assert k("sa_ahu") == pytest.approx(3036.0) and k("cov") in (None, "")
-    assert k("red") == pytest.approx(1000.0 - 3036.0) and k("redp") == pytest.approx((1000 - 3036) / 1000)
+    assert k("sa_ahu") == pytest.approx(3036.0) and str(k("cov")).startswith(("Complete", "Not complete"))
+    assert k("red") in (None, "") and k("redp") in (None, "")                      # D-027: a calculated airflow above tender states no reduction
     assert k("rem").startswith("VERIFY: calculated 3,036 L/s is above tender 1,000 L/s")
     assert [r for r in wb["Checks"].iter_rows(min_row=7, values_only=True) if r[1] and r[4] == "FAIL"] == []
     cp = [r for r in wb["Comparison by AHU"].iter_rows(min_row=7, values_only=True) if r[0] == tag]
@@ -89,7 +89,7 @@ def test_master_counts_each_ahu_once(tmp_path):
     for num, name, supply, tender in (("30", "Pharmacy", 1000.0, 5000.0), ("41", "CSSD", 500.0, 5000.0)):
         (ind / f"d{num}.json").write_text(json.dumps(dict(department=dict(number=num, name=name), ahus=[
             dict(tag="AHU-SHARED-01", type="AHU", rooms=3, area_m2=100.0, room_supply_lps=supply, outdoor_air_lps=100.0, tender_lps=tender, tender_oa_lps=2000.0,
-                 zone_rooms=6, zone_area_m2=200.0, area_ok_m2=100.0,
+                 zone_rooms=6, zone_area_m2=200.0, area_ok_m2=100.0, rooms_ok=3,
                  tender_source="Equipment Schedule Corr 5, page 7, AHU-SHARED-01", tender_source_id="EQS5-SHARED"),
             dict(tag=f"AHU-ONLY-{num}", type="AHU", rooms=1, area_m2=10.0, room_supply_lps=50.0, outdoor_air_lps=5.0, tender_lps=None)])))
     res = build_master(ind, tmp_path / "AHU_master_summary.xlsx", ROOT)
@@ -97,10 +97,10 @@ def test_master_counts_each_ahu_once(tmp_path):
     rc = recalc(tmp_path / "AHU_master_summary.xlsx", tmp_path / "rc")
     assert st.scan_errors(rc) == [] and st.language_scan(rc) == []
     rows = _master_rows(rc)
-    assert set(rows) == {"AHU-SHARED-01", "AHU-ONLY-30", "AHU-ONLY-41"}
+    assert {k for k in rows if not str(k).startswith("TOTAL")} == {"AHU-SHARED-01", "AHU-ONLY-30", "AHU-ONLY-41"}
     sh = rows["AHU-SHARED-01"]
     assert sh["Departments"] == 2 and sh["Rooms"] == 6 and sh["Room supply"] == pytest.approx(1500.0) and sh["Calculated airflow"] == pytest.approx(1650.0)   # with 10 % leakage
-    assert sh["Tender airflow"] == 5000 and sh["Room list of the unit"] in (None, "")
+    assert sh["Tender airflow"] == 5000 and str(sh["Room list of the unit (rooms counted)"]).startswith("Complete: 6 of 6 zoned rooms counted")
     assert sh["Reduction = tender − calculated"] == pytest.approx(5000 - 1650) and sh["Reduction = (tender − calculated) ÷ tender"] == pytest.approx((5000 - 1650) / 5000)
     assert sh["Remarks"].startswith("Reduced 5,000 to 1,650 L/s") and sh["Outdoor air against tender"] == "within tender outdoor air"
     assert rows["AHU-ONLY-30"]["Against tender"] == "NO TENDER VALUE"
@@ -113,15 +113,15 @@ def test_master_marks_outdoor_air_above_tender_and_states_no_reduction(tmp_path)
     ind.mkdir()
     (ind / "d30.json").write_text(json.dumps(dict(department=dict(number="30", name="Pharmacy"), ahus=[
         dict(tag="AHU-A-01", type="AHU", rooms=3, area_m2=100.0, room_supply_lps=1000.0, outdoor_air_lps=400.0, frac=1.0, tender_lps=5000.0, tender_oa_lps=457.0,
-             zone_rooms=3, zone_area_m2=100.0, area_ok_m2=100.0, tender_source="Equipment Schedule Corr 5, page 7, AHU-A-01", tender_source_id="EQS5-A"),
+             zone_rooms=3, zone_area_m2=100.0, area_ok_m2=100.0, rooms_ok=3, tender_source="Equipment Schedule Corr 5, page 7, AHU-A-01", tender_source_id="EQS5-A"),
         dict(tag="AHU-B-01", type="AHU", rooms=3, area_m2=100.0, room_supply_lps=1000.0, outdoor_air_lps=400.0, frac=0.2, tender_lps=5000.0, tender_oa_lps=457.0,
-             zone_rooms=3, zone_area_m2=100.0, area_ok_m2=100.0, tender_source="Equipment Schedule Corr 5, page 7, AHU-B-01", tender_source_id="EQS5-B")])))
+             zone_rooms=3, zone_area_m2=100.0, area_ok_m2=100.0, rooms_ok=3, tender_source="Equipment Schedule Corr 5, page 7, AHU-B-01", tender_source_id="EQS5-B")])))
     build_master(ind, tmp_path / "m.xlsx", ROOT)
     rc = recalc(tmp_path / "m.xlsx", tmp_path / "rc")
     rows = _master_rows(rc)
     a, b = rows["AHU-A-01"], rows["AHU-B-01"]
     assert a["Outdoor air against tender"].startswith("VERIFY") and a["Reduction = tender − calculated"] in (None, "")
-    assert "above tender outdoor air 457 L/s" in a["Remarks"] and "Reduced" not in a["Remarks"]
+    assert "above tender outdoor air 457 L/s" in a["Remarks"] and "Reduced" not in a["Remarks"] and "No reduction" not in a["Remarks"]
     assert b["Outdoor air against tender"] == "within tender outdoor air" and b["Remarks"].startswith("Reduced 5,000")
     checks = {r[1]: r for r in openpyxl.load_workbook(rc, data_only=True)["Checks"].iter_rows(min_row=7, values_only=True) if r[1]}
     row = checks["AHUs with outdoor air above tender outdoor air"]

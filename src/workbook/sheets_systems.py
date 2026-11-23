@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 from openpyxl.styles import Alignment
 from openpyxl.utils import get_column_letter
 
-from .common import band_rows, cf_formula, cf_text, expand, group_cols, list_validation, tender_remark, title_block, write_headers
+from .common import band_rows, cf_formula, cf_text, expand, group_cols, incomplete, list_validation, tender_remark, title_block, write_headers
 from .ctx import Ctx
 from .model import blank
 from .sheets_rooms import _prov_cells, _setup, _val
@@ -54,6 +54,7 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
         put(ws, g("noh"), f'=COUNTIFS({crit}{inc},{ctx.lay["RI"].rng("h")},"")', "Calc", "d0")
         put(ws, g("nfix"), f"=COUNTIFS({crit}{inc},{AF.rng('fix')},1)", "Calc", "d0")
         put(ws, g("area_ok"), f'=SUMPRODUCT(--({AF.rng("ahu")}={key}){mask},--({AF.rng("supply")}>0),--({ctx.lay["CR"].rng("crit")}<>""),{AF.rng("area")})', "Calc", "d1")
+        put(ws, g("nok"), f'=SUMPRODUCT(--({AF.rng("ahu")}={key}){mask},--({AF.rng("supply")}>0),--({ctx.lay["CR"].rng("crit")}<>""))', "Calc", "d0")
         put(ws, g("nocrit"), f'=SUMPRODUCT(--({AF.rng("ahu")}={key}){mask},--({ctx.lay["CR"].rng("crit")}=""))', "Calc", "d0")
         put(ws, g("area_nocrit"), f'=SUMPRODUCT(--({AF.rng("ahu")}={key}){mask},--({ctx.lay["CR"].rng("crit")}=""),{AF.rng("area")})', "Calc", "d1")
         put(ws, g("sa_room"), f"=SUMIFS({AF.rng('supply')},{crit}{inc})", "Calc", "d1")
@@ -131,19 +132,27 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
         if not after:
             # the room list of the unit is complete when the rooms counted here reach ZoneCoverMin of the zoned area (or, where the zone has no
             # measured area, when every zoned room is counted). Until then no reduction is stated.
-            put(ws, g("cov"), coverage_formula(g("zr"), g("za"), g("n"), g("area"), g("area_ok"), "ZoneCoverMin", g("nocrit"), g("area_nocrit")), "Calc").alignment = Alignment(horizontal="left")
+            put(ws, g("cov"), coverage_formula(g("zr"), g("za"), g("nok"), g("area_ok"), "ZoneCoverMin", g("nocrit")), "Calc").alignment = Alignment(horizontal="left")
         else:
             put(ws, g("cov"), f'={ctx.lay["AH"].local("cov", t)}', "Link").alignment = Alignment(horizontal="left")
         oa_above = f'AND(ISNUMBER({g("sched_oa")}),{g("oa_rule")}>{g("sched_oa")})'
-        put(ws, g("red"), f'=IF(OR({g("sched")}="",{g("n")}=0,{g("sa_ahu")}=0,{g("cov")}<>"",{oa_above}),"",{g("sched")}-{g("sa_ahu")})', "Calc", "d0")
+        put(ws, g("red"), f'=IF(OR({g("sched")}="",{g("n")}=0,{g("sa_ahu")}=0,{incomplete(g("cov"))},{oa_above},{g("sa_ahu")}>={g("sched")}),"",{g("sched")}-{g("sa_ahu")})', "Calc", "d0")
         put(ws, g("redp"), f'=IF(OR({g("red")}="",{g("sched")}=0),"",{g("red")}/{g("sched")})', "Calc", "pct1")
         put(ws, g("leadtxt"), "=" + height_lead(ctx, ahu=g("ahu"), n=g("n"), noh=g("noh")), "Calc")
         inner = tender_remark(g("sched"), g("sa_ahu"), g("red"), g("redp"), f'IF({g("tsrc")}="","tender airflow",{g("tsrc")})',
-                              zero="No room of this unit has a supply airflow.", crit_partial=True,
+                              zero="No room of this unit has a supply airflow.",
                               lead=g("leadtxt"), partial=g("cov"), note=g("tsrc"),
                               all_spec=f'AND({g("n")}>0,{g("nfix")}={g("n")})', oa_above=oa_above, oa_calc=g("oa_rule"), oa_tender=g("sched_oa"),
-                              extra=g("spnote"), small=small_zone(g("zr"), g("za")))[1:]
+                              extra=unit_extra(g("spnote"), a.get("note")), small=small_zone(g("zr"), g("za")))[1:]
         put(ws, g("rem"), f'=IF({g("n")}=0,"No room on Room Information is served by this unit: no calculation.",{inner})', "Remark")
+
+
+def unit_extra(spnote: str, note: str = None) -> str:
+    """Excel text expression for the text that follows the result of a unit: the single-pass note of the cell and a fixed note that the documents print for the unit."""
+    if not note:
+        return spnote
+    from .sheets_rooms import xl_str
+    return f'IF({spnote}="","",{spnote}&" ")&{xl_str(note)}'
 
 
 def small_zone(zr: str, za: str) -> tuple:
@@ -152,30 +161,19 @@ def small_zone(zr: str, za: str) -> tuple:
             f'"Interim, open for Marcus (OI-R206-1): the zone schedule gives this unit "&{zr}&IF({zr}=1," room"," rooms")&" ("&TEXT({za},"#,##0")&" m²). The reduction may come from an incomplete room list. It is not a confirmed result."')
 
 
-def coverage_formula(zr: str, za: str, n: str, area: str, area_ok: str, z: str, nc: str = None, nca: str = None) -> str:
-    """Excel text: empty when the room list of a unit is complete, else the cause. Order of the tests (R1-08 decided ruling 3, round 3):
-    1. the unit is not in the zone schedule: 'partial: ...';
-    2. the counted rooms that have no criteria row hold more than (1 - Z) of the counted area: 'No criteria row for n of m rooms on this unit (a m²)'. This test
-       comes before the area test: the calculated airflow is not known whatever the area, so the text must not say that the area differs;
-    3. the zone schedule gives the unit an area of 0 m²: 'partial: ...';
-    4. the counted area lies outside the share Z of the zoned area on either side (below Z times, or above 1/Z times the zoned area): 'partial: ...'. The text
-       gives the two areas and the two room counts. It does not say 'n of m rooms counted' (n can be more than m: the department workbooks count rooms that the
-       zone schedule does not hold);
-    5. the rooms with a criteria row and a supply airflow hold less than the share Z of the counted area: 'partial: ...'.
-    `nc` and `nca` are the count and the area of the counted rooms that have no criteria row."""
-    if nc:
-        miss = (f'IF({area_ok}<{z}*{area},"partial: only "&TEXT({area_ok},"#,##0")&" of "&TEXT({area},"#,##0")&" m² counted have a supply airflow","")')
-        nocrit = f'AND({nc}>0,{nca}>(1-{z})*{area})'
-        nct = f'"No criteria row for "&{nc}&" of "&{n}&" rooms on this unit ("&TEXT({nca},"#,##0")&" m²)"'
-    else:
-        miss = (f'IF({area_ok}<{z}*{area},"partial: only "&TEXT({area_ok},"#,##0")&" of "&TEXT({area},"#,##0")&" m² counted have a criteria row and a supply airflow","")')
-        nocrit, nct = "FALSE", '""'
-    body = (f'IF(IF(ISNUMBER({za}),{za},0)=0,"partial: the zone schedule gives the unit a zoned area of 0 m² ("&{zr}&" zoned rooms; the room tags have no outline on the plan); "&{n}&" rooms counted",'
-            f'IF(OR({area}<{z}*{za},{area}>{za}/{z}),'
-            f'"partial: the department workbooks count "&{n}&" rooms ("&TEXT({area},"#,##0")&" m²); the zone schedule gives "&{zr}&" rooms ("&TEXT({za},"#,##0")&" m²)",'
-            f'{miss}))')
-    return (f'=IF({zr}="","partial: the unit is not in the zone schedule",IF({zr}=0,"partial: the unit is not in the zone schedule",'
-            f'IF({nocrit},{nct},{body})))')
+def coverage_formula(zr: str, za: str, nok: str, area_ok: str, z: str, nc: str = None) -> str:
+    """Excel text: the completeness of the room list of a unit (D-027). It starts with 'Complete' when every zoned room of the unit is counted and with
+    'Not complete' otherwise, and it states 'n of m zoned rooms counted'. A unit is complete when
+    1. the zone schedule gives the unit at least one room (zr),
+    2. the rooms counted with a criteria row and a supply airflow (nok) are at least as many as the zoned rooms,
+    3. no counted room lacks a criteria row (nc), and
+    4. the zone schedule gives the unit an area, and the area of the counted rooms is at least the share Z of it. A unit with a zoned area of 0 m² is not complete (its room tags lie in an open region of the plan).
+    A reduction against tender is stated only for a complete unit."""
+    nct = f'IF({nc}>0,"; "&{nc}&IF({nc}=1," room has"," rooms have")&" no criteria row","")' if nc else '""'
+    zt = f'IF(AND(ISNUMBER({za}),{za}>0),"","; the zone schedule gives the unit no area")'
+    ok = f'AND({nok}>={zr},{nc}=0,ISNUMBER({za}),{za}>0,{area_ok}>={z}*{za})' if nc else f'AND({nok}>={zr},ISNUMBER({za}),{za}>0,{area_ok}>={z}*{za})'
+    return (f'=IF(OR({zr}="",{zr}=0),"Not complete: the unit is not in the zone schedule",'
+            f'IF({ok},"Complete: ","Not complete: ")&IF({nok}>{zr},"all "&{zr}&" zoned rooms counted ("&{nok}&" rooms counted)",{nok}&" of "&{zr}&" zoned rooms counted")&IF({ok},"",{nct}&{zt}))')
 
 
 def height_lead(ctx: Ctx, *, ahu: str = None, room: str = None, fan_tag: str = None, n: str = None, noh: str = None) -> str:
@@ -186,7 +184,7 @@ def height_lead(ctx: Ctx, *, ahu: str = None, room: str = None, fan_tag: str = N
         miss = f'COUNTIFS({RI.rng("no")},{room},{RI.rng("h")},"")'
         nocrit = f'COUNTIFS({CR.rng("no")},{room},{CR.rng("crit")},"")'
         h = f'IF({miss}>0,"Main cause: ceiling height is not set for this room, so its air-change airflow is 0 L/s.","")'
-        c = f'IF({nocrit}>0," No criteria row is set for this room, so its air-change and outdoor airflows are 0 L/s.","")'
+        c = f'IF({nocrit}>0,IF({miss}>0," ","")&"No criteria row is set for this room, so its air-change and outdoor airflows are 0 L/s.","")'
         return f"({h}&{c})"
     if n is not None:
         miss, every = noh, n
@@ -201,7 +199,7 @@ def height_lead(ctx: Ctx, *, ahu: str = None, room: str = None, fan_tag: str = N
     if ahu is None:
         return h
     nocrit = nocrit_count(ctx, ahu)
-    c = (f'IF({nocrit}>0," No criteria row is set for "&{nocrit}&" of "&{every}&" rooms that this unit serves, '
+    c = (f'IF({nocrit}>0,IF({miss}>0," ","")&"No criteria row is set for "&{nocrit}&" of "&{every}&" rooms that this unit serves, '
          f'so their air-change and outdoor airflows are 0 L/s.","")')
     return f"({h}&{c})"
 
@@ -242,14 +240,15 @@ def write_ahu(ctx: Ctx) -> None:
              H("sched_oa", "Tender outdoor airflow", "L/s", 10), H("sched_c", "Code", "", 5), H("sched_s", "Source ID", "", 11),
              H("tsrc", "Tender source", "", 30),
              H("zr", "Rooms of the unit in the zone schedule", "no.", 10), H("za", "Area of the unit in the zone schedule", "m" + U, 10),
-             H("zc", "Code", "", 5), H("zs", "Source ID", "", 11), H("cov", "Room list of the unit", "", 40),
+             H("zc", "Code", "", 5), H("zs", "Source ID", "", 11), H("cov", "Room list of the unit (rooms counted)", "", 40),
              H("red", "Reduction = tender − calculated supply", "L/s", 11),
              H("redp", "Reduction = (tender − calculated) ÷ tender", "%", 11), H("rem", "Remarks", "", 140),
              H("nfix", "Rooms specified by the MOT NSC", "no.", 10), H("area_ok", "Area of the rooms with a criteria row and a supply airflow", "m" + U, 12),
              H("leadtxt", "Causes proved by the cells (helper)", "", 12), H("nocrit", "Rooms with no criteria row", "no.", 10), H("area_nocrit", "Area of the rooms with no criteria row", "m" + U, 12),
              H("fsp", "Highest fraction of the rooms that are not single pass", "–", 12), H("spr", "Single-pass room that sets the fraction", "", 24),
              H("spl", "Supply of that room", "L/s", 10), H("spy", "Highest fraction of the other rooms", "–", 12), H("spnote", "Single-pass note (helper)", "", 20),
-             H("oaflg", "Order of the units with outdoor air above tender (helper)", "no.", 12)]
+             H("oaflg", "Order of the units with outdoor air above tender (helper)", "no.", 12),
+             H("nok", "Rooms with a criteria row and a supply airflow", "no.", 12)]
     bands = {"ahu": "A. AS ZONED: AIRFLOW", "frac": "OUTDOOR AIR", "vou": "MULTIPLE SPACE (example)", "ret": "RETURN, EXHAUST, RELIEF",
              "sens": "COIL DUTY", "oa_sens_ms": "COIL DUTY ON THE EXAMPLE'S OUTDOOR-AIR BASIS", "req_t": "CHECKS", "sched": "TENDER AIRFLOW AND REDUCTION",
              "zr": "ROOM LIST OF THE UNIT"}
@@ -293,7 +292,7 @@ def write_ahu(ctx: Ctx) -> None:
         cf_formula(ws, f"{L2.col('red')}{L2.first}:{L2.col('red')}{L2.last}", f'AND({L2.col("red")}{L2.first}<>"",{L2.col("red")}{L2.first}<0)', bold=False, fill="FFFFF2CC")
     group_cols(ws, L, "vou", "vot")
     group_cols(ws, L, "oa_sens_ms", "coil_ms")
-    group_cols(ws, L, "nfix", "oaflg", collapsed=True)
+    group_cols(ws, L, "nfix", "nok", collapsed=True)
     _setup(ws, ctx, L, L.idx["rem"], ctx.ahu2_total_row, "4:6", f"{L.col('crit')}{L.first}", "FF00B050")
     ws.freeze_panes = f"B{L.first}"
 
@@ -381,8 +380,8 @@ def write_fcu(ctx: Ctx) -> None:
         _hl(ws, g("tsrc"), (f'=IF({g("tender")}="","",INDEX({AH.rng("tsrc")},{mt}))'), "Link", left=True)
         put(ws, g("calc"), (f'=IF({g("no")}="","",IF({sysrow},IF(ISNUMBER({mt}),INDEX({AH.rng("sa_ahu")},{mt}),{g("supply")}),'
                             f'{g("supply")}*(1+DuctLeakage)))'), "Link", "d0")
-        part = f'IF(ISNUMBER({mt}),INDEX({AH.rng("cov")},{mt}),"partial: the unit is not on the AHU tab")'
-        put(ws, g("red"), f'=IF(OR({g("tender")}="",{g("calc")}=0,{part}<>""),"",{g("tender")}-{g("calc")})', "Calc", "d0")
+        part = f'IF(ISNUMBER({mt}),INDEX({AH.rng("cov")},{mt}),"Not complete: the unit is not on the AHU tab")'
+        put(ws, g("red"), f'=IF(OR({g("tender")}="",{g("calc")}=0,{incomplete(part)},{g("calc")}>={g("tender")}),"",{g("tender")}-{g("calc")})', "Calc", "d0")
         put(ws, g("redp"), f'=IF(OR({g("tender")}="",{g("red")}=""),"",IF({g("tender")}=0,"",{g("red")}/{g("tender")}))', "Calc", "pct1")
         put(ws, g("rem"), tender_remark(g("tender"), g("calc"), g("red"), g("redp"), f'IF({g("tsrc")}="","tender airflow",{g("tsrc")})',
                                         "airflow", "No room served by this unit needs it under its criteria.",
@@ -439,8 +438,8 @@ def write_fans(ctx: Ctx) -> None:
         put(ws, g("tsrc"), f.get("tender_source_text") if not blank(f.get("scheduled_lps")) else None, "Text")
         fm_ = f"MATCH({g('serves')},{AH.rng('ahu')},0)"
         part = (f'IF(ISNUMBER({fm_}),INDEX({AH.rng("cov")},{fm_}),'
-                f'IF(OR({g("type")}="EXHAUST",{g("type")}="ISOLATION EXHAUST"),"partial: the rooms tied to this fan are not checked against the zone schedule","partial: the unit is not on the AHU tab"))')
-        put(ws, g("red"), f'=IF(OR({g("sched")}="",{g("req")}=0,{part}<>""),"",{g("sched")}-{g("drawn")})', "Calc", "d0")
+                f'IF(OR({g("type")}="EXHAUST",{g("type")}="ISOLATION EXHAUST"),"Not complete: the rooms tied to this fan are not checked against the zone schedule","Not complete: the unit is not on the AHU tab"))')
+        put(ws, g("red"), f'=IF(OR({g("sched")}="",{g("req")}=0,{incomplete(part)},{g("drawn")}>={g("sched")}),"",{g("sched")}-{g("drawn")})', "Calc", "d0")
         put(ws, g("redp"), f'=IF(OR({g("sched")}="",{g("red")}="",{g("sched")}=0),"",{g("red")}/{g("sched")})', "Calc", "pct1")
         put(ws, g("status"), f'=IF({g("sched")}="","NO TENDER VALUE",IF({g("req")}=0,"NOT CALCULATED",IF({g("sched")}>={g("drawn")},"PASS","VERIFY")))', "Check")
         put(ws, g("rem"), tender_remark(g("sched"), g("drawn"), g("red"), g("redp"), f'IF({g("tsrc")}="","tender airflow",{g("tsrc")})',
@@ -617,16 +616,18 @@ def write_comparison(ctx: Ctx) -> None:
             _val(ctx, ws, g(k), sc.get(fld), code, fmt="d1", cref=g("code"), sref=g("src"), src=src, label=f"schematic {fld}", room=r["number"])
         _prov_cells(ctx, ws, g("code"), g("src"), code, src, has)
         put(ws, g("tsrc"), sc.get("source_text") if has else None, "Text")
-        put(ws, g("d_s"), f'=IF({g("sch_s")}="","",{g("sch_s")}-{g("calc_s")})', "Calc", "d1")
-        put(ws, g("dp_s"), f'=IF(OR({g("sch_s")}="",{g("sch_s")}=0),"",{g("d_s")}/{g("sch_s")})', "Calc", "pct1")
+        crit_ok = f'COUNTIFS({CR.rng("no")},{g("no")},{CR.rng("crit")},"")=0'
+        put(ws, g("d_s"), f'=IF({g("sch_s")}="","",IF(AND(NOT({crit_ok}),{g("sch_s")}-{g("calc_s")}>=0),"",{g("sch_s")}-{g("calc_s")}))', "Calc", "d1")
+        put(ws, g("dp_s"), f'=IF(OR({g("sch_s")}="",{g("sch_s")}=0,{g("d_s")}=""),"",{g("d_s")}/{g("sch_s")})', "Calc", "pct1")
         put(ws, g("d_r"), f'=IF({g("sch_r")}="","",{g("sch_r")}-{g("calc_r")})', "Calc", "d1")
         put(ws, g("d_e"), f'=IF({g("sch_e")}="","",{g("sch_e")}-{g("calc_e")})', "Calc", "d1")
         put(ws, g("pa_calc"), f"={CR.addr('pa', i)}", "Link", "d1")
-        _hl(ws, g("flag"), (f'=IF({g("sch_s")}="","NO TENDER VALUE",IF({g("d_s")}<0,"VERIFY: ABOVE TENDER",IF({g("d_s")}=0,"EQUALS TENDER",'
-                            f'"REDUCTION AGAINST TENDER")))'), "Calc", left=True)
+        _hl(ws, g("flag"), (f'=IF({g("sch_s")}="","NO TENDER VALUE",IF({g("d_s")}<0,"VERIFY: ABOVE TENDER",IF(NOT({crit_ok}),"NO CRITERIA ROW",IF({g("d_s")}=0,"EQUALS TENDER",'
+                            f'"REDUCTION AGAINST TENDER"))))'), "Calc", left=True)
         put(ws, g("remark"), tender_remark(g("sch_s"), g("calc_s"), g("d_s"), g("dp_s"),
                                            f'IF({g("tsrc")}="","tender schematic",{g("tsrc")})', "schematic supply",
-                                           lead=height_lead(ctx, room=g("no")), share_note=False, thermal=False), "Remark")
+                                           lead=height_lead(ctx, room=g("no")), share_note=False, thermal=False,
+                                           partial=f'IF({crit_ok},"Complete","Not complete: no criteria row")'), "Remark")
     band_rows(ws, f"A{L.first}:{L.col('remark')}{L.last}")
     cf_formula(ws, f"{L.col('flag')}{L.first}:{L.col('flag')}{L.last}", f'LEFT({L.col("flag")}{L.first},6)="VERIFY"', bold=False, fill="FFFFF2CC")
     _setup(ws, ctx, L, L.idx["remark"], L.last, "4:6", f"{L.col('name')}{L.first}", "FF7F7F7F")
@@ -654,12 +655,12 @@ def write_comparison(ctx: Ctx) -> None:
         put(ws, g("sched"), f'=IF({AH.addr("sched", t)}="","",{AH.addr("sched", t)})', "Link", "d0")
         put(ws, g("tsrc"), f'=IF({AH.addr("tsrc", t)}="","",{AH.addr("tsrc", t)})', "Link")
         part = AH.addr("cov", t)
-        put(ws, g("d_sched"), f'=IF(OR({g("sched")}="",{g("calc")}=0,{part}<>""),"",{g("sched")}-{g("calc")})', "Calc", "d0")
+        put(ws, g("d_sched"), f'=IF(OR({g("sched")}="",{g("calc")}=0,{incomplete(part)},{g("calc")}>={g("sched")}),"",{g("sched")}-{g("calc")})', "Calc", "d0")
         put(ws, g("dp_sched"), f'=IF(OR({g("d_sched")}="",{g("sched")}=0),"",{g("d_sched")}/{g("sched")})', "Calc", "pct1")
-        put(ws, g("d"), f'=IF(OR({g("sch")}="",{part}<>""),"",{g("sch")}-{g("calc")})', "Calc", "d0")
+        put(ws, g("d"), f'=IF(OR({g("sch")}="",{incomplete(part)},{g("calc")}>={g("sch")}),"",{g("sch")}-{g("calc")})', "Calc", "d0")
         put(ws, g("dp"), f'=IF(OR({g("d")}="",{g("sch")}=0),"",{g("d")}/{g("sch")})', "Calc", "pct1")
-        _hl(ws, g("flag"), (f'=IF({g("sched")}="","NO TENDER VALUE",IF({g("calc")}=0,"NOT CALCULATED",IF({part}<>"","PARTIAL ROOM LIST",'
-                            f'IF({g("calc")}>{g("sched")},"VERIFY: ABOVE TENDER",IF({g("calc")}={g("sched")},"EQUALS TENDER","REDUCTION AGAINST TENDER")))))'), "Calc", left=True)
+        _hl(ws, g("flag"), (f'=IF({g("sched")}="","NO TENDER VALUE",IF({g("calc")}=0,"NOT CALCULATED",IF({g("calc")}>{g("sched")},"VERIFY: ABOVE TENDER",'
+                            f'IF({incomplete(part)},"ROOM LIST NOT COMPLETE",IF({g("calc")}={g("sched")},"EQUALS TENDER","REDUCTION AGAINST TENDER")))))'), "Calc", left=True)
         put(ws, g("remark"), tender_remark(g("sched"), g("calc"), g("d_sched"), g("dp_sched"),
                                            f'IF({g("tsrc")}="","tender airflow",{g("tsrc")})',
                                            zero="Calculated airflow is 0 L/s: no room of this unit has a supply airflow.",

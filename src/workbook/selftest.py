@@ -303,10 +303,10 @@ def style_proof(ctx, path: Path) -> Dict[str, Any]:
 
 # --------------------------------------------------------------------------- #
 def ka_input() -> Dict[str, Any]:
-    """Department of three rooms carrying the known-answer suites of Section 8.3 through the real Pressure tables."""
+    """Department of three rooms carrying the known-answer rooms of the pressure method (envelope only) through the real Pressure tables."""
     base = build_reva_input()
     src = dict(id="KA-8.3", document="Project pressure-offset method, known-answer table", issue="project method", page="known answers", location="known-answer test",
-               text_as_read="room 1.88 x 2.94 x 3.0 m; room 3.97 x 4.83 x 3.0 m; ensuite 37.5 m2 surface; doors 15, 10, 20 cm2; shaft door 10.2 m3/h",
+               text_as_read="room 1.88 x 2.94 x 3.0 m; room 3.97 x 4.83 x 3.0 m; ensuite 37.5 m2 surface; envelope only",
                method="transcribed from the project method", confidence="high")
     d = copy.deepcopy(base)
     d["sources"].append(src)
@@ -329,18 +329,11 @@ def ka_input() -> Dict[str, Any]:
                     envelope=[])
 
     d["rooms"] = [
-        room("ANTE", "Anteroom at -15 Pa", 1.88 * 2.94, 2 * (1.88 + 2.94), "S4", -15, [
-            dict(id="D1", to="CORRIDOR", kind="hinged sealed door", seal="hinged", code="A", source="GEN-PRESSURE"),
-            dict(id="D2", to="SHAFT", kind="sealed shaft door (fixed transfer into the room)", fixed_flow_m3h=-10.2, code="D", source="KA-8.3"),
-            dict(id="D3", to="ROOM", kind="sliding sealed door", seal="sliding", code="A", source="GEN-PRESSURE")]),
-        room("ROOM", "Isolation room at -30 Pa", 3.97 * 4.83, 2 * (3.97 + 4.83), "S5", -30, [
-            dict(id="D4", to="CORRIDOR", kind="bed-width sealed door", seal="bed_width", code="A", source="GEN-PRESSURE"),
-            dict(id="D5", to="ENSUITE", kind="sliding sealed door (internal)", seal="sliding", code="A", source="GEN-PRESSURE")]),
+        room("ANTE", "Room at -15 Pa", 1.88 * 2.94, 2 * (1.88 + 2.94), "S4", -15, []),
+        room("ROOM", "Room at -30 Pa", 3.97 * 4.83, 2 * (3.97 + 4.83), "S5", -30, []),
         room("ENSUITE", "Ensuite at -31 Pa", 4.0, 3.0, "S5", -31, [], override=37.5),
     ]
-    d["pressure_nodes"] = [dict(tag="REF", description="Reference: corridor", pressure_pa=0, code="S", source="GEN-PRESSURE"),
-                           dict(tag="CORRIDOR", description="Corridor outside the suite", pressure_pa=0, code="S", source="GEN-PRESSURE"),
-                           dict(tag="SHAFT", description="Shaft", pressure_pa=0, code="D", source="KA-8.3")]
+    d["pressure_nodes"] = [dict(tag="REF", description="Reference: corridor", pressure_pa=0, code="S", source="GEN-PRESSURE")]
     return d
 
 
@@ -473,17 +466,16 @@ def compare_ka_tables(rc: Path) -> List[Dict[str, Any]]:
     res = []
     def add(case, comp, exp, tol):
         res.append(dict(case=case, computed=comp, expected=exp, tol=tol, ok=abs(comp - exp) <= tol, where="node and path tables"))
-    add("4 anteroom: envelope in (45.7)", g("ANTE", "Envelope in"), 45.7, 0.2)
-    add("4 anteroom: offset needed", g("ANTE", "Offset needed"), 61.3, 0.2)
-    add("4 anteroom: design offset", g("ANTE", "Design offset"), 99.9, 0.2)
-    add("4 anteroom: ratio", g("ANTE", "Ratio design / needed"), 1.63, 0.01)
-    add("5 suite: room envelope", g("ROOM", "Envelope in"), 163.5, 0.2)
-    add("5 suite: ensuite envelope", g("ENSUITE", "Envelope in"), 68.7, 0.2)
-    needed = g("ROOM", "Offset needed") + g("ENSUITE", "Offset needed")
-    design = g("ROOM", "Design offset") + g("ENSUITE", "Design offset")
-    add("5 suite: offset needed (room + ensuite)", needed, 273.5, 0.2)
-    add("5 suite: design offset", design, 321.6, 0.2)
-    add("5 suite: ratio", design / needed, 1.18, 0.01)
+    add("4 room at -15 Pa: envelope in (45.7)", g("ANTE", "Envelope in"), 45.7, 0.2)
+    add("4 room at -15 Pa: offset needed", g("ANTE", "Offset needed"), 45.7, 0.2)
+    add("4 room at -15 Pa: design offset", g("ANTE", "Design offset"), 99.9, 0.2)
+    add("4 room at -15 Pa: ratio", g("ANTE", "Ratio design / needed"), 2.19, 0.01)
+    add("5 room at -30 Pa: offset needed (envelope)", g("ROOM", "Offset needed"), 163.5, 0.2)
+    add("5 room at -30 Pa: design offset", g("ROOM", "Design offset"), 227.9, 0.2)
+    add("5 room at -30 Pa: ratio", g("ROOM", "Ratio design / needed"), 1.39, 0.01)
+    add("6 ensuite at -31 Pa: offset needed (envelope)", g("ENSUITE", "Offset needed"), 68.7, 0.2)
+    add("6 ensuite at -31 Pa: design offset", g("ENSUITE", "Design offset"), 93.8, 0.2)
+    add("6 ensuite at -31 Pa: ratio", g("ENSUITE", "Ratio design / needed"), 1.36, 0.01)
     return res
 
 
@@ -573,8 +565,7 @@ def d013_check(base: Dict[str, Any], work: Path) -> Dict[str, Any]:
         ahu = dict(tag=tag, type="AHU")
         d.setdefault("ahus", []).append(ahu)
     ahu.update(sched_supply_lps=3500.0, sched_code="D", sched_source="TND-1", tender_source_text="tender equipment schedule Corr 5, test row",
-               zone_rooms=sum(1 for r in d["rooms"] if r.get("ahu") == tag),
-               zone_area_m2=round(sum(float(r.get("soa_area_m2") or r.get("dpa_area_m2") or 0) for r in d["rooms"] if r.get("ahu") == tag), 1), zone_code="D", zone_source="TND-1")
+               zone_rooms=1, zone_area_m2=1.0, zone_code="D", zone_source="TND-1")     # a zone that the counted rooms cover: the room list of the unit is complete (D-027)
     d["fans"] = [dict(tag="RAF-T1", type="RETURN", serves=tag, scheduled_lps=3000.0, code="D", source="TND-1",
                       tender_source_text="tender equipment schedule Corr 5, test fan row")]
     r0 = d["rooms"][0]
@@ -601,9 +592,13 @@ def d013_check(base: Dict[str, Any], work: Path) -> Dict[str, Any]:
         fails.append("room remarks on Airflow Comparison")
     fn = wb["Fans"]
     fr = [fn.cell(row=7, column=FAN_KEYS.index(k) + 1).value for k in ("sched", "drawn", "red", "redp", "rem")]
-    if fr[2] is None or abs(fr[2] - (fr[0] - fr[1])) > 1e-6 or not str(fr[4]).startswith(("Reduced", "VERIFY")):
+    if fr[0] < fr[1]:          # calculated above tender: no reduction is stated, the remark says VERIFY (D-027)
+        fan_ok = fr[2] in (None, "") and str(fr[4]).startswith("VERIFY")
+    else:                      # calculated below tender: the reduction is stated
+        fan_ok = fr[2] is not None and abs(fr[2] - (fr[0] - fr[1])) <= 1e-6 and str(fr[4]).startswith("Reduced")
+    if not fan_ok:
         fails.append(f"Fans reduction {fr}")
-    # a unit whose room list is partial against the zone schedule shows no reduction and says so
+    # a unit whose room list is not complete against the zone schedule shows no reduction and says nothing about a reduction (D-027)
     dp = copy.deepcopy(d)
     for a in dp["ahus"]:
         if a["tag"] == tag:
@@ -613,8 +608,8 @@ def d013_check(base: Dict[str, Any], work: Path) -> Dict[str, Any]:
     wbp = openpyxl.load_workbook(recalc(outp, work / "rc_partial"), data_only=True)
     ahp = wbp["AHU"]
     redp_, remp, covp = (ahp.cell(row=row, column=idx[k]).value for k in ("red", "rem", "cov"))
-    if redp_ not in (None, "") or not str(remp).startswith("partial:") or not str(covp).startswith("partial:"):
-        fails.append(f"partial unit shows a reduction or no partial text: {redp_!r} {remp!r} {covp!r}")
+    if redp_ not in (None, "") or "Reduced" in str(remp) or "partial" in str(remp).lower() or "No reduction" in str(remp) or not str(covp).startswith("Not complete"):
+        fails.append(f"incomplete unit shows a reduction, or reduction wording, or no 'Not complete' text: {redp_!r} {remp!r} {covp!r}")
     return dict(ahu_remarks=rem, fan_row=fr, fails=fails, errors=len(scan_errors(rc)))
 
 

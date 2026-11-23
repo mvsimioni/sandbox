@@ -3,7 +3,7 @@
 ``python3 -m src.recompute.compare_workbooks [--inputs out/loads/inputs] [--workbooks out/loads/workbooks] [--out out/qa/recompute_comparison.csv]``
 
 For each department input JSON ``D<nn>.json`` the matching workbook ``AIGH_C2_D<nn>_*.xlsx`` is read from its stored (recalculated)
-values. Room: supply, outdoor air, sensible, latent. AHU: supply, outdoor air (highest-fraction method), room sensible, room latent.
+values. Room: supply, outdoor air, sensible, latent, pressure offset needed (D-028). AHU: supply, outdoor air (highest-fraction method), room sensible, room latent.
 A value agrees when it is within 0.5 % of the recomputed value, or within 0.05 (L/s, W or kW: rounding of the stored value).
 The comparison reads the workbook by header text, not by column letter.
 """
@@ -42,6 +42,8 @@ def _round_areas(data: Dict[str, Any]) -> Dict[str, Any]:
 
 CAUSE_EXH = "required exhaust and no pressure offset: the workbook takes no supply floor from the exhaust, the recomputation takes supply not below exhaust"
 CAUSE_AREA = "area test at the tolerance edge: the workbook tests the areas rounded to 0.1 m2, the recomputation tests them unrounded"
+CAUSE_OFFSET = ("room with a pressure offset: the workbook exhausts the required exhaust (and, for a negative room, the offset air) and returns the rest of the extract, "
+                "the recomputation exhausts the whole extract and takes the outdoor air as the supply (rule difference, open for Marcus: OI-R401-1)")
 CAUSE_AHU = "follows from the room rows of this AHU that carry a cause"
 
 
@@ -72,6 +74,18 @@ def compare_one(dept: str, data: Dict[str, Any], xlsx: Path) -> List[Dict[str, A
         seen.add(no)
         for lab, col, key in ROOM_METRICS:
             rows.append(_row(dept, "room", no, lab, row[hdr[col]], by_no[no][key]))
+    # D-028: the pressure offset of every room with a pressure row (offset needed, m3/h) against the independent solution of the same method
+    ps = wb["Pressure"]
+    ph: Dict[str, int] = {}
+    for i, c in enumerate(ps[5]):
+        if c.value and c.value not in ph:
+            ph[c.value] = i
+    if "Offset needed" in ph:
+        for row in ps.iter_rows(min_row=7, values_only=True):
+            no = row[0]
+            pr = (by_no.get(no) or {}).get("pressure") if no else None
+            if pr and pr.get("mode") == "controlled" and isinstance(row[ph["Offset needed"]], (int, float)):
+                rows.append(_row(dept, "room", no, "pressure offset needed m3/h", row[ph["Offset needed"]], pr["offset_needed_m3h"]))
     for no in by_no:
         if no not in seen:
             rows.append(dict(dept=dept, level="room", ref=no, metric="present in workbook", workbook="", recomputed="", diff="", diff_pct="", within_tolerance="NO", cause=""))
@@ -101,8 +115,14 @@ def compare_one(dept: str, data: Dict[str, Any], xlsx: Path) -> List[Dict[str, A
         ra = by_no[r["ref"]]
         if key and rb is not None and _row("", "", "", "", r["workbook"], rb[key])["within_tolerance"] == "yes":
             r["cause"] = CAUSE_AREA
+        elif key == "oa_lps" and ra.get("offset_kind") in ("exhaust", "supply") and not ra.get("single_pass") and abs(float(r["recomputed"]) - ra["supply_lps"]) <= 0.05 \
+                and float(r["workbook"]) < float(r["recomputed"]):
+            r["cause"] = CAUSE_OFFSET
         elif key in ("supply_lps", "oa_lps") and ra.get("exhaust_required_lps", 0) > 0 and not ra.get("offset_kind") and ra.get("governing_case") == "exhaust_pressure":
             r["cause"] = CAUSE_EXH
+        elif r["metric"] == "pressure offset needed m3/h" and rb is not None and (rb.get("pressure") or {}).get("offset_needed_m3h") is not None \
+                and _row("", "", "", "", r["workbook"], rb["pressure"]["offset_needed_m3h"])["within_tolerance"] == "yes":
+            r["cause"] = CAUSE_AREA
         if r["cause"]:
             cause_rooms[ra.get("ahu") or ""] = r["cause"]
     for r in rows:

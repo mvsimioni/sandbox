@@ -30,10 +30,15 @@ README_NEW_ENTER = ("The Calculated airflow column holds the supply airflow in L
 README_OLD_RED = ("Reduction (L/s) = Tender airflow minus Calculated airflow. Reduction (%) = Reduction divided by Tender airflow. "
                   "Both are formulas and stay blank until you enter the calculated airflow.")
 README_NEW_RED = ("Reduction (L/s) = Tender airflow minus Calculated airflow. Reduction (%) = Reduction divided by Tender airflow. "
-                  "Both are formulas and stay blank where the tender airflow or the calculated airflow is blank.")
+                  "Both are formulas. They show a value only where the calculated airflow is below the tender airflow and the room list of the unit is complete.")
 
 
 def _level_tokens(tag: str) -> str:
+    """Level served by a unit tag: AHU-B-<plant level>-<served level><name>-<no.>. A tag with no served level gives the first level token."""
+    m = re.match(r"^[A-Z]+-B-(?:B[1-3]|\d{2})-(B[1-3]|\d{2})", tag)
+    if m:
+        tok = m.group(1)
+        return tok if tok.startswith("B") else "L" + tok
     for tok in tag.split("-")[1:4]:
         if re.fullmatch(r"B[1-3]|\d{2}", tok):
             return {"B3": "B3", "B2": "B2", "B1": "B1"}.get(tok, "L" + tok)
@@ -52,7 +57,7 @@ def main(argv=None) -> int:
     mh = {str(c.value): i for i, c in enumerate(master["AHU Master"][5])}
     mrow: Dict[str, tuple] = {}
     for i, r in enumerate(master["AHU Master"].iter_rows(min_row=7, values_only=True), 7):
-        if r[0] and r[0] != "TOTAL":
+        if r[0] and not str(r[0]).startswith("TOTAL"):
             mrow[str(r[0])] = (i, r)
     g = lambda r, h: r[mh[h]]
     files: Dict[str, str] = {}
@@ -65,7 +70,7 @@ def main(argv=None) -> int:
     for r in master["Department Rows"].iter_rows(min_row=7, values_only=True):
         if r[0] and r[1]:
             contrib.setdefault(str(r[0]), []).append(f"{files.get(str(r[1]), 'department ' + str(r[1]))} ({r[3]} rooms, {r[5]:g} L/s)")
-            depts.setdefault(str(r[0]), []).append(str(r[2]))
+            depts.setdefault(str(r[0]), []).append(f"{r[2]} ({r[1]})")
     wb = openpyxl.load_workbook(ns.schedule)
     sm = wb["AHU summary"]
     heads = [c.value for c in sm[1]]
@@ -116,9 +121,9 @@ def main(argv=None) -> int:
         k = sm.cell(row=i, column=col_k)
         sidc = sm.cell(row=i, column=col_src)
         if hit is None:
-            sm.cell(row=i, column=col_s).value = "partial: no department workbook carries a room on this unit"
+            sm.cell(row=i, column=col_s).value = "Not complete: no department workbook carries a room on this unit"
             coverage.append(dict(unit=str(tag), zone_rooms=sm.cell(row=i, column=6).value, zone_area_m2=sm.cell(row=i, column=7).value, counted_rooms=0, counted_area_m2=0,
-                                 status="partial: no department workbook carries a room on this unit"))
+                                 status="Not complete: no department workbook carries a room on this unit"))
             k.value = None
             note = "The unit is not in AHU_master_summary.xlsx: no department workbook carries a room on it."
             n_blank_out += 1
@@ -129,10 +134,10 @@ def main(argv=None) -> int:
             calc, tender_m = g(r, "Calculated airflow"), g(r, "Tender airflow")
             sm.cell(row=i, column=col_q).value = g(r, "Rooms")
             sm.cell(row=i, column=col_r).value = round(float(g(r, "Area") or 0), 1)
-            cov_ = g(r, "Room list of the unit") or ""
+            cov_ = g(r, "Room list of the unit (rooms counted)") or ""
             sm.cell(row=i, column=col_s).value = cov_ or None
             coverage.append(dict(unit=str(tag), zone_rooms=sm.cell(row=i, column=6).value, zone_area_m2=sm.cell(row=i, column=7).value, counted_rooms=g(r, "Rooms"),
-                                 counted_area_m2=round(float(g(r, "Area") or 0), 1), status=cov_ or "complete"))
+                                 counted_area_m2=round(float(g(r, "Area") or 0), 1), status=cov_ or "not known"))
             toa_m, oa_m = g(r, "Tender outdoor airflow"), g(r, "AHU outdoor air = fraction × calculated airflow")
             sm.cell(row=i, column=col_toa).value = float(toa_m) if isinstance(toa_m, (int, float)) else None
             sm.cell(row=i, column=col_oa).value = round(float(oa_m), 1) if isinstance(calc, (int, float)) and calc > 0 and isinstance(oa_m, (int, float)) else None
@@ -169,24 +174,25 @@ def main(argv=None) -> int:
         vals = {1: tag, 2: g(r, "Type") or re.match(r"^([A-Z]+)", tag).group(1), 3: "; ".join(depts.get(tag, [])) or "no information", 4: _level_tokens(tag),
                 5: plant_level(tag), 6: g(r, "Rooms"), 7: round(float(g(r, "Area") or 0), 1), 8: None, col_i: tender_m,
                 col_ts: (f"AHU_master_summary.xlsx, tender airflow: {g(r, 'Tender source') or 'see the master summary'}" if tender_m is not None else
-                         "No information: no tender airflow in the master summary."),
+                         str(g(r, 'Tender source') or "No information: no tender airflow in the master summary").rstrip(".")),
                 col_k: round(float(calc), 1) if isinstance(calc, (int, float)) and calc > 0 else None,
                 col_code: "D" if tender_m is not None else None}
         for j, v in vals.items():
             sm.cell(row=i, column=j).value = v
-        cov_ = g(r, "Room list of the unit") or ""
+        cov_ = g(r, "Room list of the unit (rooms counted)") or ""
         sm.cell(row=i, column=col_q).value = g(r, "Rooms")
         sm.cell(row=i, column=col_r).value = round(float(g(r, "Area") or 0), 1)
         sm.cell(row=i, column=col_s).value = cov_ or None
         coverage.append(dict(unit=tag, zone_rooms=None, zone_area_m2=None, counted_rooms=g(r, "Rooms"), counted_area_m2=round(float(g(r, "Area") or 0), 1),
-                             status=cov_ or "complete (unit not on the zoning drawing)"))
+                             status=cov_ or "not known (unit not on the zoning drawing)"))
         toa_m, oa_m = g(r, "Tender outdoor airflow"), g(r, "AHU outdoor air = fraction × calculated airflow")
         sm.cell(row=i, column=col_toa).value = float(toa_m) if isinstance(toa_m, (int, float)) else None
         sm.cell(row=i, column=col_oa).value = round(float(oa_m), 1) if isinstance(calc, (int, float)) and calc > 0 and isinstance(oa_m, (int, float)) else None
         from .deliver import red_formula, redp_formula, remarks_formula
         sm.cell(row=i, column=col["Reduction (L/s)"]).value = red_formula(i)
         sm.cell(row=i, column=col["Reduction (%)"]).value = redp_formula(i)
-        sm.cell(row=i, column=col["Remarks"]).value = remarks_formula(i, on_drawing=False)
+        from ..workbook.tag_notes import unit_note
+        sm.cell(row=i, column=col["Remarks"]).value = remarks_formula(i, on_drawing=False, note=unit_note(tag) or None)
         note = ("Unit not on the zoning drawing. " + (f"Room supply {g(r, 'Room supply'):g} L/s plus duct leakage {float(g(r, 'Duct leakage')) * 100:g} %."
                                                      if isinstance(calc, (int, float)) and calc > 0 else "The master summary gives 0 L/s: the calculated airflow is not available."))
         sid = source(tag, row_no, r, note)
@@ -227,8 +233,8 @@ def main(argv=None) -> int:
         w = csv.DictWriter(fh, fieldnames=["unit", "zone_rooms", "zone_area_m2", "counted_rooms", "counted_area_m2", "status"])
         w.writeheader()
         w.writerows(coverage)
-    n_part = sum(1 for c in coverage if str(c["status"]).startswith("partial"))
-    print(f"unit room coverage: {len(coverage) - n_part} complete, {n_part} partial of {len(coverage)} units ({qa})")
+    n_part = sum(1 for c in coverage if str(c["status"]).startswith("Not complete"))
+    print(f"unit room coverage: {len(coverage) - n_part} complete, {n_part} not complete of {len(coverage)} units ({qa})")
     print(f"{ns.schedule}: Calculated airflow filled for {n_fill} unit(s) ({n_added} added from the master summary); blank, unit in master but no room supply: {n_blank_in}; "
           f"blank, unit not in master: {n_blank_out}; tender differences listed: {len(diffs)}")
     for d in diffs:

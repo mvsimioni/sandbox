@@ -272,6 +272,7 @@ def _pressure_target(room: Dict[str, Any]) -> Optional[float]:
 
 
 # ---- pressure suites ------------------------------------------------------------------------ #
+PERIMETER_FACTOR = 4.0     # D-028: perimeter of a room with no measured outline = factor x square root of the area (the named cell PerimFactor of the workbook)
 def _door_link(room_no: str, door: Dict[str, Any]) -> pm.Link:
     to = str(door["to"])
     kind = str(door.get("kind") or door.get("id") or "door")
@@ -321,9 +322,13 @@ def solve_pressure(rooms: List[Dict[str, Any]], results: Dict[str, Dict[str, Any
             if p.get("surface_override_m2") is not None:
                 surface = float(p["surface_override_m2"])
             else:
-                if p.get("perimeter_m") is None:
+                if p.get("perimeter_m") is not None:
+                    perimeter = float(p["perimeter_m"])
+                elif p.get("perimeter_rule") == "factor":
+                    perimeter = PERIMETER_FACTOR * math.sqrt(area)            # D-028: no measured outline, perimeter = 4 x square root of the area used
+                else:
                     raise RecomputeError(f"room {no}: no perimeter and no surface override")
-                surface = pm.internal_surface(area, float(p["perimeter_m"]), height)
+                surface = pm.internal_surface(area, perimeter, height)
             spaces.append(pm.Space(no, setp[no], surface, supply_m3h=pm.m3h(res["supply_lps_nominal"]),
                                    exhaust_m3h=pm.m3h(res["exhaust_lps_nominal"])))
             # Schema convention (src/workbook/schema.md): a door is entered once, under either room, and

@@ -18,5 +18,33 @@ def cath_tag_note(tag: str) -> str:
             "Memo Table 3 prints AHU-B-04-04CATH-01, -02. The memo is not consistent in itself. The form that governs is not decided.")
 
 
+UCV_UNIT = re.compile(r"^AHU-B-07-05MOTCT-01$")
+
+
+def ucv_unit_note(tag: str) -> str:
+    """R3-05: the note of the MOT NSC air-side schematic of the CT and UCV theatre. The note gives the supply airflow that the room needs for the future UCV."""
+    if not UCV_UNIT.match((tag or "").strip()):
+        return ""
+    return ("MOT NSC note on air-side schematic IP-BH-16057 (Corr 2, rev 0A) for the CT and UCV theatre (MSOT 05.02.10): an approximate supply airflow of 5,320 L/s shall be "
+            "provided and achieved to the room to accommodate the future UCV, and the ductwork sizing shall account for the pressure loss. The schematic room table gives 3,600 L/s "
+            "(normal mode and single pass). This workbook uses the specified room table. Which airflow applies is open for Marcus (OI-R305-1).")
+
+
+HYB_UNIT = re.compile(r"^AHU-B-07-05MOTHYB-02$")
+
+
+def hyb_unit_note(tag: str) -> str:
+    """R3-09: the unit that the schedule of modes names for the hybrid theatre and that the equipment schedule does not list."""
+    if not HYB_UNIT.match((tag or "").strip()):
+        return ""
+    return ("Conflict between documents: the MOT NSC schedule of modes (Appendix J, theatre MSOT 05.02.12) names this unit. The MOT NSC Overall AC Equipment Schedule lists only "
+            "AHU-B-07-05MOTHYB-01, and the zone schedule does not show this unit. No tender airflow is used. Which tag is correct is open for Marcus (OI-R114-1).")
+
+
+def unit_note(tag: str) -> str:
+    """Notes of a unit that the documents print and that the calculation does not resolve."""
+    return " ".join(x for x in (ucv_unit_note(tag), hyb_unit_note(tag)) if x)
+
+
 def tag_note(tag: str) -> Optional[str]:
-    return cath_tag_note(tag) or None
+    return cath_tag_note(tag) or ucv_unit_note(tag) or hyb_unit_note(tag) or None

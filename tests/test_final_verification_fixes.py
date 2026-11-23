@@ -52,6 +52,8 @@ def test_list_tags_expand():
     assert expand_tag("AHU-B-03-03CORE-01") == ["AHU-B-03-03CORE-01"]
 
 
-def test_coverage_is_two_sided_and_needs_criteria():
-    f = coverage_formula("A1", "B1", "C1", "D1", "E1", "ZoneCoverMin")
-    assert "ZoneCoverMin*B1" in f and "B1/ZoneCoverMin" in f and "criteria row" in f
+def test_completeness_needs_every_zoned_room_counted_criteria_and_area():
+    """D-027: the room list of a unit is complete when the counted rooms with a criteria row and a supply are at least the zoned rooms, no counted room lacks a criteria row,
+    the zone schedule gives an area and the counted area reaches the share of it."""
+    f = coverage_formula("A1", "B1", "C1", "D1", "ZoneCoverMin", "E1")      # zoned rooms, zoned area, rooms counted, counted area, share, rooms with no criteria row
+    assert "C1>=A1" in f and "ZoneCoverMin*B1" in f and "no criteria row" in f and "Complete: " in f and "Not complete: " in f and "partial" not in f.lower()

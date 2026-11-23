@@ -21,15 +21,14 @@ PS_HEAD = {
     "ovr_s": ("Source ID", "", 11), "surf": ("Internal surface", "m²", 9), "limit": ("Leakage limit at reference", "m³/h per m²", 9),
     "n": ("Flow exponent n", "–", 7), "supply": ("Supply", "m³/h", 9), "exhaust": ("Extract", "m³/h", 9),
     "pfin": ("Pressure solved", "Pa", 9), "env_in": ("Envelope in", "m³/h", 9), "env_out": ("Envelope out", "m³/h", 9),
-    "gap_in": ("Door gaps in", "m³/h", 9), "gap_out": ("Door gaps out", "m³/h", 9), "fix_in": ("Fixed transfer in", "m³/h", 9),
+    "gap_in": ("Other paths in", "m³/h", 9), "gap_out": ("Other paths out", "m³/h", 9), "fix_in": ("Fixed transfer in", "m³/h", 9),
     "fix_out": ("Fixed transfer out", "m³/h", 9), "air_in": ("Air in", "m³/h", 9), "air_out": ("Air out", "m³/h", 9),
     "kindoff": ("Offset kind", "", 10), "needed": ("Offset needed", "m³/h", 9), "design": ("Design offset", "m³/h", 9),
     "tighter": ("Offset of a tighter room", "m³/h", 9), "ratio": ("Ratio design / needed", "–", 8), "status": ("Status", "", 9),
     "spec_off": ("Offset as specified (MOT, not resized)", "m³/h", 11), "spec_chk": ("Specified offset against needed", "", 11),
     "off_lps": ("Offset needed", "L/s", 9), "design_lps": ("Design offset", "L/s", 9),
     "needed_n50": ("Offset needed, n = 0.50", "m³/h", 9), "needed_n75": ("Offset needed, n = 0.75", "m³/h", 9),
-    "needed_g2": ("Offset needed, gaps × 2", "m³/h", 9), "ratio_n50": ("Ratio, n = 0.50", "–", 8),
-    "ratio_n75": ("Ratio, n = 0.75", "–", 8), "ratio_g2": ("Ratio, gaps × 2", "–", 8),
+    "ratio_n50": ("Ratio, n = 0.50", "–", 8), "ratio_n75": ("Ratio, n = 0.75", "–", 8),
     "flag_s": ("Fails only in a sensitivity case", "", 10), "upa": ("Pressure at design offset, no control", "Pa", 10),
     "resid": ("Balance residual", "m³/h", 9), "note": ("Note", "", 40),
 }
@@ -46,10 +45,10 @@ def write_pressure(ctx: Ctx) -> None:
     ws = ctx.wb["Pressure"]
     PS, PL, PU = ctx.lay["PS"], ctx.lay["PL"], ctx.lay["PU"]
     RI, CR, AF = ctx.lay["RI"], ctx.lay["CR"], ctx.lay["AF"]
-    title_block(ws, "Pressure", "Project method for rooms with a pressure target. Envelope: Q = limit × surface × (ΔP ÷ reference)^n. "
-                "Door gaps: Q = Cd × A × √(2 ΔP ÷ ρ) × 3600. Air flows from high to low pressure. "
-                "Offset needed for a negative room = air in − air out. Offset needed for a positive room = air out − air in. "
-                "Spaces without a set pressure are solved in fixed Newton steps in the grouped calculation columns.", ctx)
+    title_block(ws, "Pressure", "Every room with a pressure target in Pa. The envelope complies with the airtightness limit: Q = limit × internal surface × (ΔP ÷ 50 Pa)^n, "
+                "with the limit 2.5 m³/h per m² at 50 Pa and n = 0.65. Internal surface = 2 × area + perimeter × height. Doors are not modelled. "
+                "Offset needed for a negative room = envelope leakage in at the set pressure. Offset needed for a positive room = envelope leakage out. "
+                "Design offset = 2.5 × internal surface. Ratio = design offset ÷ offset needed. Sensitivity: n = 0.50 and n = 0.75.", ctx)
     # ---- node table headers
     spec = [(k, *PS_HEAD[k]) for k in PS.keys if k in PS_HEAD]
     write_headers(ws, PS, spec, 4, {"node": "SPACE", "set": "SET PRESSURE", "perim": "GEOMETRY", "supply": "MECHANICAL AIR",
@@ -83,9 +82,18 @@ def write_pressure(ctx: Ctx) -> None:
             has_p = not blank(pr.get("perimeter_m"))
             if has_p and blank(psr):
                 raise ValueError(f"room {room['number']}: pressure perimeter has no source id")
-            _val(ctx, ws, g("perim"), pr.get("perimeter_m"), pc, fmt="d2", cref=g("perim_c"), sref=g("perim_s"), src=psr,
-                 label="perimeter", room=room["number"])
-            _prov_cells(ctx, ws, g("perim_c"), g("perim_s"), pc, psr, has_p)
+            if not has_p and pr.get("perimeter_rule") == "factor":
+                # no measured outline: perimeter = PerimFactor x square root of the area used (assumed, code A, flagged on Flags)
+                put(ws, g("perim"), f'=PerimFactor*SQRT({g("area")})', "Assumption", "d2")
+                put(ws, g("perim_c"), "A", "Code")
+                put(ws, g("perim_s"), "GEN-PRESSURE", "Tag")
+                ctx.src_ranges.append(g("perim_s"))
+                ctx.src_link(ws, g("perim_s"), "GEN-PRESSURE")
+                ctx.coded.append(dict(sheet=ws.title, cell=g("perim"), code_cell=g("perim_c"), src_cell=g("perim_s"), code="A"))
+            else:
+                _val(ctx, ws, g("perim"), pr.get("perimeter_m"), pc, fmt="d2", cref=g("perim_c"), sref=g("perim_s"), src=psr,
+                     label="perimeter", room=room["number"])
+                _prov_cells(ctx, ws, g("perim_c"), g("perim_s"), pc, psr, has_p)
             ov = pr.get("surface_override_m2")
             oc, os_ = (pr.get("surface_prov") or ["S", "GEN-PRESSURE"])[:2]
             _val(ctx, ws, g("ovr"), ov, oc, fmt="d1", cref=g("ovr_c"), sref=g("ovr_s"), src=os_, label="surface", room=room["number"])
@@ -157,17 +165,15 @@ def write_pressure(ctx: Ctx) -> None:
         put(ws, g("spec_chk"), f'=IF(ISNUMBER({g("spec_off")}),IF({g("spec_off")}>={g("needed")}-OffsetEps,"OK","SHORT"),"")', "Check")
         put(ws, g("off_lps"), f"={g('needed')}/ConvM3hPerLps", "Calc", "d1")
         put(ws, g("design_lps"), f"={g('design')}/ConvM3hPerLps", "Calc", "d1")
-        gapnet = f"({g('gap_in')}+{g('fix_in')}-{g('gap_out')}-{g('fix_out')})"
+        gapnet = f"({g('gap_in')}+{g('fix_in')}-{g('gap_out')}-{g('fix_out')})"       # zero where no path other than the envelope exists
         for key, nexp in (("n50", "FlowNLow"), ("n75", "FlowNHigh")):
             e = f"{g('limit')}*{g('surf')}*SIGN({dpf})*(ABS({dpf})/RefPressure)^{nexp}"
             r2 = f"IF({g('negf')}=1,{gapnet}-{e},-({gapnet}-{e}))"
             put(ws, g(f"needed_{key}"), f"=ABS({r2})", "Calc", "d1")
-        gapx = f"(2*({g('gap_in')}-{g('gap_out')})+{g('fix_in')}-{g('fix_out')}-{g('bsum')})"
-        put(ws, g("needed_g2"), f"=ABS(IF({g('negf')}=1,{gapx},-{gapx}))", "Calc", "d1")
-        for key in ("n50", "n75", "g2"):
+        for key in ("n50", "n75"):
             put(ws, g(f"ratio_{key}"), f'=IF({g(f"needed_{key}")}>OffsetEps,{g("design")}/{g(f"needed_{key}")},"n/a")', "Calc", "d2")
         put(ws, g("flag_s"), f'=IF(AND({g("status")}<>"FAIL",OR(AND(ISNUMBER({g("ratio_n50")}),{g("ratio_n50")}<RatioFail),'
-                             f'AND(ISNUMBER({g("ratio_n75")}),{g("ratio_n75")}<RatioFail),AND(ISNUMBER({g("ratio_g2")}),{g("ratio_g2")}<RatioFail))),"FLAG","")',
+                             f'AND(ISNUMBER({g("ratio_n75")}),{g("ratio_n75")}<RatioFail))),"FLAG","")',
             "Check")
         put(ws, g("note"), f'=IF({raw}<-OffsetEps,"LEAKAGE RUNS THE WRONG WAY FOR THIS ROOM. ","")&IF(ABS({g("pfin")}-{pref})<ApplyFromPa,'
                            f'"SET PRESSURE BELOW THE LIMIT OF THE METHOD.","")', "Note")
@@ -207,7 +213,9 @@ def write_pressure(ctx: Ctx) -> None:
 def _write_links(ctx: Ctx, ws) -> None:
     PS, PL = ctx.lay["PS"], ctx.lay["PL"]
     title_row = PL.first - 4
-    put(ws, f"A{title_row}", "Air paths: every door and gap, with the space on its other side", "Section")
+    if not ctx.pl_links:
+        return
+    put(ws, f"A{title_row}", "Air paths: fixed transfers and other paths, with the space on the other side", "Section")
     heads = {"id": ("Path ID", "", 14), "room": ("Room", "", 14), "a": ("Node A", "", 14), "b": ("Node B (other side)", "", 14),
              "kind": ("Door or gap", "", 24), "seal": ("Seal type", "", 10), "gap": ("Open gap area", "cm²", 8),
              "gap_c": ("Code", "", 5), "gap_s": ("Source ID", "", 11), "leaf_w": ("Leaf width", "m", 7), "leaf_h": ("Leaf height", "m", 7),
@@ -252,6 +260,8 @@ def _write_links(ctx: Ctx, ws) -> None:
 
 def _write_suites(ctx: Ctx, ws) -> None:
     PS, PU = ctx.lay["PS"], ctx.lay["PU"]
+    if not ctx.suites:
+        return
     put(ws, f"A{PU.first - 4}", "Suites: rooms solved together, offsets by kind", "Section")
     heads = {"suite": ("Suite", "", 14), "n": ("Controlled rooms", "no.", 9), "ex_needed": ("Extra exhaust needed", "m³/h", 10),
              "sup_needed": ("Extra supply needed", "m³/h", 10), "ex_design": ("Design offset, exhaust rooms", "m³/h", 10),
@@ -300,20 +310,20 @@ def _write_known_answers(ctx: Ctx, ws) -> None:
     add("s1", "2 small room", "internal surface 1.88 × 2.94 × 3.0 m (m²)", [1.88, 2.94, 3.0], "=2*{P1}*{P2}+2*({P1}+{P2})*{P3}", 40.0, 0.05)
     add("e50", "2 small room", "envelope leakage at 50 Pa (m³/h)", [50], "=AirtightLimit*{s1}*({P1}/RefPressure)^FlowN", 99.9, 0.2)
     add("e15", "2 small room", "envelope leakage at 15 Pa (m³/h)", [15], "=AirtightLimit*{s1}*({P1}/RefPressure)^FlowN", 45.7, 0.2)
-    add("g15", "3 door gaps", "15 cm² at 15 Pa (m³/h)", [15, 15], "=DoorCd*({P1}/CM2perM2)*SQRT(2*{P2}/AirDensity)*SecPerHour", 16.2, 0.2)
-    add("g10", "3 door gaps", "10 cm² at 15 Pa (m³/h)", [10, 15], "=DoorCd*({P1}/CM2perM2)*SQRT(2*{P2}/AirDensity)*SecPerHour", 10.8, 0.2)
-    add("g20", "3 door gaps", "20 cm² at 30 Pa (m³/h)", [20, 30], "=DoorCd*({P1}/CM2perM2)*SQRT(2*{P2}/AirDensity)*SecPerHour", 30.5, 0.2)
-    add("a_need", "4 anteroom −15 Pa", "offset needed (m³/h): envelope + corridor door + shaft door − door to −30 Pa room",
-        [10.2], "={e15}+{g15}+{P1}-{g10}", 61.3, 0.2)
-    add("a_des", "4 anteroom −15 Pa", "design offset (m³/h)", [], "=AirtightLimit*{s1}", 99.9, 0.2)
-    add("a_rat", "4 anteroom −15 Pa", "ratio", [], "={a_des}/{a_need}", 1.63, 0.01, "d2")
-    add("s2", "5 suite −30 / −31 Pa", "internal surface of room 3.97 × 4.83 × 3.0 m (m²)", [3.97, 4.83, 3.0], "=2*{P1}*{P2}+2*({P1}+{P2})*{P3}", 91.2, 0.1)
-    add("er", "5 suite −30 / −31 Pa", "room envelope at 30 Pa (m³/h)", [30], "=AirtightLimit*{s2}*({P1}/RefPressure)^FlowN", 163.5, 0.2)
-    add("ee", "5 suite −30 / −31 Pa", "ensuite envelope, 37.5 m² at 31 Pa (m³/h)", [31, 37.5], "=AirtightLimit*{P2}*({P1}/RefPressure)^FlowN", 68.7, 0.2)
-    add("s_need", "5 suite −30 / −31 Pa", "offset needed (m³/h): both envelopes + corridor door + anteroom door", [],
-        "={er}+{ee}+{g20}+{g10}", 273.5, 0.2)
-    add("s_des", "5 suite −30 / −31 Pa", "design offset (m³/h)", [37.5], "=AirtightLimit*({s2}+{P1})", 321.6, 0.2)
-    add("s_rat", "5 suite −30 / −31 Pa", "ratio", [], "={s_des}/{s_need}", 1.18, 0.01, "d2")
+    add("n50", "3 sensitivity", "small room at 15 Pa, n = 0.50 (m³/h)", [15], "=AirtightLimit*{s1}*({P1}/RefPressure)^FlowNLow", 54.7, 0.2)
+    add("n75", "3 sensitivity", "small room at 15 Pa, n = 0.75 (m³/h)", [15], "=AirtightLimit*{s1}*({P1}/RefPressure)^FlowNHigh", 40.5, 0.2)
+    add("a_need", "4 room at -15 Pa", "offset needed = envelope leakage at 15 Pa (m³/h)", [], "={e15}", 45.7, 0.2)
+    add("a_des", "4 room at -15 Pa", "design offset = 2.5 × surface (m³/h)", [], "=AirtightLimit*{s1}", 99.9, 0.2)
+    add("a_rat", "4 room at -15 Pa", "ratio", [], "={a_des}/{a_need}", 2.19, 0.01, "d2")
+    add("s2", "5 room at -30 Pa", "internal surface of room 3.97 × 4.83 × 3.0 m (m²)", [3.97, 4.83, 3.0], "=2*{P1}*{P2}+2*({P1}+{P2})*{P3}", 91.2, 0.1)
+    add("er", "5 room at -30 Pa", "offset needed = envelope leakage at 30 Pa (m³/h)", [30], "=AirtightLimit*{s2}*({P1}/RefPressure)^FlowN", 163.5, 0.2)
+    add("r_des", "5 room at -30 Pa", "design offset = 2.5 × surface (m³/h)", [], "=AirtightLimit*{s2}", 227.9, 0.2)
+    add("r_rat", "5 room at -30 Pa", "ratio", [], "={r_des}/{er}", 1.39, 0.01, "d2")
+    add("ee", "6 ensuite at -31 Pa", "offset needed = envelope leakage of 37.5 m² at 31 Pa (m³/h)", [31, 37.5], "=AirtightLimit*{P2}*({P1}/RefPressure)^FlowN", 68.7, 0.2)
+    add("e_des", "6 ensuite at -31 Pa", "design offset = 2.5 × 37.5 m² (m³/h)", [37.5], "=AirtightLimit*{P1}", 93.8, 0.2)
+    add("e_rat", "6 ensuite at -31 Pa", "ratio", [], "={e_des}/{ee}", 1.36, 0.01, "d2")
+    add("f70", "7 room at -70 Pa", "offset needed = envelope leakage at 70 Pa (m³/h)", [70], "=AirtightLimit*{s1}*({P1}/RefPressure)^FlowN", 124.4, 0.2)
+    add("f_rat", "7 room at -70 Pa", "ratio (below 1.0: a fail)", [], "={a_des}/{f70}", 0.80, 0.01, "d2")
     for i, r in enumerate(rows):
         R[r["key"]] = f"E{first + i}"
     ctx.ka_rows = {}

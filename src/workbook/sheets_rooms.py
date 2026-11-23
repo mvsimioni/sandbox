@@ -12,7 +12,7 @@ from .common import (band_rows, cf_formula, cf_text, expand, group_cols, list_va
 from .ctx import Ctx
 from .layouts import (ENG, ENG_FIRST, FIRST, OA_ROUNDS, af_spec, cr_spec, en_spec, ri_spec)
 from .model import blank, prov_of
-from .styles import CODE_STYLES, OCC_NAME, put, setup_sheet, tag_variant
+from .styles import CODE_STYLES, LOAD_NAME, OCC_NAME, PRES_NAME, put, setup_sheet, tag_variant
 
 X = lambda v: None if blank(v) else v
 
@@ -29,24 +29,38 @@ def xl_str(text: str) -> str:
     return "&".join('"' + p.replace('"', '""') + '"' for p in parts)
 
 
-def _density_remark(ctx: Ctx, r: Dict[str, Any], g, rem: Any) -> str:
-    """Remarks cell of a room whose occupancy is the default density: the note of the project input, built from the cells."""
-    import re as _re
-    from .conf import occupancy_cfg
-    tpl = str(occupancy_cfg().get("remarks_template") or
-              "Occupancy assumed: {density} p/100 m2 x {area} m2 = {people} (ASHRAE 62.1 Table 6.2.2.1, {use}). No RDS value. To confirm.")
-    tpl = tpl.replace("m2", "m²")
-    use = str(r.get("occupancy_use") or "use not mapped")
+def _template_pieces(tpl: str, values: Dict[str, str]) -> List[str]:
+    """Excel string pieces of a Remarks template: the text between the {names} as literals and each {name} as the expression of `values`."""
     pieces, pos = [], 0
-    for m in _re.finditer(r"\{(\w+)\}", tpl):
+    for m in re.finditer(r"\{(\w+)\}", tpl):
         pieces.append(xl_str(tpl[pos:m.start()]))
-        key = m.group(1)
-        pieces.append({"density": f'TEXT({g("dens")},"0")', "area": f'TEXT({g("area")},"0.0")', "people": f'TEXT({g("people")},"0")',
-                       "use": xl_str(use)}.get(key, '""'))
+        pieces.append(values.get(m.group(1), '""'))
         pos = m.end()
     pieces.append(xl_str(tpl[pos:]))
+    return pieces
+
+
+def _remark_formula(ctx: Ctx, r: Dict[str, Any], g, rem: Any) -> str:
+    """Remarks cell of a room that carries an assumption of the project input: the notes of the project configuration (occupancy density D-017, plug load and
+    lighting D-025), built from the cells of the same row, then the text of the room."""
+    from .conf import internal_loads_cfg, occupancy_cfg
+    pieces: List[str] = []
+    if r.get("occupancy_basis") == "DENSITY DEFAULT":
+        tpl = str(occupancy_cfg().get("remarks_template") or
+                  "Occupancy assumed: {density} p/100 m2 x {area} m2 = {people} (ASHRAE 62.1 Table 6.2.2.1, {use}). No RDS value. To confirm.").replace("m2", "m²")
+        pieces += _template_pieces(tpl, {"density": f'TEXT({g("dens")},"0")', "area": f'TEXT({g("area")},"0.0")', "people": f'TEXT({g("people")},"0")',
+                                         "use": xl_str(str(r.get("occupancy_use") or "use not mapped"))})
+        pieces.append(xl_str(" "))
+    if r.get("load_basis") == "ASHRAE":
+        tpl = str(internal_loads_cfg().get("remarks_template") or "{what} assumed: {value} W/m2 (ASHRAE, {use}). No project value. To confirm.").replace("m2", "m²")
+        use = xl_str(str(r.get("load_use") or ""))
+        for what, key in (("Plug load", "power"), ("Lighting", "light")):
+            pieces += _template_pieces(tpl, {"what": xl_str(what), "value": f'TEXT({g(key)},"0.0")', "use": use})
+            pieces.append(xl_str(" "))
     if not blank(rem):
-        pieces.append(xl_str(" " + str(rem)))
+        pieces.append(xl_str(str(rem)))
+    elif pieces:
+        pieces.pop()
     return "=" + "&".join(pieces)
 
 
@@ -115,6 +129,7 @@ def write_room_information(ctx: Ctx) -> None:
                   ("eqs", "equipment_sensible_w", "equipment_sensible", "num", "d0"),
                   ("eql", "equipment_latent_w", "equipment_latent", "num", "d0")]
         density_default = r.get("occupancy_basis") == "DENSITY DEFAULT"
+        load_ashrae = r.get("load_basis") == "ASHRAE"
         for k, f, grp, kind, fmt in simple:
             v = r.get(f)
             if k == "sel" and blank(v):
@@ -125,6 +140,8 @@ def write_room_information(ctx: Ctx) -> None:
             else:
                 code_s, src_s = prov_of(r, grp, not blank(v))
             style = OCC_NAME if (k == "dens" and density_default and not blank(v)) else None
+            if k in ("light", "power") and load_ashrae and not blank(v):
+                style = LOAD_NAME
             _val(ctx, ws, g(k), v, code_s, fmt=fmt, kind=kind, cref=g(k + "_c"), sref=g(k + "_s"), src=src_s,
                  label=f, room=n, style=style)
             _prov_cells(ctx, ws, g(k + "_c"), g(k + "_s"), code_s, src_s, not blank(v))
@@ -159,9 +176,9 @@ def write_room_information(ctx: Ctx) -> None:
         if density_default:
             ctx.coded.append(dict(sheet=ws.title, cell=g("people"), code_cell=g("dens_c"), src_cell=g("dens_s"), code="A"))
         rem = r.get("remark")
-        if density_default:
-            put(ws, g("remark"), _density_remark(ctx, r, g, rem), "Remark")
-            nl = -(-(len(str(rem or "")) + 150) // 165)
+        if density_default or load_ashrae:
+            put(ws, g("remark"), _remark_formula(ctx, r, g, rem), "Remark")
+            nl = -(-(len(str(rem or "")) + (150 if density_default else 0) + (230 if load_ashrae else 0)) // 165)
         else:
             put(ws, g("remark"), rem, "Remark")
             nl = -(-len(str(rem or "")) // 165)
@@ -221,7 +238,7 @@ def write_criteria(ctx: Ctx) -> None:
                   ("after", "afterhours", "text", None)]
         for k, f, kind, fmt in fields:
             _val(ctx, ws, g(k), c.get(f), code, fmt=fmt, kind=kind, cref=g("code"), sref=g("src"), src=src,
-                 label=f"criteria {f}", room=r["number"])
+                 label=f"criteria {f}", room=r["number"], style=PRES_NAME if c.get("presumed") else None)
         _prov_cells(ctx, ws, g("code"), g("src"), code, src, has)
         calc = {
             "pa": f'=IF({g("pa_td")}<>"",{g("pa_td")},IF({g("pa_wd")}<>"",{g("pa_wd")},IF({g("pa_bk")}<>"",{g("pa_bk")},"")))',

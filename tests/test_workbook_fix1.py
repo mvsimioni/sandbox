@@ -44,18 +44,19 @@ def test_outdoor_air_never_exceeds_supply_in_single_pass_negative_rooms(ka):
 def test_independent_recomputation_agrees_with_the_known_answer_department(ka):
     lines = st.compare_recompute(ka["data"], ka["rc"])
     assert lines and all(x["ok"] for x in lines), [x for x in lines if not x["ok"]]
-    # the anteroom door D3 is listed once, under ANTE, and acts on both spaces: ROOM needs 202.05 m3/h (workbook) = recomputation
+    # D-028: envelope only. ROOM at -30 Pa needs the envelope leakage of its internal surface (163.5 m3/h) in the workbook and in the recomputation
     need = {x["item"]: x for x in lines}["room ROOM offset needed m3/h"]
-    assert need["workbook"] == pytest.approx(202.05, abs=0.1) and need["recomputed"] == pytest.approx(202.05, abs=0.2)
+    assert need["workbook"] == pytest.approx(163.5, abs=0.2) and need["recomputed"] == pytest.approx(163.5, abs=0.2)
+    assert {x["item"]: x for x in lines}["room ANTE offset needed m3/h"]["workbook"] == pytest.approx(45.7, abs=0.2)
 
 
-def test_door_listed_from_both_sides_counts_once(ka):
-    twice = copy.deepcopy(ka["data"])
-    room = next(r for r in twice["rooms"] if r["number"] == "ROOM")
-    room["pressure"]["doors"].append(dict(id="D3", to="ANTE", kind="sliding sealed door", seal="sliding", code="A", source="GEN-PRESSURE"))
+def test_door_data_is_not_used_by_the_pressure_method(ka):
+    """D-028: a door entered in the input does not change any offset: the method uses the envelope only."""
+    with_door = copy.deepcopy(ka["data"])
+    room = next(r for r in with_door["rooms"] if r["number"] == "ROOM")
+    room["pressure"]["doors"] = [dict(id="D3", to="ANTE", kind="sliding sealed door", seal="sliding", code="A", source="GEN-PRESSURE")]
     base = {r["number"]: r["pressure"]["offset_needed_m3h"] for r in recompute(ka["data"])["rooms"]}
-    dup = {r["number"]: r["pressure"]["offset_needed_m3h"] for r in recompute(twice)["rooms"]}
-    assert dup == pytest.approx(base)
+    assert base["ANTE"] == pytest.approx(45.7, abs=0.2) and base["ROOM"] == pytest.approx(163.5, abs=0.2) and base["ENSUITE"] == pytest.approx(68.7, abs=0.2)
 
 
 def test_coil_duty_on_the_example_basis_is_rev_a():
@@ -196,10 +197,10 @@ def test_live_assumption_flags_are_grouped_and_not_garbled():
     assert any(t.startswith("Envelope segment Z1-N") for t in texts)
 
 
-def test_one_assumption_flag_per_door_and_no_rev_a_label_on_the_known_answer_workbook(ka):
+def test_no_door_flag_and_no_rev_a_label_on_the_known_answer_workbook(ka):
     wb = openpyxl.load_workbook(ka["path"], data_only=True)
     refs = [r[2] for r in wb["Flags"].iter_rows(min_row=7, values_only=True) if r[0] and str(r[2]).startswith("Pressure!")]
-    assert refs and len(refs) == len(set(refs))
+    assert not refs                                                  # D-028: no door, so no door assumption flag
     assert not (wb.properties.creator or "")
     assert not any("Beca" in str(c) or "Rev A example" in str(c) for r in wb["README"].iter_rows(values_only=True) for c in r)
     assert ka["data"]["project"]["revision"]["date"] != "2026-10-01"

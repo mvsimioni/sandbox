@@ -77,7 +77,7 @@ def build_units(rooms: Dict[str, List[dict]]) -> Dict[str, dict]:
     return units
 
 
-from ..workbook.tag_notes import cath_tag_note  # noqa: E402
+from ..workbook.tag_notes import cath_tag_note, unit_note  # noqa: E402
 
 
 def plant_level(tag: str) -> str:
@@ -149,10 +149,10 @@ README = [
     ("Plant level comes from the tag (AHU-B-<plant level>-<served level><name>-<no.>). It is checked against Equipment Schedule (Corr 5). Basement tags take the level from the schedule.", ""),
     ("If neither source has a figure, the cell is blank and the source column gives the reason.", ""),
     ("The Calculated airflow column holds the supply airflow in L/s from AHU_master_summary.xlsx (tab AHU Master): the room supply of the department workbooks that carry rooms on the unit, plus the duct leakage. The Calculated airflow source ID column points to the Sources sheet, which names the master row and the department workbooks. The values are numbers: they do not update when a workbook changes.", ""),
-    ("Reduction (L/s) = Tender airflow minus Calculated airflow. Reduction (%) = Reduction divided by Tender airflow. Both are formulas and stay blank where the tender airflow or the calculated airflow is blank, or where the room list of the unit is partial.", ""),
-    ("Room list of the unit: the department workbooks add up only the rooms that they hold. The cell reads 'No criteria row for n of m rooms on this unit' when the rooms with no criteria row hold more than 0.1 of the counted area: the calculated airflow is not known and no reduction is stated. It reads 'partial:' with the two areas and the two room counts when the zoned area of the unit is 0 m², or when the counted area is less than the share 0.9 of the zoned area of the unit, or more than 1 divided by 0.9 of it, or when the rooms that have a criteria row and a supply airflow hold less than the share 0.9 of the counted area. A unit with such a cell shows no reduction. Its Remarks cell states the tender and the calculated airflow of the counted rooms only. A unit that the zone schedule gives 2 rooms or fewer and that shows a reduction is marked in its Remarks cell as not confirmed (OI-R206-1, open for Marcus); the reduction is kept as the rule gives it.", ""),
-    ("Tender outdoor airflow is the outdoor airflow of the same schedule row (Outdoor Airflow / Min), or of the tender air-side schematic where the schedule has none. Calculated outdoor air is the outdoor air of the unit in AHU_master_summary.xlsx. Where the calculated outdoor air is above the tender outdoor air, the Remarks cell says VERIFY and the unit shows no reduction. Both columns are blank where no figure exists.", ""),
-    ("The calculated airflow and the reduction include occupants only. Lighting, small power, equipment and envelope gains are not included. A reduction that is stated is therefore an upper limit.", ""),
+    ("Reduction (L/s) = Tender airflow minus Calculated airflow. Reduction (%) = Reduction divided by Tender airflow. Both are formulas. They show a value only where the calculated airflow is below the tender airflow and the room list of the unit is complete. Otherwise they are blank and the Remarks cell says nothing about a reduction.", ""),
+    ("Room list of the unit: the department workbooks add up only the rooms that they hold. The cell reads 'Complete' or 'Not complete' and states 'n of m zoned rooms counted'. A unit is complete when the rooms counted with a criteria row and a supply airflow are at least as many as the rooms that this schedule gives the unit, no counted room lacks a criteria row, and the counted area is at least the share 0.9 of the zoned area of the unit. A unit with a zoned area of 0 m² is not complete. A unit that the zone schedule gives 2 rooms or fewer and that shows a reduction is marked in its Remarks cell as not confirmed (OI-R206-1, open for Marcus); the reduction is kept as the rule gives it.", ""),
+    ("Tender outdoor airflow is the outdoor airflow of the same schedule row (Outdoor Airflow / Min), or of the tender air-side schematic where the schedule has none. Calculated outdoor air is the outdoor air of the unit in AHU_master_summary.xlsx. Where the calculated outdoor air is above the tender outdoor air, the Remarks cell says VERIFY and the reduction cells of the unit stay blank. A calculated airflow above the tender airflow also gets VERIFY, whatever the state of the room list. Both columns are blank where no figure exists.", ""),
+    ("The calculated airflow includes people, lighting and small power. Lighting and small power are ASHRAE values where no project document gives them. Equipment gain is not included and envelope gain is not assessed. A reduction that is stated is therefore an upper limit.", ""),
     ("The Remarks cell is a formula. It states the tender airflow, the calculated airflow and the change. If the calculated airflow is more than the tender airflow, the Remarks cell starts with VERIFY.", ""),
     ("Schematic and schedule airflows are for comparison only. They do not set the zone.", ""),
     ("Units that are in AHU_master_summary.xlsx and not on the zoning drawing are listed after the zoned units. Their Departments, Storeys and Rooms come from the master summary.", ""),
@@ -168,9 +168,16 @@ def oa_above_f(i: int) -> str:
     return f"AND(ISNUMBER(T{i}),ISNUMBER(U{i}),U{i}>T{i})"
 
 
+def incomplete_f(i: int) -> str:
+    """Excel boolean: the room list of the unit (column S) is not complete, or not known (D-027)."""
+    return f'OR(S{i}="",ISNUMBER(SEARCH("Not complete",S{i})))'
+
+
 def red_formula(i: int, zoned: bool = False) -> str:
-    z = ('G%d=0,' % i) if zoned else ""
-    return '=IF(OR(I%d="",K%d="",S%d<>"",%s%s),"",I%d-K%d)' % (i, i, i, z, oa_above_f(i), i, i)
+    """Reduction (L/s): stated only where the calculated airflow is below tender, the room list of the unit is complete and the outdoor air is not above the tender outdoor
+    airflow. A unit with a zoned area of 0 m² is not complete (open for Marcus)."""
+    parts = ['I%d=""' % i, 'K%d=""' % i, incomplete_f(i)] + (['G%d=0' % i] if zoned else []) + [oa_above_f(i), 'K%d>=I%d' % (i, i)]
+    return '=IF(OR(%s),"",I%d-K%d)' % (",".join(parts), i, i)
 
 
 def redp_formula(i: int) -> str:
@@ -178,28 +185,28 @@ def redp_formula(i: int) -> str:
 
 
 NO_POLYGON_NOTE = ("No zone polygon: the room tags of this unit lie in an open region that has no closed outline, so the zoned area is 0 m² and the unit is not drawn "
-                   "on the zoning PDF. No reduction is stated. ")
+                   "on the zoning PDF. ")
 
 
-def remarks_formula(i: int, zoned: bool = False, on_drawing: bool = True) -> str:
-    """Remarks of the AHU summary. A reduction is worded only when the room list of the unit is complete and the outdoor air is not above the tender outdoor airflow
-    (R1-10: VERIFY on every unit). 'The reduction is an upper limit.' stands on a text that states a reduction and on no other (round 3). A unit that the zone schedule
-    gives 2 rooms or fewer is marked as not confirmed (OI-R206-1, open for Marcus)."""
+def remarks_formula(i: int, zoned: bool = False, on_drawing: bool = True, note: str = None) -> str:
+    """Remarks of the AHU summary (D-027). The text states VERIFY where the calculated airflow is above tender and where the calculated outdoor air is above the tender outdoor
+    airflow (every unit, whatever the state of the room list). It states a reduction only where the calculated airflow is below tender and the room list of the unit is
+    complete. In every other case it says nothing about a reduction. 'The reduction is an upper limit.' stands on a text that states a reduction and on no other.
+    A unit that the zone schedule gives 2 rooms or fewer is marked as not confirmed (open for Marcus). `note` is a fixed note that the documents print for the unit."""
     oa = ('IF({oa},"Outdoor air "&TEXT(U{r},"#,##0")&" L/s is above tender outdoor air "&TEXT(T{r},"#,##0")&" L/s ("&J{r}&"). VERIFY. ","")').format(oa=oa_above_f(i), r=i)
-    sn = '&" ' + THERMAL_NOTE_SHORT + '"'
     small = ('IF(AND(ISNUMBER(F{r}),F{r}>0,F{r}<=2)," Interim, open for Marcus (OI-R206-1): the zone schedule gives this unit "&F{r}&IF(F{r}=1," room"," rooms")&" ("&TEXT(G{r},"#,##0")&" m²). '
              'The reduction may come from an incomplete room list. It is not a confirmed result.","")').format(r=i)
     if not on_drawing:
         small = '""'
-    f = ('=IF(I{r}="",J{r}&"."' + sn + ',IF(K{r}="","Tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). Calculated airflow not available. "&' + oa + sn + ',' 
-         'IF(K{r}>I{r},"VERIFY: increase from "&TEXT(I{r},"#,##0")&" to "&TEXT(K{r},"#,##0")&" L/s (+"&TEXT((K{r}-I{r})/I{r},"0.0 %")&") against tender ("&J{r}&"). "&' + oa + sn + ',' 
-         'IF(ISNUMBER(SEARCH("no criteria row for",S{r})),S{r}&". The calculated airflow is not known. No reduction is stated. Tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). "&' + oa + sn + ',' 
-         'IF(S{r}<>"",S{r}&". Tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). Calculated for the counted rooms: "&TEXT(K{r},"#,##0")&" L/s. No reduction is stated until the room list of the unit is complete. "&' + oa + sn + ',' 
-         'IF(' + oa_above_f(i) + ',"Supply "&TEXT(K{r},"#,##0")&" L/s against tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). "&' + oa + '&"No reduction is stated for this unit until the outdoor air is checked."' + sn + ',' 
-         '"Reduced "&TEXT(I{r},"#,##0")&" to "&TEXT(K{r},"#,##0")&" L/s (−"&TEXT((I{r}-K{r})/I{r},"0.0 %")&") against tender ("&J{r}&")."&' + small + '&" ' + THERMAL_NOTE + '"))))))').format(r=i)
+    f = ('IF(I{r}="",J{r}&IF(ISNUMBER(SEARCH(".",J{r},LEN(J{r}))),"","."),IF(K{r}="","Tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). Calculated airflow not available. ",'
+         'IF(K{r}>I{r},"VERIFY: increase from "&TEXT(I{r},"#,##0")&" to "&TEXT(K{r},"#,##0")&" L/s (+"&TEXT((K{r}-I{r})/I{r},"0.0 %")&") against tender ("&J{r}&"). "&' + oa + ','
+         'IF(' + oa_above_f(i) + ',"Supply "&TEXT(K{r},"#,##0")&" L/s against tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). "&' + oa + ','
+         'IF(AND(ISNUMBER(L{r}),NOT(' + incomplete_f(i) + ')),"Reduced "&TEXT(I{r},"#,##0")&" to "&TEXT(K{r},"#,##0")&" L/s (−"&TEXT((I{r}-K{r})/I{r},"0.0 %")&") against tender ("&J{r}&")."&' + small + '&" ' + THERMAL_NOTE + '","")))))').format(r=i)
     if zoned:
-        f = '=IF(G%d=0,"%s","")&' % (i, NO_POLYGON_NOTE) + f[1:]
-    return f
+        f = 'IF(G%d=0,"%s","")&' % (i, NO_POLYGON_NOTE) + f
+    if note:
+        f = 'IF(LEN(%s)=0,"%s",%s&" %s")' % (f, note.replace('"', '""'), f, note.replace('"', '""'))
+    return "=" + f
 
 
 def build_xlsx(storeys: List[str], out: Path) -> dict:
@@ -259,7 +266,7 @@ def build_xlsx(storeys: List[str], out: Path) -> dict:
         typ = re.match(r"^([A-Z]+)", tags[0]).group(1)
         row = [u["tag"], typ, "; ".join(sorted(u["depts"])) or "no information", ", ".join(u["storeys"]), plant_level(tags[0]), u["n"], round(u["area"], 1), u["conf"],
                val, src, None,
-               red_formula(i, True), redp_formula(i), remarks_formula(i, True),
+               red_formula(i, True), redp_formula(i), remarks_formula(i, True, note=next((unit_note(t) for t in tags if unit_note(t)), None)),
                "D" if val is not None else None, None, None, None, None, None, None]
         styles_ = ["Tag", "Text", "TextWrap", "Text", "TextWrap", "Calc", "Calc", "Calc", "Input", "TextWrap", "Input", "Calc", "Calc", "Remark", "Code", "Tag", "Calc", "Calc", "TextWrap", "Input", "Calc"]
         for j, v in enumerate(row, 1):
@@ -531,7 +538,7 @@ def check_fill(schedule: Path = None, master: Path = None) -> dict:
         return res
     mw = openpyxl.load_workbook(master, data_only=True)["AHU Master"]
     mh = {str(c.value): i for i, c in enumerate(mw[5])}
-    m_calc = {str(r[0]): r[mh["Calculated airflow"]] for r in mw.iter_rows(min_row=7, values_only=True) if r[0] and r[0] != "TOTAL"}
+    m_calc = {str(r[0]): r[mh["Calculated airflow"]] for r in mw.iter_rows(min_row=7, values_only=True) if r[0] and not str(r[0]).startswith("TOTAL")}
     wb = openpyxl.load_workbook(schedule, data_only=True)
     sm = wb["AHU summary"]
     heads = [c.value for c in sm[1]]
@@ -547,7 +554,7 @@ def check_fill(schedule: Path = None, master: Path = None) -> dict:
     if "Sources" not in wb.sheetnames:
         res["problems"].append("the Sources sheet is missing")
     ti = heads.index("Tender airflow (L/s)")
-    m_ten = {str(r[0]): r[mh["Tender airflow"]] for r in mw.iter_rows(min_row=7, values_only=True) if r[0] and r[0] != "TOTAL"}
+    m_ten = {str(r[0]): r[mh["Tender airflow"]] for r in mw.iter_rows(min_row=7, values_only=True) if r[0] and not str(r[0]).startswith("TOTAL")}
     diff = [str(r[0]) for r in rows if str(r[0]) in m_ten and (r[ti] if r[ti] is not None else None) != (m_ten[str(r[0])] if m_ten[str(r[0])] is not None else None)]
     res["tender_differences"] = diff
     if diff:

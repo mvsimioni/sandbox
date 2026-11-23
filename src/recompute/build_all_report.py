@@ -77,9 +77,9 @@ def main() -> int:
             notes.append(f"D{k} FAIL: {'; '.join(f['fail'])}")
     w("")
     w("The check results come from the recalculated workbook (Checks tab). The status of every workbook is FAIL while an acceptance item is open (brief 8.6, limit 0, no tolerance): "
-      "rooms with neither an AHU nor a system class, supply of such rooms, rooms with no area, no ceiling height or no criteria row, and pressure targets with no Flags row. "
-      "VERIFY checks are findings to review: area disagreement, rooms classed MV, NV or no information, pressure targets with no door data (listed on Flags). "
-      "The README of each workbook shows the calculation checks, the acceptance state, the share of rooms with a unit, of supply on a unit and of rooms with a criteria row, and the thermal load case (occupants only). "
+      "rooms with neither an AHU nor a system class, supply of such rooms, rooms with no area, no ceiling height or no criteria row, and pressure targets with no Pressure row. "
+      "VERIFY checks are findings to review: area disagreement, rooms classed MV, NV or no information, rooms with an assumed perimeter on Pressure (listed on Flags). "
+      "The README of each workbook shows the calculation checks, the acceptance state, the share of rooms with a unit, of supply on a unit and of rooms with a criteria row, and the thermal load case (people, lighting and small power; equipment 0; envelope not assessed). "
       "Error values, typed numbers in formulas, unlisted functions and forbidden terms or internal references: 0 in every workbook (`python3 -m src.workbook check`).\n")
     if notes:
         w("\n".join(f"- {n}" for n in notes))
@@ -95,12 +95,15 @@ def main() -> int:
     w(f"- Departments with values outside: {', '.join(f'D{k} ({n})' for k, n in sorted(by_dept.items()))}.")
     w("")
     w("The outdoor air that a booklet gives per m2 (data-centre rooms) is a floor of the room supply in both engines. Each value outside tolerance with no cause named above has no explanation yet and is listed in `out/qa/recompute_comparison.csv`.\n")
-    w("The two causes are differences of rule between the two engines, not of arithmetic. Neither is changed silently:\n")
+    w("The causes are differences of rule between the two engines, not of arithmetic. None is changed silently:\n")
     w("1. Exhaust without a pressure offset. The airflow rule says supply is not less than the exhaust and pressure regime require. The workbook raises supply from the exhaust only for a room with a calculated offset (Pressure tab). "
       "The recomputation also takes supply not below the exhaust for a negative-regime room that has no pressure value. For toilets and change rooms with a required exhaust of 80 to 490 L/s and no AHU, the workbook gives supply 0 and the recomputation gives the exhaust. "
       "The workbook reading keeps a toilet exhaust-only. Marcus to decide (proposed decision: a negative-regime room with no pressure value takes no supply floor from its exhaust).")
     w("2. Area test at the tolerance edge. The workbook compares the design area and the measured area after taking each to 0.1 m2; the recomputation compares them unrounded. D22 AMSC 02.05.03 (design 10.22 m2, measured 9.709 m2, difference 0.511 m2 unrounded, 0.5 m2 rounded) is the case. "
       "The brief says to take areas to 0.1 m2 first, so the workbook reading follows the brief; the recomputation reproduces the workbook value when it rounds first.")
+    w("3. Room with a pressure offset (D-028 gives every room with a pressure target a Pressure row, so this rule difference now shows). The workbook exhausts the required exhaust and, for a negative room, the offset air, and returns the rest of the extract to the AHU. "
+      "The recomputation exhausts the whole extract (supply plus offset for a negative room, supply minus offset for a positive room) and takes the outdoor air as the supply. Only the outdoor air of these rooms (and of their AHU) differs; supply and loads agree. "
+      "Neither engine is changed before Marcus rules (OI-R401-1, same precedent as OI-13-1).")
     w("\nOne defect of the recomputation was corrected: it rounded areas with Python `round`, which takes 10.25 to 10.2, where the spreadsheet takes 10.3 (D04 ICHA 12.07.03). It now rounds halves away from zero (`_round_half_up` in `src/recompute/thermal.py`). "
       "A room with no area (design area 0, no SOA, no measured area) is taken as 0 m2 in the comparison, as in the workbook; people-based loads stay (D11, D29, D31, D39, D45).\n")
     w("## 5. AHU master summary and Calculated airflow\n")

@@ -85,7 +85,7 @@ def test_every_tab_present_and_print_setup(reva):
 
 def test_named_constants_exist(reva):
     wb = openpyxl.load_workbook(reva["path"])
-    for n in ["SafetyFactor", "DuctLeakage", "SupplyTemp", "AirtightLimit", "FlowN", "DoorCd", "OAShare", "OADrop", "SpaceTypeName"]:
+    for n in ["SafetyFactor", "DuctLeakage", "SupplyTemp", "AirtightLimit", "FlowN", "PerimFactor", "OAShare", "OADrop", "SpaceTypeName"]:
         assert n in wb.defined_names, n
 
 

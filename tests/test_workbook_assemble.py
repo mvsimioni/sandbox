@@ -117,10 +117,14 @@ def test_criteria_variants_listed_and_unmapped_listed(fake_root):
     d = assemble_department("77", None, fake_root)
     store = d["rooms"][1]
     assert store["criteria"]["min_total_ach"] == 4 and "more than once" in store["gaps"]["criteria"]
-    assert d["rooms"][2]["criteria"] == {} and "No booklet room type" in d["rooms"][2]["gaps"]["criteria"]
+    assert d["rooms"][2]["criteria"] == {} and "No criteria row" in d["rooms"][2]["gaps"]["criteria"]
     assert store["criteria"]["pressure_pa_booklet"] == -5
-    assert "pressure" not in store                                                      # no door data: not calculated
-    assert "no document gives door data" in store["gaps"]["door"]
+    assert store["pressure"]["mode"] == "controlled" and store["pressure"]["doors"] == []        # D-028: calculated from the internal surface, no door data
+    assert store["pressure"]["perimeter_m"] == 12.0 and store["pressure"]["prov"][0] == "M"          # the perimeter of the linked measured plan room
+    assert "door" not in store["gaps"] and "perimeter" not in store["gaps"]
+    # a room with a pressure target that no plan room measures: perimeter = 4 x square root of the area, assumed (code A) and flagged
+    others = [r for r in d["rooms"] if r.get("pressure") and r["pressure"].get("perimeter_rule") == "factor"]
+    assert all(r["gaps"].get("perimeter") and r["pressure"]["perimeter_m"] is None and r["pressure"]["prov"][0] == "A" for r in others)
 
 
 def test_occupancy_rds_zero_kept_and_default_density_elsewhere(fake_root):

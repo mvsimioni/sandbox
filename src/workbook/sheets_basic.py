@@ -28,14 +28,16 @@ LISTS = OrderedDict([
     ("ListFlagStatus", ["OPEN", "CLOSED", "ACCEPTED"]),
     ("ListOACond", ["TREATED", "UNTREATED"]),
 ])
+DOOR_CONSTANTS = {"DoorCd", "GapSides", "GapBottom", "GapHinged", "GapSliding", "GapBedWidth", "GapShaft", "SecPerHour", "CM2perM2"}
 PRESSURE_METHOD = (
-    "Project method for rooms with a pressure target. Envelope leakage at a pressure difference: Q = limit × internal surface × (ΔP ÷ 50)^n. "
-    "The whole envelope leaks to the reference space. The reference space is the corridor outside the suite at 0 Pa, unless the documents name another. "
-    "Door gaps: Q = 0.6 × A × √(2 ΔP ÷ 1.2) × 3600. Air flows from the higher to the lower pressure. "
-    "For each space: supply + air in = exhaust + air out. "
-    "Offset needed for a negative room (extra exhaust) = air in − air out. Offset needed for a positive room (extra supply) = air out − air in. "
-    "Design offset = limit × surface at the reference pressure (the top of the control valve's range). "
+    "Pressure method for every room with a pressure target in Pa. The whole envelope complies with the airtightness limit of 2.5 m³/h per m² of internal surface at 50 Pa. "
+    "Internal surface = 2 × floor area + perimeter × ceiling height. Doors and windows are part of the surface. Door gaps are not modelled. "
+    "Envelope leakage at the set pressure: Q = limit × internal surface × (ΔP ÷ 50)^n, with n = 0.65. The sensitivity cases use n = 0.50 and n = 0.75. "
+    "The reference space is the corridor outside the room at 0 Pa. Air flows from the higher to the lower pressure. "
+    "Offset needed for a negative room (extra exhaust) = envelope leakage in at the set pressure. Offset needed for a positive room (extra supply) = envelope leakage out at the set pressure. "
+    "Design offset = 2.5 × internal surface (the limit at the reference pressure). "
     "Ratio = design offset ÷ offset needed. A ratio below 1.0 is a fail. A ratio from 1.0 to 1.2 is VERIFY. "
+    "The perimeter comes from the measured plan room where the room is linked to one. Otherwise the perimeter is 4 × √area, assumed (code A) and flagged. "
     "A cited document gives each stated value. The engineer sets the other values (code S).")
 
 
@@ -101,7 +103,7 @@ def write_basis(ctx: Ctx) -> None:
         r += 1
         for nm in names:
             c = ctx.constants.get(nm)
-            if c is None:
+            if c is None or (nm in DOOR_CONSTANTS and not ctx.pl_links):       # door gaps are not modelled: their constants are defined only when a path table exists
                 continue
             v = c.get("value")
             code, src = c.get("code", "S"), c.get("source", "")
@@ -205,10 +207,18 @@ def write_basis(ctx: Ctx) -> None:
              "No change of method has been approved.",
              "Tender airflow (Equipment Schedule Corr 5; for the MOT NSC units the MOT NSC Overall AC Equipment Schedule Corr 2; else the tender air-side schematic) is information only. It is never a target or a limit. "
              "Reduction = tender − calculated. Reduction (%) = (tender − calculated) ÷ tender. A calculated airflow above tender is marked VERIFY. "
-             "A unit shows a reduction only when the rooms counted here reach the share ZoneCoverMin of the area that the zone schedule gives for the unit. "
-             "Otherwise the Remarks cell names the cause ('No criteria row for n of m rooms', or 'partial:' with the two areas and the two room counts) and the reduction cells stay blank. A unit whose outdoor air is above its tender outdoor airflow is marked VERIFY and shows no reduction. The other departments on the unit are counted on the AHU master summary.",
+             "A unit states a reduction only where the calculated airflow is below tender and the room list of the unit is complete. The room list is complete when the counted rooms "
+             "with a criteria row and a supply airflow are at least as many as the rooms that the zone schedule gives the unit, no counted room lacks a criteria row, and the counted area is "
+             "at least the share ZoneCoverMin of the zoned area. The Room list column gives 'n of m zoned rooms counted'. In every other case the Remarks cell says nothing about a reduction. "
+             "A calculated airflow above tender, and a calculated outdoor air above the tender outdoor airflow, are marked VERIFY on every unit. The other departments on the unit are counted on the AHU master summary.",
              "Occupancy comes from the RDS. The default density by room use applies only where the RDS field is empty or the room has no RDS. "
              "It is rounded up to a whole person (red text, code A).",
+             "Lighting and small power (plug load) come from a project document where one gives them. No project document does, so the ASHRAE value for the room use applies "
+             "(plug load: ASHRAE Handbook, Fundamentals, plug-load densities; lighting: ASHRAE 90.1 space-by-space lighting power density). The cells are red text (code A) and the Remarks column "
+             "gives the value and the room use. Equipment gain is 0 W: no equipment list is in the scope, and the rooms led by equipment have a VERIFY flag. Envelope gain is not assessed. It is not zero.",
+             "A room with no criteria row in its own department takes the row of the same space in the closest other department (same room type code, then same name, then same use class; "
+             "clinical rooms prefer clinical departments). The cells are italic green (code A). The booklet and the page of the row stay as the source, and the Remarks column says 'Presumed criteria'. "
+             "A room that no other department covers has no criteria row and is listed on Flags with the reason.",
              "Area used (selector AUTO, the default): the design area is the DPA designed area, else the SOA area. "
              "It is used where no area is measured, or where the measured area agrees with it within the tolerance (named cells AreaTolPct and AreaTolM2). "
              "The measured area is used where the two disagree. A measured area comes only from a plan room that matches the room by name, storey and grid span. "
@@ -255,7 +265,8 @@ def write_basis_tail(ctx: Ctx) -> None:
         put(ws, f"C{r}", f'=COUNTIFS({FL.rng("type")},"{typ}",{FL.rng("status")},"OPEN")', "Link", "d0")
         r += 1
     for k in list(ctx.data.get("key_flags", [])) + ["Envelope gain is not assessed (no Envelope rows). It is not zero.",
-                                                     "Thermal load case: occupants only. Lighting, small power and equipment gains are not included, because no approved value is available."]:
+                                                     "Thermal load case: people, lighting and small power. Lighting and small power are ASHRAE values where no project document gives one (red cells). "
+                                                     "Equipment gain is 0 W and is not included. The thermal-load airflow is a lower limit."]:
         put(ws, f"B{r}", k, "TextWrap")
         ws.merge_cells(f"B{r}:G{r}")
         ws.row_dimensions[r].height = 15 * (1 + len(k) // 150)
@@ -398,6 +409,11 @@ def build_flag_rows(ctx: Ctx) -> List[Dict[str, Any]]:
         if blank(r.get("ceiling_height_m")):
             add(type="CONFIRM", ref=n, desc=f"{who}: ceiling height is not set. Volume and air-change airflow are zero until it is given.{note('height')}",
                 status="OPEN", owner="ACMV engineer", src="", link=("Room Information", RI.local("h", gi)))
+        if gaps.get("loads"):
+            add(type="VERIFY", ref=n, desc=f"{who}: {gaps['loads']}", status="OPEN", owner="ACMV engineer", src="", link=("Room Information", RI.local("light", gi)))
+        if gaps.get("perimeter"):
+            add(type="ASSUMPTION", ref=n, desc=f"{who}: {gaps['perimeter']}", status="OPEN", owner="ACMV engineer", src="GEN-PRESSURE",
+                link=("Pressure", ctx.lay["PS"].local("perim", ctx.ps_index[n]["index"]) if n in ctx.ps_index else "A1"))
         if gaps.get("equipment"):
             add(type="VERIFY", ref=n, desc=f"{who}: {gaps['equipment']}", status="OPEN", owner="ACMV engineer", src="", link=("Room Information", RI.local("eqs", gi)))
         if gaps.get("occupancy"):
@@ -443,7 +459,9 @@ def build_flag_rows(ctx: Ctx) -> List[Dict[str, Any]]:
                              status="OPEN", owner="ACMV engineer", src=key[1], link=("Criteria", items[0]["cell"])))
             continue
         sheet, room = key
-        what = ", ".join(f"{a['label'].replace('room ', '')} {a['value']}" for a in items)
+        nice = {"lighting_w_m2": "lighting (W/m²)", "small_power_w_m2": "plug load (W/m²)", "occupancy_per_100m2": "occupant density (persons per 100 m²)",
+                "equipment_sensible_w": "equipment, sensible (W)", "equipment_latent_w": "equipment, latent (W)"}
+        what = ", ".join(f"{nice.get(a['label'].replace('room ', ''), a['label'].replace('room ', '').replace('_', ' '))} {a['value']}" for a in items)
         who = f"Envelope segment {room}" if sheet == "Envelope" else f"Room {room}"
         rows.append(dict(type="ASSUMPTION", ref=f"{sheet}!{room}", desc=f"{who}: assumed inputs, to confirm: {what}.",
                          status="OPEN", owner="ACMV engineer", src=items[0].get("src", ""), link=(sheet, items[0]["cell"])))
@@ -514,14 +532,14 @@ def write_flags(ctx: Ctx, rows: List[Dict[str, Any]]) -> None:
     for q in range(ctx.n_live_oa):
         i = len(rows) + ctx.n_live + q
         g = lambda k: L.local(k, i)
-        m = f"MATCH({q + 1},{AH.rng('oaflg')},0)"
+        m = f"MATCH(ROWS($A${L.row(len(rows) + ctx.n_live)}:$A{L.row(i)}),{AH.rng('oaflg')},0)"
         used = f"ISNUMBER({m})"
         pk = lambda k: f"INDEX({AH.rng(k)},{m})"
         put(ws, g("id"), f'=IF({used},"F-"&TEXT(ROWS($A${L.first}:$A{L.row(i)}),"000"),"")', "Tag")
         put(ws, g("type"), f'=IF({used},"VERIFY","")', "Text")
         put(ws, g("ref"), f'=IF({used},{pk("ahu")},"")', "Tag")
         put(ws, g("desc"), (f'=IF({used},"AHU "&{pk("ahu")}&": outdoor air "&TEXT({pk("oa_rule")},"#,##0")&" L/s is above tender outdoor air "&TEXT({pk("sched_oa")},"#,##0")'
-                            f'&" L/s ("&IF({pk("tsrc")}="","tender airflow",{pk("tsrc")})&"). VERIFY. No reduction is stated for this unit. The tender airflow is information only.","")'), "TextWrap")
+                            f'&" L/s ("&IF({pk("tsrc")}="","tender airflow",{pk("tsrc")})&"). VERIFY. The tender airflow is information only.","")'), "TextWrap")
         put(ws, g("status"), f'=IF({used},"OPEN","")', "Text")
         put(ws, g("owner"), f'=IF({used},"ACMV engineer","")', "Text")
         put(ws, g("src"), None, "Tag")
@@ -614,9 +632,7 @@ def write_checks(ctx: Ctx) -> None:
         ("Rooms with an AHU whose outdoor air is below the air-change minimum", f"=SUMPRODUCT(--({AF.rng('oa')}<{AF.rng('oa_air')}),--({AF.rng('supply')}>0),--({AF.rng('ahu')}<>\"\"))", 0, '=IF(C{r}=0,"PASS","FAIL")', "rooms with no AHU are counted in the check on rooms with no AHU; an exhaust-only room has no supply and takes transfer air"),
         ("Rooms whose outdoor-air requirement is above their supply", f"=SUMPRODUCT(--({AF.rng('oa_air')}>{AF.rng('supply')}),--({AF.rng('supply')}>0))", 0, '=IF(C{r}=0,"PASS","VERIFY")', "outdoor air is capped at supply; transfer air makes up the rest"),
         ("Rooms with a pressure target in Pa and no row on Pressure", f'=SUMPRODUCT(--ISNUMBER({CR.rng("pa")}),--(COUNTIF({PS.rng("node")},{RI.rng("no")})=0))', 0,
-         ('=IF(C{r}=0,"PASS",IF(SUMPRODUCT(--ISNUMBER(' + CR.rng("pa") + '),--(COUNTIF(' + PS.rng("node") + ',' + RI.rng("no") + ')=0),--(COUNTIFS(' + FL.rng("ref") + ',' + RI.rng("no") +
-          ',' + FL.rng("desc") + ',"*door data*")=0))>0,"FAIL","VERIFY"))'),
-         "no document gives the door data: the offset of these rooms is not calculated. FAIL if a room has no Flags row with the reason"),
+         '=IF(C{r}=0,"PASS","FAIL")', "every room with a pressure target in Pa is calculated from its internal surface"),
         ("Rooms fixed by the MOT specification", f"=SUM({AF.rng('fix')})", "information", '="INFO"', "rooms with specified airflows"),
         ("Specified (MOT) rooms where the calculation needs more supply than specified", f'=COUNTIF({AF.rng("ok")},"SPECIFIED")', 0,
          '=IF(C{r}=0,"PASS","VERIFY")', "specified airflows are not resized; listed for the MOT engineer"),
@@ -655,11 +671,16 @@ def write_checks(ctx: Ctx) -> None:
         ("AHUs whose scheduled supply is below the calculated AHU supply", f'=SUMPRODUCT(({AH.rng("sched")}<>"")*({AH.rng("sched")}<{AH.rng("sa_ahu")}))', 0,
          '=IF(C{r}=0,"PASS","VERIFY")', ""),
         ("AHUs whose outdoor air is above the tender outdoor airflow", (f'=SUMPRODUCT(--ISNUMBER({AH.rng("sched_oa")}),--({AH.rng("oa_rule")}>{AH.rng("sched_oa")}))' if ctx.ahus else "=0"), 0,
-         '=IF(C{r}=0,"PASS","VERIFY")', "VERIFY, not FAIL: tender airflow is information only; no reduction is stated for these units"),
-        ("AHUs whose room list is partial against the zone schedule", f'=COUNTIF({AH.rng("cov")},"partial*")' if ctx.ahus else "=0", "information", '="INFO"',
-         "units with no reduction shown; the zoned rooms and area are on the AHU tab"),
-        ("AHUs with no criteria row for most of their rooms", f'=COUNTIF({AH.rng("cov")},"No criteria row*")' if ctx.ahus else "=0", "information", '="INFO"',
-         "units whose calculated airflow is not known; no reduction is stated for them"),
+         '=IF(C{r}=0,"PASS","VERIFY")', "VERIFY, not FAIL: tender airflow is information only"),
+        ("AHUs whose room list is not complete (not every zoned room is counted)", f'=COUNTIF({AH.rng("cov")},"Not complete*")' if ctx.ahus else "=0", "information", '="INFO"',
+         "the zoned rooms and the rooms counted are on the AHU tab"),
+        ("AHUs with a criteria gap (rooms with no criteria row)", f'=COUNTIF({AH.rng("cov")},"*no criteria row*")' if ctx.ahus else "=0", "information", '="INFO"',
+         "units whose calculated airflow does not yet cover every room"),
+        ("Rooms whose criteria are presumed from the same space in another department", f'=COUNTIF({CR.rng("remark")},"Presumed criteria*")', "information", '="INFO"',
+         "assumption, code A: listed on Flags"),
+        ("Rooms with lighting and small power assumed from ASHRAE", f'=COUNTIF({RI.rng("light_s")},"ASM-LIGHT")', "information", '="INFO"', "assumption, code A: red cells"),
+        ("Rooms with no lighting or small power value", f'=SUMPRODUCT(({RI.rng("no")}<>"")*(({RI.rng("light")}="")+({RI.rng("power")}="")>0))', 0, '=IF(C{r}=0,"PASS","VERIFY")',
+         "the room use is not mapped; listed on Flags"),
         ("Rooms linked to a room box of the tender air-side schematics", f'=COUNT({ctx.lay["CP"].rng("sch_s")})', "information", '="INFO"',
          "of the rooms on Room Information; the room boxes that match no room are on Flags"),
         ("Open flags", f'=COUNTIF({FL.rng("status")},"OPEN")', "information", '="INFO"', "see Flags"),
@@ -717,7 +738,7 @@ def write_checks(ctx: Ctx) -> None:
 def write_readme(ctx: Ctx) -> None:
     from openpyxl.styles import Border, Font, PatternFill
     from openpyxl.worksheet.pagebreak import Break
-    from .styles import FILL_FAIL, HAIR, OCC_NAME
+    from .styles import FILL_FAIL, HAIR, LOAD_NAME, OCC_NAME, PRES_NAME
     ws = ctx.wb["README"]
     d = ctx.data
     for col, w in zip("ABCDEFG", (2, 34, 58, 44, 16, 14, 14)):
@@ -753,8 +774,8 @@ def write_readme(ctx: Ctx) -> None:
                      ("Rooms with an AHU or a system class", f'={n_unit}&" of "&{n_rooms}&" ("&{pct(n_unit, n_rooms)}&")"'),
                      ("Room supply on an AHU", f'=TEXT({on_unit},"#,##0")&" of "&TEXT({tot_sup},"#,##0")&" L/s ("&{pct(on_unit, tot_sup)}&")"'),
                      ("Rooms with a criteria row", f'={n_crit}&" of "&{n_rooms}&" ("&{pct(n_crit, n_rooms)}&")"'),
-                     ("Rooms with a pressure target and no Pressure row", f'={ck("press")}&" (no door data, listed on Flags)"'),
-                     ("Thermal load case", '="OCCUPANTS ONLY: lighting, small power, equipment and envelope not included"'),
+                     ("Rooms with a pressure target and no Pressure row", f'={ck("press")}'),
+                     ("Thermal load case", '="PEOPLE, LIGHTING AND SMALL POWER (ASHRAE values where no project value). Equipment gain is not included. Envelope gain is not assessed."'),
                      ("Open flags", f'=COUNTIF({FL.rng("status")},"OPEN")'),
                      ("Rooms", f"=COUNTA({ctx.lay['RI'].rng('no')})")):
         put(ws, f"B{r}", label, "Text")
@@ -763,7 +784,7 @@ def write_readme(ctx: Ctx) -> None:
     r += 1
     put(ws, f"B{r}", "How to read this workbook", "Section")
     r += 1
-    for t in ("Inputs are on Room Information, Criteria, Envelope, Pressure (doors) and the system tabs. Each input has a code and a source ID that "
+    for t in ("Inputs are on Room Information, Criteria, Envelope and the system tabs. Each input has a code and a source ID that "
               "links to Sources. Results follow by formula. No value is pasted and no number is typed inside a formula.",
               "The Room Zones tab of each storey calculates the room loads. Airflow applies both cases to every room. Pressure "
               "calculates the offset of every room with a pressure target. AHU adds up the rooms of each AHU. Checks reconciles everything.",
@@ -793,6 +814,16 @@ def write_readme(ctx: Ctx) -> None:
             put(ws, f"D{r}", 12, OCC_NAME, "d0")
             put(ws, f"E{r}", "red text on light yellow", "Text")
             r += 1
+            put(ws, f"B{r}", f"A   {LOAD_NAME}", "Tag")
+            put(ws, f"C{r}", "Plug load or lighting from the ASHRAE value of the room use: no project document gives it", "Text")
+            put(ws, f"D{r}", 10, LOAD_NAME, "d1")
+            put(ws, f"E{r}", "red text on light yellow", "Text")
+            r += 1
+            put(ws, f"B{r}", f"A   {PRES_NAME}", "Tag")
+            put(ws, f"C{r}", "Criteria presumed from the same space in another department", "Text")
+            put(ws, f"D{r}", "Office", PRES_NAME)
+            put(ws, f"E{r}", "italic green text", "Text")
+            r += 1
         if code == "K":
             put(ws, f"B{r}", "K   Check, failed", "Tag")
             put(ws, f"C{r}", "A test that fails", "Text")
@@ -813,7 +844,7 @@ def write_readme(ctx: Ctx) -> None:
             ("Envelope", "Façade segments per room, summed on the Room Zones tab")]
     tabs += [(ctx.sheet_for(s), f"Room loads, {ctx.label(s)}") for s in ctx.storeys]
     tabs += [("Airflow", "Both airflow cases, governing case, exhaust, return, outdoor air, outdoor-air rule"),
-             ("Pressure", "Pressure-offset method, suites, sensitivities and the known-answer test"),
+             ("Pressure", "Pressure offset of every room with a pressure target, sensitivities and the known-answer test"),
              ("AHU", "Airflow totals, outdoor air, coil duty"), ("FCU", "Rooms on fan coil units, including separated rooms"),
              ("Fans", "Return, exhaust and outdoor-air fan duties"), ("VAV", "Terminals: maximum, minimum, turndown"),
              ("Venturi Valves", "Valve ranges from Pressure"), ("Flow Balance", "Air in against air out"),
@@ -827,7 +858,7 @@ def write_readme(ctx: Ctx) -> None:
     r += 1
     put(ws, f"B{r}", "Units and abbreviations", "Section")
     r += 1
-    for t in ("Units. Airflow: L/s on every tab, except the leakage and door flows on Pressure, which are in m³/h (each column header says so). "
+    for t in ("Units. Airflow: L/s on every tab, except the leakage flows on Pressure, which are in m³/h (each column header says so). "
               "Pressure: Pa. Area: m². Volume: m³. Temperature: °C. Enthalpy: kJ/kg. Heat gain and room load: W. AHU, coil and fan duty: kW "
               "(named cell WperkW converts W to kW).",
               "Abbreviations. ACH: air changes per hour. AHU: air handling unit. PAHU: pre-cooled air handling unit (the term of the Contract documents, as the RFI-ME-0233 memo states). "

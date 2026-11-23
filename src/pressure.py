@@ -913,55 +913,40 @@ ROOM_LARGE = internal_surface(3.97 * 4.83, 2.0 * (3.97 + 4.83), 3.0)
 
 
 def known_answer_anteroom() -> Suite:
-    """Case 4: the small room as an anteroom at -15 Pa between a corridor, a -30 Pa room and a shaft."""
-    return Suite(
-        "KA-4 anteroom",
-        [Space("ANTE", -15.0, ROOM_SMALL)],
-        [
-            Link("CORRIDOR", "ANTE", gap_area_m2=cm2_to_m2(15.0), kind="hinged sealed door"),
-            Link("SHAFT", "ANTE", fixed_flow_m3h=10.2, kind="sealed shaft door (fixed)"),
-            Link("ANTE", "ROOM30", gap_area_m2=cm2_to_m2(10.0), kind="sliding sealed door"),
-        ],
-        externals={"CORRIDOR": 0.0, "ROOM30": -30.0, "SHAFT": 0.0},
-    )
+    """Case 4 (D-028): the small room at -15 Pa. The envelope is the only air path."""
+    return Suite("KA-4 room at -15 Pa", [Space("ANTE", -15.0, ROOM_SMALL)], [], externals={})
 
 
 def known_answer_suite() -> Suite:
-    """Case 5: the large room at -30 Pa with its ensuite at -31 Pa, fed from the corridor and the anteroom."""
-    return Suite(
-        "KA-5 isolation suite",
-        [Space("ROOM", -30.0, ROOM_LARGE), Space("ENSUITE", -31.0, 37.5)],
-        [
-            Link("CORRIDOR", "ROOM", gap_area_m2=cm2_to_m2(20.0), kind="bed-width sealed door"),
-            Link("ANTE", "ROOM", gap_area_m2=cm2_to_m2(10.0), kind="sliding sealed door"),
-            Link("ROOM", "ENSUITE", gap_area_m2=cm2_to_m2(10.0), kind="sliding sealed door (internal)"),
-        ],
-        externals={"CORRIDOR": 0.0, "ANTE": -15.0},
-    )
+    """Cases 5 and 6 (D-028): the large room at -30 Pa and its ensuite at -31 Pa. The envelope is the only air path."""
+    return Suite("KA-5 room and ensuite", [Space("ROOM", -30.0, ROOM_LARGE), Space("ENSUITE", -31.0, 37.5)], [], externals={})
 
 
 def known_answer_cases() -> List[Tuple[str, str, float, float, float]]:
-    """``(group, label, computed, expected, tolerance)`` for every known-answer check."""
+    """``(group, label, computed, expected, tolerance)`` for every known-answer check (D-028: envelope only)."""
     cases: List[Tuple[str, str, float, float, float]] = []
     for pa, expected in ((5, 0.560), (15, 1.143), (25, 1.593), (50, 2.500), (70, 3.111)):
         cases.append(("1 limit conversion", f"{pa} Pa, m3/h per m2", limit_at(pa), expected, TOL_PER_M2))
     cases.append(("2 small room", "surface m2", ROOM_SMALL, 40.0, TOL_AREA))
     cases.append(("2 small room", "envelope at 50 Pa", envelope_leak(ROOM_SMALL, 50), 99.9, TOL_M3H))
     cases.append(("2 small room", "envelope at 15 Pa", envelope_leak(ROOM_SMALL, 15), 45.7, TOL_M3H))
-    for cm2, pa, expected in ((15, 15, 16.2), (10, 15, 10.8), (20, 30, 30.5)):
-        cases.append(("3 gaps", f"{cm2} cm2 at {pa} Pa", gap_flow(cm2_to_m2(cm2), pa), expected, TOL_M3H))
+    cases.append(("3 sensitivity", "15 Pa, n = 0.50", envelope_leak(ROOM_SMALL, 15, n=0.50), 54.7, TOL_M3H))
+    cases.append(("3 sensitivity", "15 Pa, n = 0.75", envelope_leak(ROOM_SMALL, 15, n=0.75), 40.5, TOL_M3H))
     ante = known_answer_anteroom().solve().space("ANTE")
-    cases.append(("4 anteroom -15 Pa", "offset needed", ante.offset_needed, 61.3, TOL_M3H))
-    cases.append(("4 anteroom -15 Pa", "design offset", ante.design_offset, 99.9, TOL_M3H))
-    cases.append(("4 anteroom -15 Pa", "ratio", ante.ratio or 0.0, 1.63, TOL_RATIO))
+    cases.append(("4 room -15 Pa", "offset needed", ante.offset_needed, 45.7, TOL_M3H))
+    cases.append(("4 room -15 Pa", "design offset", ante.design_offset, 99.9, TOL_M3H))
+    cases.append(("4 room -15 Pa", "ratio", ante.ratio or 0.0, 2.19, TOL_RATIO))
     suite = known_answer_suite().solve()
-    cases.append(("5 suite -30/-31 Pa", "room envelope", suite.space("ROOM").envelope_in, 163.5, TOL_M3H))
-    cases.append(("5 suite -30/-31 Pa", "ensuite envelope", suite.space("ENSUITE").envelope_in, 68.7, TOL_M3H))
-    cases.append(("5 suite -30/-31 Pa", "offset needed", suite.offset_needed, 273.5, TOL_M3H))
-    cases.append(("5 suite -30/-31 Pa", "design offset", suite.design_offset, 321.6, TOL_M3H))
-    cases.append(("5 suite -30/-31 Pa", "ratio", suite.ratio or 0.0, 1.18, TOL_RATIO))
-    cases.append(("door gaps", "0.9 x 2.1 leaf, cm2", unsealed_door_gap_area(0.9, 2.1) * 1e4, 240.0, 5.0))
-    cases.append(("door gaps", "0.6 x 1.8 access door, cm2", unsealed_door_gap_area(0.6, 1.8) * 1e4, 190.0, 5.0))
+    room, ens = suite.space("ROOM"), suite.space("ENSUITE")
+    cases.append(("5 room -30 Pa", "offset needed", room.offset_needed, 163.5, TOL_M3H))
+    cases.append(("5 room -30 Pa", "design offset", room.design_offset, 227.9, TOL_M3H))
+    cases.append(("5 room -30 Pa", "ratio", room.ratio or 0.0, 1.39, TOL_RATIO))
+    cases.append(("6 ensuite -31 Pa", "offset needed", ens.offset_needed, 68.7, TOL_M3H))
+    cases.append(("6 ensuite -31 Pa", "design offset", ens.design_offset, 93.8, TOL_M3H))
+    cases.append(("6 ensuite -31 Pa", "ratio", ens.ratio or 0.0, 1.36, TOL_RATIO))
+    high = Suite("KA-7 room at -70 Pa", [Space("HIGH", -70.0, ROOM_SMALL)], [], externals={}).solve().space("HIGH")
+    cases.append(("7 room -70 Pa", "offset needed", high.offset_needed, 124.4, TOL_M3H))
+    cases.append(("7 room -70 Pa", "ratio", high.ratio or 0.0, 0.80, TOL_RATIO))
     return cases
 
 

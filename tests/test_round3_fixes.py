@@ -37,7 +37,7 @@ def _eval(tmp_path, formulas, cells):
 
 # R2-05 ------------------------------------------------------------------------------------------------------
 def test_no_placeholder_text_in_remark_formulas():
-    for kw in ({}, dict(note="N1"), dict(partial="P1", crit_partial=True), dict(oa_above="Q1>R1", oa_calc="Q1", oa_tender="R1", partial="P1", zero="z")):
+    for kw in ({}, dict(note="N1"), dict(partial="P1"), dict(oa_above="Q1>R1", oa_calc="Q1", oa_tender="R1", partial="P1", zero="z")):
         f = tender_remark("A1", "B1", "C1", "D1", "S1", **kw)
         # braces occur only inside formula text outside the literals: none are allowed at all
         assert "{" not in f and "}" not in f, kw
@@ -59,17 +59,18 @@ def test_outdoor_air_above_tender_is_verify_and_no_reduction_wording(tmp_path):
                                 {"A1": 10000, "B1": 8000, "C1": 2000, "D1": 0.2, "E1": 3641, "F1": 457,
                                  "A2": 10000, "B2": 8000, "C2": 2000, "D2": 0.2, "E2": 300, "F2": 457, "E3": 300})
     assert "Outdoor air 3,641 L/s is above tender outdoor air 457 L/s" in above and "VERIFY" in above
-    assert "Reduced" not in above and "No reduction is stated" in above
+    assert "Reduced" not in above and "Supply 8,000 L/s against tender 10,000 L/s" in above and "No reduction" not in above
     assert within.startswith("Reduced 10,000 to 8,000 L/s")
     assert "above tender outdoor air" not in none and none.startswith("Reduced")
 
 
 def test_zone_schedule_outdoor_air_formula(tmp_path):
     from src.zoning.deliver import red_formula, remarks_formula
-    cells = {"I2": 10000, "J2": "src", "K2": 8000, "G2": 100, "S2": None, "T2": 457, "U2": 3641}
+    cells = {"I2": 10000, "J2": "src", "K2": 8000, "G2": 100, "S2": "Complete: 3 of 3 zoned rooms counted", "T2": 457, "U2": 3641}
     red, rem = _eval(tmp_path, [red_formula(2, True), remarks_formula(2, True)], cells)
     assert red in (None, "") and "VERIFY" in rem and "Reduced" not in rem
     cells["U2"] = 300
+    cells["L2"] = 2000                       # the Reduction cell of the row (the red formula result): the Remarks text reads it
     red, rem = _eval(tmp_path, [red_formula(2, True), remarks_formula(2, True)], cells)
     assert red == 2000 and rem.startswith("Reduced")
     cells["G2"] = 0
@@ -78,43 +79,63 @@ def test_zone_schedule_outdoor_air_formula(tmp_path):
 
 
 # R2-06 ------------------------------------------------------------------------------------------------------
-def test_partial_wording_n_of_m(tmp_path):
-    f = coverage_formula("B1", "C1", "D1", "E1", "F1", "G1", "H1", "I1")
+def test_completeness_wording_n_of_m(tmp_path):
+    """D-027: the room list of a unit is 'Complete' or 'Not complete' and says 'n of m zoned rooms counted'. No 'partial' wording."""
+    f = coverage_formula("B1", "C1", "D1", "E1", "G1", "H1")        # zoned rooms, zoned area, rooms counted, counted area, share, rooms with no criteria row
     cases = [
-        ({"B1": 10, "C1": 349, "D1": 1, "E1": 12, "F1": 12, "G1": 0.9, "H1": 0, "I1": 0}, "partial: the department workbooks count 1 rooms (12 m²); the zone schedule gives 10 rooms (349 m²)"),
-        ({"B1": 7, "C1": 2067, "D1": 8, "E1": 2527, "F1": 2527, "G1": 0.9, "H1": 8, "I1": 2527}, "No criteria row for 8 of 8 rooms on this unit (2,527 m²)"),    # the no-criteria cause comes before the area mismatch
-        ({"B1": 10, "C1": 0, "D1": 10, "E1": 300, "F1": 300, "G1": 0.9, "H1": 0, "I1": 0}, "partial: the zone schedule gives the unit a zoned area of 0"),
-        ({"B1": 10, "C1": 300, "D1": 10, "E1": 300, "F1": 0, "G1": 0.9, "H1": 10, "I1": 300}, "No criteria row for 10 of 10 rooms"),
-        ({"B1": 10, "C1": 300, "D1": 10, "E1": 300, "F1": 300, "G1": 0.9, "H1": 0, "I1": 0}, ""),
+        ({"B1": 10, "C1": 349, "D1": 1, "E1": 12, "G1": 0.9, "H1": 0}, "Not complete: 1 of 10 zoned rooms counted"),
+        ({"B1": 7, "C1": 2067, "D1": 8, "E1": 2527, "G1": 0.9, "H1": 8}, "Not complete: all 7 zoned rooms counted (8 rooms counted); 8 rooms have no criteria row"),
+        ({"B1": 10, "C1": 0, "D1": 10, "E1": 300, "G1": 0.9, "H1": 0}, "Not complete: 10 of 10 zoned rooms counted; the zone schedule gives the unit no area"),
+        ({"B1": 10, "C1": 300, "D1": 9, "E1": 300, "G1": 0.9, "H1": 1}, "Not complete: 9 of 10 zoned rooms counted; 1 room has no criteria row"),
+        ({"B1": 10, "C1": 300, "D1": 10, "E1": 200, "G1": 0.9, "H1": 0}, "Not complete: 10 of 10 zoned rooms counted"),
+        ({"B1": 10, "C1": 300, "D1": 10, "E1": 300, "G1": 0.9, "H1": 0}, "Complete: 10 of 10 zoned rooms counted"),
+        ({"B1": 3, "C1": 120, "D1": 11, "E1": 415, "G1": 0.9, "H1": 0}, "Complete: all 3 zoned rooms counted (11 rooms counted)"),
+        ({"B1": 0, "C1": 0, "D1": 4, "E1": 100, "G1": 0.9, "H1": 0}, "Not complete: the unit is not in the zone schedule"),
     ]
-    got = _eval(tmp_path, [f] * len(cases), {})  # placeholder to prove the formula parses
-    for i, (cells, want) in enumerate(cases):
+    for cells, want in cases:
         v = _eval(tmp_path, [f], cells)[0]
-        assert (v or "").startswith(want) and (bool(want) == bool(v)), (cells, v)
+        assert v == want, (cells, v)
+        assert "partial" not in v.lower() and "no reduction" not in v.lower()
+
+
+def test_remark_is_silent_about_a_reduction_unless_stated(tmp_path):
+    """D-027: no 'partial' text and no 'no reduction' text. Above tender is VERIFY on every row."""
+    f = tender_remark("A1", "B1", "C1", "D1", '"src"', partial="P1", zero="z")
+    complete, incomplete, above_incomplete, equal = (
+        _eval(tmp_path, [f], dict(cells, C1=cells.get("C1", ""), D1=cells.get("D1", "")))[0] for cells in (
+            {"A1": 3000, "B1": 2000, "C1": 1000, "D1": 0.333, "P1": "Complete: 5 of 5 zoned rooms counted"},
+            {"A1": 3000, "B1": 2000, "P1": "Not complete: 2 of 5 zoned rooms counted"},
+            {"A1": 3000, "B1": 4000, "P1": "Not complete: 2 of 5 zoned rooms counted"},
+            {"A1": 3000, "B1": 3000, "C1": 0, "D1": 0, "P1": "Complete: 5 of 5 zoned rooms counted"}))
+    assert complete.startswith("Reduced 3,000 to 2,000")
+    assert (incomplete or "") == ""
+    assert above_incomplete.startswith("VERIFY: calculated 4,000 L/s is above tender 3,000 L/s")
+    assert (equal or "") == ""
 
 
 def test_no_criteria_unit_remark(tmp_path):
-    f = tender_remark("A1", "B1", "C1", "D1", '"src"', partial="P1", crit_partial=True, zero="z")
-    v = _eval(tmp_path, [f], {"A1": 3000, "B1": 0, "C1": "", "D1": "", "P1": "No criteria row for 22 of 22 rooms on this unit (1,107 m²)"})[0]
-    assert v.startswith("No criteria row for 22 of 22 rooms on this unit (1,107 m²). The calculated airflow is not known. No reduction is stated.")
-    assert "is 0 L/s" not in v and "upper limit" not in v
+    f = tender_remark("A1", "B1", "C1", "D1", '"src"', partial="P1", zero="z")
+    v = _eval(tmp_path, [f], {"A1": 3000, "B1": 0, "C1": "", "D1": "", "P1": "Not complete: 0 of 22 zoned rooms counted; 22 rooms have no criteria row"})[0]
+    assert v.startswith("Calculated airflow is 0 L/s.")
+    assert "Reduced" not in v and "reduction" not in v.lower() and "upper limit" not in v
 
 
 def test_upper_limit_only_on_a_stated_reduction(tmp_path):
-    f = tender_remark("A1", "B1", "C1", "D1", '"src"', partial="P1", crit_partial=True, zero="z")
-    red = _eval(tmp_path, [f], {"A1": 3000, "B1": 2000, "C1": 1000, "D1": 0.333, "P1": ""})[0]
+    f = tender_remark("A1", "B1", "C1", "D1", '"src"', partial="P1", zero="z")
+    red = _eval(tmp_path, [f], {"A1": 3000, "B1": 2000, "C1": 1000, "D1": 0.333, "P1": "Complete: 3 of 3 zoned rooms counted"})[0]
     assert red.startswith("Reduced") and red.endswith("The reduction is an upper limit.")
-    for cells in ({"A1": 3000, "B1": 0, "P1": ""}, {"A1": 3000, "B1": 2000, "P1": "partial: x"}, {"A1": 3000, "B1": 4000, "P1": ""}, {"A1": "", "B1": 2000, "P1": ""}):
-        v = _eval(tmp_path, [f], dict(cells, C1="", D1=""))[0]
+    for cells in ({"A1": 3000, "B1": 0, "P1": "Complete: 3 of 3 zoned rooms counted"}, {"A1": 3000, "B1": 2000, "P1": "Not complete: 1 of 3 zoned rooms counted"},
+                  {"A1": 3000, "B1": 4000, "P1": "Complete: 3 of 3 zoned rooms counted"}, {"A1": "", "B1": 2000, "P1": "Complete: 3 of 3 zoned rooms counted"}):
+        v = _eval(tmp_path, [f], dict(cells, C1="", D1=""))[0] or ""
         assert "upper limit" not in v, (cells, v)
 
 
 def test_small_zone_reduction_is_marked_not_confirmed(tmp_path):
     from src.workbook.sheets_systems import small_zone
-    f = tender_remark("A1", "B1", "C1", "D1", '"src"', partial="P1", crit_partial=True, zero="z", small=small_zone("M1", "N1"))
-    v = _eval(tmp_path, [f], {"A1": 9000, "B1": 187, "C1": 8813, "D1": 0.979, "P1": "", "M1": 1, "N1": 33.5})[0]
+    f = tender_remark("A1", "B1", "C1", "D1", '"src"', partial="P1", zero="z", small=small_zone("M1", "N1"))
+    v = _eval(tmp_path, [f], {"A1": 9000, "B1": 187, "C1": 8813, "D1": 0.979, "P1": "Complete: 1 of 1 zoned rooms counted", "M1": 1, "N1": 33.5})[0]
     assert v.startswith("Reduced 9,000 to 187") and "OI-R206-1" in v and "not a confirmed result" in v
-    v = _eval(tmp_path, [f], {"A1": 9000, "B1": 187, "C1": 8813, "D1": 0.979, "P1": "", "M1": 5, "N1": 300})[0]
+    v = _eval(tmp_path, [f], {"A1": 9000, "B1": 187, "C1": 8813, "D1": 0.979, "P1": "Complete: 5 of 5 zoned rooms counted", "M1": 5, "N1": 300})[0]
     assert "OI-R206-1" not in v
 
 
