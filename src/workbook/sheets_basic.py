@@ -276,6 +276,9 @@ CALC_RULES = [
     "Equipment gain. Provisional W/m² by room use for equipment-led rooms (red cells and Remarks), until vendor data is available. Lighting and small power are ASHRAE values (red cells).",
     "Criteria with no booklet row take the HFDS Mechanical reverse-brief row (table and page are on the room). A mapped or presumed booklet row is compared with the HFDS row of the same room type. "
     "A difference raises VERIFY, with both values, and the booklet row governs.",
+    "Outdoor air where the HFDS row prints 'Refer to SS553' and gives no value. A circulation, corridor or lobby row takes the circulation default of the project design basis (outdoor-air and total air changes). "
+    "Any other such row takes the per-person and per-area outdoor-air rate of the booklet office rows; the highest value governs and it is a floor on the room supply. "
+    "Each of these rooms has a VERIFY line on Flags. The values are assumptions (code A) until SS 553 is checked.",
     "A reduction against tender is stated only where the room list of the unit is complete (counted area 0.9 to 1.1 of the zoned area), the room table of the air-side schematic agrees by count, "
     "and the tender base passes the schedule test (schedule and schematic within 10 %, no placeholder value).",
 ]
@@ -436,6 +439,9 @@ def build_flag_rows(ctx: Ctx) -> List[Dict[str, Any]]:
                 link=("Room Information", RI.local("pfix", gi)))
         if gaps.get("number"):
             add(type="VERIFY", ref=n, desc=f"{who}: {gaps['number']}", status="OPEN", owner="ACMV engineer", src="", link=("Room Information", RI.local("pfix", gi)))
+        if gaps.get("oa_ss553"):
+            add(type="VERIFY", ref=n, desc=f"{who}: {gaps['oa_ss553']}", status="OPEN", owner="ACMV engineer", src=c.get("source", ""),
+                link=("Room Information", RI.local("pfix", gi)))
         if gaps.get("oa_person"):
             add(type="VERIFY", ref=n, desc=f"{who}: {gaps['oa_person']}", status="OPEN", owner="ACMV engineer", src=c.get("source", ""),
                 link=("Room Information", RI.local("pfix", gi)))
@@ -663,6 +669,8 @@ def write_checks(ctx: Ctx) -> None:
         ("Rooms whose design area (DPA, else SOA) and measured area disagree beyond tolerance", f'=COUNTIF({RI.rng("agree")},"NO")', 0, '=IF(C{r}=0,"PASS","VERIFY")', "list on Room Information"),
         ("Rooms whose final supply is below either airflow case or the pressure minimum", f'=COUNTIF({AF.rng("ok")},"FAIL")', 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
         ("Rooms with an AHU whose outdoor air is below the air-change minimum", f"=SUMPRODUCT(--({AF.rng('oa')}<{AF.rng('oa_air')}),--({AF.rng('supply')}>0),--({AF.rng('ahu')}<>\"\"))", 0, '=IF(C{r}=0,"PASS","FAIL")', "rooms with no AHU are counted in the check on rooms with no AHU; an exhaust-only room has no supply and takes transfer air"),
+        ("Occupied rooms (persons above 0) with a criteria row, not at negative pressure, with 0 L/s of outdoor air (toilet, ensuite and bath rooms are exhaust only and are left out)", f'=SUMPRODUCT(--({CR.rng("crit")}<>""),--({CR.rng("regime")}<>"NEGATIVE"),--({AF.rng("area")}>0),--({RI.rng("people")}>0),--(ISNUMBER(SEARCH("toilet",{CR.rng("crit")}&{RI.rng("name")}))=FALSE),--(ISNUMBER(SEARCH("ensuite",{CR.rng("crit")}&{RI.rng("name")}))=FALSE),--(ISNUMBER(SEARCH("bath",{CR.rng("crit")}&{RI.rng("name")}))=FALSE),--({AF.rng("oa_air")}=0))', 0,
+         '=IF(C{r}=0,"PASS","FAIL")', "C-1: an occupied room with a criteria row must not have 0 L/s of outdoor air; a row that prints only 'Refer to SS553' takes the rate of the booklet office rows or the circulation default"),
         ("Rooms whose outdoor-air requirement is above their supply", f"=SUMPRODUCT(--({AF.rng('oa_air')}>{AF.rng('supply')}),--({AF.rng('supply')}>0))", 0, '=IF(C{r}=0,"PASS","VERIFY")', "outdoor air is capped at supply; transfer air makes up the rest"),
         ("Rooms with a pressure target in Pa and no row on Pressure", f'=SUMPRODUCT(--ISNUMBER({CR.rng("pa")}),--({CR.rng("pa")}<>0),--(COUNTIF({PS.rng("node")},{RI.rng("no")})=0))', 0,
          '=IF(C{r}=0,"PASS","FAIL")', "every room with a pressure target other than 0 Pa is calculated from its internal surface; a neutral room (0 Pa) has no offset"),
@@ -827,15 +835,15 @@ def write_readme(ctx: Ctx) -> None:
     n_crit = f'SUMPRODUCT(--({CR_.rng("no")}<>""),--({CR_.rng("crit")}<>""))'
     acc_open = f'(SUMPRODUCT(--({kind_rng}="ACCEPTANCE"),--({ctx.checks_range}<>"PASS")))'
     pct = lambda a, b: f'TEXT(IF({b}=0,0,{a}/{b}),"0.0 %")'
-    for label, f in (("Coverage of the AHU totals", f'=IF({tot_sup}=0,"No room supply",IF({on_unit}/{tot_sup}<0.99,"PARTIAL. Only "&{pct(on_unit, tot_sup)}&" of the room supply of this department is on a unit that the zoning gives. '
-                                                         f'Read every AHU total as partial; the rooms with no unit are listed on Flags.","COMPLETE: all room supply is on a unit"))'),
+    for label, f in (("Coverage of the AHU totals", f'=IF({tot_sup}=0,"No room supply",IF({on_unit}<{tot_sup},"Partial cover. Only "&{pct(on_unit, tot_sup)}&" of the room supply of this department is on a unit that the zoning gives. '
+                                                         f'Read every AHU total as partial cover of the department; the rooms with no unit are listed on Flags.","COMPLETE: all room supply is on a unit"))'),
                      ("Calculation checks", f'=COUNTIFS({kind_rng},"CALCULATION",{ctx.checks_range},"FAIL")&" FAIL, "&COUNTIFS({kind_rng},"CALCULATION",{ctx.checks_range},"VERIFY")&" TO VERIFY"'),
                      ("Inputs complete", f'=IF({acc_open}=0,"COMPLETE","NOT COMPLETE: "&{acc_open}&IF({acc_open}=1," item"," items")&" open")'),
                      ("Rooms with an AHU or a system class", f'={n_unit}&" of "&{n_rooms}&" ("&{pct(n_unit, n_rooms)}&")"'),
                      ("Room supply on an AHU", f'=TEXT({on_unit},"#,##0")&" of "&TEXT({tot_sup},"#,##0")&" L/s ("&{pct(on_unit, tot_sup)}&")"'),
                      ("Rooms with a criteria row", f'={n_crit}&" of "&{n_rooms}&" ("&{pct(n_crit, n_rooms)}&")"'),
                      ("Rooms with a pressure target and no Pressure row", f'={ck("press")}'),
-                     ("Thermal load case", f'="PEOPLE, LIGHTING AND SMALL POWER (ASHRAE values where no project value). A provisional equipment gain is included for equipment-led rooms. Envelope gain by the simple facade method for "&IFERROR(SUMPRODUCT(({ctx.lay["EN"].rng("room")}<>"")/COUNTIF({ctx.lay["EN"].rng("room")},{ctx.lay["EN"].rng("room")}&"")),0)&" of "&{n_rooms}&" rooms only (rooms with a plan room link on a storey with a facade). The other rooms get no envelope gain: not assessed."'),
+                     ("Thermal load case", f'="PEOPLE, LIGHTING AND SMALL POWER (ASHRAE values where no project value). A provisional equipment gain is included for equipment-led rooms. Envelope gain by the simple facade method for "&SUMPRODUCT(({ctx.lay["EN"].rng("room")}<>"")/COUNTIF({ctx.lay["EN"].rng("room")},{ctx.lay["EN"].rng("room")}&""))&" of "&{n_rooms}&" rooms only (rooms with a plan room link on a storey with a facade). The other rooms get no envelope gain: not assessed."'),
                      ("Open flags", f'=COUNTIF({FL.rng("status")},"OPEN")'),
                      ("Rooms", f"=COUNTA({ctx.lay['RI'].rng('no')})")):
         put(ws, f"B{r}", label, "Text")

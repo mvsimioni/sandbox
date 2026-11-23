@@ -251,7 +251,7 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
           ("key", "Key (helper)", "", 12), ("idx", "Row (helper)", "", 8),
           ("nok", "Rooms with a criteria row and a supply airflow", "no.", 12),
           ("oab", "Outdoor air, balance basis (exhaust, offset air, spill air)", "L/s", 14), ("sl", "Rooms of the second room list", "no.", 12),
-          ("nr", "Reason that no reduction is stated (tender base)", "", 40), ("nrk", "Unit with a reason (helper)", "", 12)]
+          ("nr", "Reason for no reduction against tender (tender base)", "", 40), ("nrk", "Unit with a reason (helper)", "", 12)]
     from openpyxl.utils import get_column_letter as _gcl
     for i, (k, h, u, w) in enumerate(dh):
         col = _gcl(i + 1)
@@ -345,7 +345,7 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
           ("nok", "Rooms with a criteria row and a supply airflow", "no.", 12),
           ("spnote", "Single-pass note (helper)", "", 20),
           ("oab", "Outdoor air, balance basis (exhaust, offset air, spill air)", "L/s", 14), ("sl", "Rooms of the second room list", "no.", 12),
-          ("nr", "Reason that no reduction is stated (tender base)", "", 40)]
+          ("nr", "Reason for no reduction against tender (tender base)", "", 40)]
     from openpyxl.utils import get_column_letter
     col = {k: get_column_letter(i + 1) for i, (k, *_r) in enumerate(mh)}
     for i, (k, h, u, w) in enumerate(mh):
@@ -412,7 +412,7 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
         # R3-03: above tender (supply or outdoor air) is VERIFY on every unit, before any test of the room list
         put(am, g("flag"), (f'=IF({g("tender")}="","NO TENDER VALUE",IF({g("calc")}=0,"NOT CALCULATED",IF({g("calc")}>{g("tender")},"VERIFY: ABOVE TENDER",'
                             f'IF({oa_above},"VERIFY: OUTDOOR AIR ABOVE TENDER",IF({incomplete(g("cov"))},"ROOM LIST NOT COMPLETE",IF({g("calc")}={g("tender")},"EQUALS TENDER",'
-                            f'IF(AND({g("zr")}>0,{g("zr")}<=2),"REDUCTION AGAINST TENDER: NOT CONFIRMED (OI-R206-1 OPEN)","REDUCTION AGAINST TENDER")))))))'),
+                            f'IF(AND({g("zr")}>0,{g("zr")}<=2),"REDUCTION AGAINST TENDER: NOT CONFIRMED","REDUCTION AGAINST TENDER")))))))'),
             "Calc").alignment = Alignment(horizontal="left")
         put(am, g("rem"), tender_remark(g("tender"), g("calc"), g("red"), g("redp"), f'IF({g("tsrc")}="","tender airflow",{g("tsrc")})',
                                         zero="No room of the department workbooks is on this unit, or no room of it has a supply airflow.",
@@ -481,7 +481,7 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
          "rows; see the Room list of the unit column"),
         ("AHU rows with a criteria gap (rooms with no criteria row)", f'=COUNTIF({ahu_rng("cov")},"*no criteria row*")', "information", '="INFO"',
          "rows; the calculated airflow of these units does not yet cover every room"),
-        ("AHU rows that state a reduction and that the zone schedule gives 2 rooms or fewer (OI-R206-1, open)", f'=COUNTIF({ahu_rng("flag")},"REDUCTION AGAINST TENDER: NOT CONFIRMED*")', "information", '="INFO"',
+        ("AHU rows that state a reduction and that the zone schedule gives 2 rooms or fewer ", f'=COUNTIF({ahu_rng("flag")},"REDUCTION AGAINST TENDER: NOT CONFIRMED*")', "information", '="INFO"',
          "rows; the reduction is kept as the room-list rule gives it and the Remarks column says that it is not confirmed"),
         ("AHU rows that state a reduction", f'=SUMPRODUCT(--ISNUMBER({ahu_rng("red")}))', "information", '="INFO"', "rows; the TOTAL row of AHU Master adds these rows only"),
         ("Zoned area that the department workbooks do not count on the AHU rows", f"=SUMPRODUCT(({ahu_rng('za')}>{ahu_rng('area')})*({ahu_rng('za')}-{ahu_rng('area')}))", 0,
@@ -517,12 +517,15 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
     ck_last = FIRST + len(tests) - 1
     rr = ck_last + 2
     put(ck, f"B{rr}", "Calculation", "ResultText")
-    put(ck, f"E{rr}", f'=IF(COUNTIF(E{FIRST}:E{ck_last},"FAIL")>0,"FAIL",IF(COUNTIF(E{FIRST}:E{ck_last},"VERIFY")>0,"VERIFY","PASS"))', "ResultCheck")
+    # D-056: the two checks of the room supply and the rooms that no unit carries are input-completeness items, not calculation checks
+    inc = f'(COUNTIFS(B{FIRST}:B{ck_last},"Room supply on no unit*",E{FIRST}:E{ck_last},"<>PASS")+COUNTIFS(B{FIRST}:B{ck_last},"Rooms on no unit*",E{FIRST}:E{ck_last},"<>PASS"))'
+    nf = f'(COUNTIF(E{FIRST}:E{ck_last},"FAIL")-COUNTIFS(B{FIRST}:B{ck_last},"Room supply on no unit*",E{FIRST}:E{ck_last},"FAIL")-COUNTIFS(B{FIRST}:B{ck_last},"Rooms on no unit*",E{FIRST}:E{ck_last},"FAIL"))'
+    put(ck, f"E{rr}", f'=IF({nf}>0,"FAIL",IF(COUNTIF(E{FIRST}:E{ck_last},"VERIFY")>0,"VERIFY","PASS"))', "ResultCheck")
     for c in "ACD":
         put(ck, f"{c}{rr}", None, "ResultText")
     put(ck, f"F{rr}", "Calculation checks. FAIL if any check fails; VERIFY if none fails and some need review", "ResultText")
     put(ck, f"B{rr + 1}", "Inputs complete", "ResultText")
-    put(ck, f"E{rr + 1}", "NOT COMPLETE", "ResultCheck")
+    put(ck, f"E{rr + 1}", f'=IF({inc}=0,"COMPLETE","NOT COMPLETE")', "ResultCheck")
     for c in "ACD":
         put(ck, f"{c}{rr + 1}", None, "ResultText")
     put(ck, f"F{rr + 1}", "The AHU totals cover only the rooms that are linked to a unit. Read the coverage lines on the README before you use a total. DRAFT, acceptance open", "ResultText")
@@ -541,9 +544,9 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
     r = 4
     put(rd, f"B{r}", "Read this first: coverage of the AHU totals", "Section")
     r += 1
-    put(rd, f"C{r}", f'="PARTIAL. The AHU totals add only the rooms that are linked to a unit: room supply on a unit is "&TEXT(SUM({dcr("D")}),"#,##0")&" L/s, against "'
+    put(rd, f"C{r}", f'="Partial cover. The AHU totals add only the rooms that are linked to a unit: room supply on a unit is "&TEXT(SUM({dcr("D")}),"#,##0")&" L/s, against "'
                      f'&TEXT(SUM({dcr("D")})+SUM({dcr("E")})+SUM({dcr("F")}),"#,##0")&" L/s of room supply in the department workbooks, and "&TEXT(SUM({ahu_rng("tender")}),"#,##0")&" L/s of tender airflow on the units listed. '
-                     f'Read every unit total as partial. A reduction against tender is stated only for a unit whose room list is complete."', "Calc").alignment = Alignment(wrap_text=True, vertical="top")
+                     f'Read every unit total as partial cover. A reduction against tender is stated only for a unit whose room list is complete."', "Calc").alignment = Alignment(wrap_text=True, vertical="top")
     put(rd, f"B{r}", "Coverage", "Text")
     rd.merge_cells(f"C{r}:H{r}")
     rd.row_dimensions[r].height = 58

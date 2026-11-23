@@ -17,7 +17,7 @@ mapped row of the own booklet (code A, to confirm), not a presumed row: D-026 ap
 
 Closest department: clinical rooms prefer clinical departments (departments 01 to 29 of the booklets, Laboratory Medicine included); then the
 department whose booklet prints most of the same room types as the booklet of the room's own department; then the lower department number. A plant room takes
-a row only by the first two steps: no row is presumed for a plant room from its use class (the criteria of plant rooms are open for Marcus). The booklet and the page
+a row only by the first two steps: no row is presumed for a plant room from its use class (the criteria of plant rooms come from the HFDS row). The booklet and the page
 of the row stay as the source.
 """
 
@@ -350,7 +350,7 @@ class Presumption:
                             return dict(row=hit[1], department=hit[0], how=how), ""
             elif step == "same_use_class":
                 if plant:
-                    why.append("a plant room takes no row from its use class (the criteria of plant rooms are open for Marcus)")
+                    why.append("a plant room takes no row from its use class (the criteria of plant rooms come from the HFDS row)")
                     continue
                 if use is None:
                     why.append("the room name does not give a room use, so no use class fits it")

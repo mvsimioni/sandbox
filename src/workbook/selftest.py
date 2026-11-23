@@ -246,7 +246,7 @@ def generator_text_scan(root: Path = Path(".")) -> Tuple[int, List[Tuple[str, in
     n, hits = 0, []
     pkg = Path(__file__).resolve().parent
     for f in sorted(pkg.glob("*.py")):
-        if f.name in ("__main__.py", "selftest.py"):
+        if f.name in ("__main__.py", "selftest.py", "clean.py"):         # clean.py holds the list of words that it takes out
             continue
         tree = ast.parse(f.read_text(encoding="utf-8"))
         skip = set()

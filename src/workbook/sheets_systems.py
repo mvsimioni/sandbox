@@ -203,13 +203,13 @@ def unit_extra(spnote: str, note: str = None) -> str:
     if not note:
         return spnote
     from .sheets_rooms import xl_str
-    return f'IF({spnote}="","",{spnote}&" ")&{xl_str(note)}'
+    return f'IF({spnote}="","",TRIM({spnote})&" ")&{xl_str(note[:1].upper() + note[1:])}'
 
 
 def small_zone(zr: str, za: str) -> tuple:
-    """OI-R206-1 (open for Marcus, interim state): a stated reduction for a unit that the zone schedule gives 2 rooms or fewer is not a confirmed result. The text says so."""
+    """Interim state: a stated reduction for a unit that the zone schedule gives 2 rooms or fewer is not a confirmed result. The text says so."""
     return (f'AND(ISNUMBER({zr}),{zr}>0,{zr}<=2)',
-            f'"Interim, open for Marcus (OI-R206-1): the zone schedule gives this unit "&{zr}&IF({zr}=1," room"," rooms")&" ("&TEXT({za},"#,##0")&" m²). The reduction may come from an incomplete room list. It is not a confirmed result."')
+            f'"Interim, to confirm: the zone schedule gives this unit "&{zr}&IF({zr}=1," room"," rooms")&" ("&TEXT({za},"#,##0")&" m²). The reduction may come from an incomplete room list. It is not a confirmed result."')
 
 
 def coverage_formula(zr: str, za: str, nok: str, area_ok: str, z: str, nc: str = None, oth: str = None, zmax: str = None,
@@ -333,10 +333,10 @@ def write_ahu(ctx: Ctx) -> None:
              H("offnet", "Net envelope leakage out of the rooms (offset air)", "L/s", 12), H("oa_short", "Make-up air above the AHU supply", "L/s", 11),
              H("dn", "Dirty single-pass rooms", "no.", 9), H("dsup", "Supply of dirty single-pass rooms", "L/s", 10), H("dexh", "Exhaust of dirty single-pass rooms", "L/s", 10),
              H("balnote", "Balance note (helper)", "", 20), H("second", "Rooms of the second room list", "no.", 10), H("second_s", "Source ID", "", 11),
-             H("norr_why", "Reason that no reduction is stated (tender base)", "", 30),
+             H("norr_why", "Reason for no reduction against tender (tender base)", "", 30),
              H("dirsup", "Supply of rooms with a pressure direction and no value", "L/s", 12), H("dirn", "Rooms with a pressure direction and no value", "no.", 12),
              H("spillreq", "Spill air to plant rooms served by this unit", "L/s", 11),
-             H("ucvadd", "Extra supply for the future ultra-clean duty (D-058)", "L/s", 11)]
+             H("ucvadd", "Extra supply for the future ultra-clean duty", "L/s", 11)]
     bands = {"ahu": "A. AS ZONED: AIRFLOW", "frac": "OUTDOOR AIR", "vou": "MULTIPLE SPACE (example)", "ret": "RETURN, EXHAUST, RELIEF",
              "sens": "COIL DUTY", "oa_sens_ms": "COIL DUTY ON THE EXAMPLE'S OUTDOOR-AIR BASIS", "req_t": "CHECKS", "sched": "TENDER AIRFLOW AND REDUCTION",
              "zr": "ROOM LIST OF THE UNIT"}

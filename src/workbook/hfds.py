@@ -117,6 +117,31 @@ def to_criteria(row: Dict[str, str], source_id: str, kind: str, why: str) -> Dic
         pressure_pa_booklet=_f(row.get("pressure_pa")), filter=row.get("filter_norm") or None,
         single_pass="Y" if exh_out else None, source=source_id, code="D",
         remark=(f"HFDS row '{row['area_name']}' (table {row['table_id']}, page {row['printed_page']}). {why}. The room has no booklet row. Confirm the mapping."))
+    # C-1 (D-064 item 6, D-011): an HFDS row that prints 'Refer to SS553' for outdoor air gives 0 L/s. Circulation rows take the D-011 default
+    # (air changes). Every other such row takes the per-person and per-area rate of the booklet office rows (D-033, code A, to confirm).
+    note = " ".join(str(row.get(k) or "") for k in ("oa_ach_note", "total_ach_note", "oa_total_ach_as_printed", "oa_ach_as_printed"))
+    if re.search(r"SS\s*553", note, re.I) and crit.get("min_oa_ach") is None and "oa_lps_per_person" not in crit:
+        if kind == "circulation":
+            from . import conf
+            circ = conf.config().get("circulation_default_criteria") or {}
+            crit["min_oa_ach"] = float(circ.get("min_oa_ach", 2))
+            if crit.get("min_total_ach") is None:
+                crit["min_total_ach"] = float(circ.get("min_total_ach", 6))
+            crit["code"] = "A"
+            crit["remark"] += (" The HFDS row prints 'Refer to SS553' for outdoor air. The circulation default of the project design basis is used "
+                               f"({crit['min_oa_ach']:g} outdoor-air and {crit['min_total_ach']:g} total air changes). Assumption, to confirm.")
+        else:
+            from .assemble import _office_oa_rates
+            pp, pa = _office_oa_rates()
+            if pp:
+                crit["oa_lps_per_person"] = pp
+            if pa:
+                crit["oa_lps_per_m2"] = pa
+            if pp or pa:
+                crit["code"] = "A"
+                crit["remark"] += (" The HFDS row prints 'Refer to SS553' for outdoor air. The rate of the booklet office rows is used "
+                                   f"({(pp or 0):g} L/s per person or {(pa or 0):g} L/s per m², whichever is higher). Assumption, to confirm.")
+        crit["oa_ss553"] = True
     return {k: v for k, v in crit.items() if v is not None}
 
 

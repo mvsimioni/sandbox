@@ -134,9 +134,9 @@ def test_small_zone_reduction_is_marked_not_confirmed(tmp_path):
     from src.workbook.sheets_systems import small_zone
     f = tender_remark("A1", "B1", "C1", "D1", '"src"', partial="P1", zero="z", small=small_zone("M1", "N1"))
     v = _eval(tmp_path, [f], {"A1": 9000, "B1": 187, "C1": 8813, "D1": 0.979, "P1": "Complete: 1 of 1 zoned rooms counted", "M1": 1, "N1": 33.5})[0]
-    assert v.startswith("Reduced 9,000 to 187") and "OI-R206-1" in v and "not a confirmed result" in v
+    assert v.startswith("Reduced 9,000 to 187") and "Interim, to confirm" in v and "not a confirmed result" in v
     v = _eval(tmp_path, [f], {"A1": 9000, "B1": 187, "C1": 8813, "D1": 0.979, "P1": "Complete: 5 of 5 zoned rooms counted", "M1": 5, "N1": 300})[0]
-    assert "OI-R206-1" not in v
+    assert "Interim, to confirm" not in v
 
 
 # R2-01 ------------------------------------------------------------------------------------------------------

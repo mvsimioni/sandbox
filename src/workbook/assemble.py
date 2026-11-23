@@ -72,7 +72,7 @@ USE_RULES: List[Tuple[str, str, str]] = [
     (r"x-?ray|\bmri\b|ultrasound|\bct\b|fluoro|angio|mammo|cath lab|nuclear|\bpet\b|dexa|\bbmd\b|imaging|radiograph", "medical_procedure",
      "imaging rooms (nearest listed use: procedure room)"),
     (r"simulation|training|\btrg\b|classroom|seminar", "classroom_training", "training rooms"),
-    (r"picking|repackag|automation|asrs|ipas|extemporaneous|compounding|sterile prep|pharmacy|controlled drug|drug room|clean room|"
+    (r"picking|repackag|automation|asrs|ipas|gown up|extemporaneous|compounding|sterile prep|pharmacy|controlled drug|drug room|clean room|"
      r"(?=.*(?:pharm|cytotox|\btpn\b|aseptic|hazardous))(?:gown|ante ?room|preparation|\bprep\b)", "pharmacy_prep", "pharmacy preparation, picking and automation rooms (pharmacy preparation area)"),
     (r"laborator|\blab\b|bench|haematology|hameotology|chemistry|histopatholog|specimen|blood bank|grossing|tissue processor|bone saw|mycology|\bpcr\b|processing room", "laboratory", "laboratories and laboratory benches"),
     (r"decontamination|washing|wash/dry|laundry|inspection|packing|steril|reprocess|endoscope|assembly|workstation zone",
@@ -1526,6 +1526,11 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
         if (_c0.get("oa_lps_per_person") or 0) > 0 and (room.get("occupancy_people") == 0 or room.get("occupancy_per_100m2") == 0):
             gaps["oa_person"] = (f"The criteria row prints {_c0['oa_lps_per_person']:g} L/s of outdoor air per person. The occupancy of this room is 0 persons, so this rate gives no outdoor air "
                                  "and the outdoor air is 0 unless another value sets it. Confirm the occupancy.")
+        if _c0.get("oa_ss553"):
+            gaps["oa_ss553"] = ("The HFDS criteria row prints 'Refer to SS553' for outdoor air and gives no value. " +
+                                ("The circulation default air changes of the project design basis are used." if _c0.get("min_oa_ach") and not _c0.get("oa_lps_per_m2") and not _c0.get("oa_lps_per_person")
+                                 else f"The rate of the booklet office rows is used ({_c0.get('oa_lps_per_person') or 0:g} L/s per person or {_c0.get('oa_lps_per_m2') or 0:g} L/s per m², whichever is higher).") +
+                                " Assumption, to confirm against SS 553.")
         # D-025: plug load and lighting from the ASHRAE values of the room use (no project document gives them). Cells red, note in Remarks.
         lk, lwhy = load_use(d["name"])
         if lk and lk in plug_tab and lk in light_tab:
@@ -1573,6 +1578,15 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
     # D-051: the unit of each room comes from the link table when it exists (the only interface between zoning and the workbooks); the linking above stays as the fallback
     links_on = r5.links_available(root)
     link_counts = r5.apply_unit_links(rooms, key, root, add_src, ahu_kinds) if links_on else {}
+    if links_on:
+        # the unit named in a remark is the unit of the room (R3-06): the link table can change the unit after the MOT NSC text was written
+        for room_ in rooms:
+            if room_.get("ahu"):
+                for holder_, k_ in ((room_.get("criteria") or {}, "remark"), (room_, "remark")):
+                    t_ = holder_.get(k_) or ""
+                    t2_ = re.sub(r"([Uu]nit |, unit )AHU-B-\d\d-\d\d[0-9A-Z]+-\d+[AB]?(?:/B)?", lambda m_: m_.group(1) + room_["ahu"], t_)
+                    if t2_ != t_:
+                        holder_[k_] = t2_
     if links_on:
         flags.append(dict(type="VERIFY", ref="Room Information", text="The unit of each room is taken from the link table of the project: " +
                           (", ".join(f"{n} by {b}" for b, n in sorted(link_counts.items(), key=lambda kv: -kv[1])) or "no room of this department is in the table") + ".", source=""))
@@ -1777,7 +1791,7 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
                 sch_ = a.get("sched_supply_lps")
                 day1_ = sum(r_["_hepa"]["design"] for r_ in mot_here if r_.get("_hepa"))
                 a["ucv_add_lps"] = round(max(fut_ - day1_, 0.0), 1)   # D-058: the future duty governs the unit; the extra supply is added on the AHU tab
-                txt_.append(f"Two duties (D-058). Day-1 duty: theatre supply {day1_:,.0f} L/s at {hepa.v_design:g} m/s. Future ultra-clean duty: {fut_:,.0f} L/s to the room "
+                txt_.append(f"Two duties. Day-1 duty: theatre supply {day1_:,.0f} L/s at {hepa.v_design:g} m/s. Future ultra-clean duty: {fut_:,.0f} L/s to the room "
                             f"(IP-BH-16057 note; Tech Spec clause 1.17.11) × (1 + {leak_ * 100:.0f} % leakage). The future duty governs the unit, the coil and the duct capability check, "
                             f"and is the calculated supply of this unit. It is not resized"
                             + (f" and no reduction against the {sch_:,.0f} L/s on the schedule is stated" if sch_ else "")
@@ -1792,7 +1806,7 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
     for r_ in rooms:
         r_.pop("_hepa", None)
     if str(dept).lstrip("0") == "22":
-        flags.append(dict(type="VERIFY", ref="AHU-B-07-05MOTHYB-02", text="Tag variant, listed and not used (D-059). The MOT NSC schedule of modes (Appendix J, theatre MSOT 05.02.12) prints "
+        flags.append(dict(type="VERIFY", ref="AHU-B-07-05MOTHYB-02", text="Tag variant, listed and not used. The MOT NSC schedule of modes (Appendix J, theatre MSOT 05.02.12) prints "
                           "AHU-B-07-05MOTHYB-02. The cross-reference workbook (row 26) gives AHU-B-07-05MOTHYB-01 for this theatre and for its preparation room MSOT 05.01.12. "
                           "The cross-reference cell 'AHU-B-07-05MOT-01 / MOTHYB-01' (row 14) is a variant: theatre MSOT 03.02.04 and its preparation room MSOT 03.01.04 are on AHU-B-07-05MOT-01.", source=""))
     ztot = zone_totals(root)

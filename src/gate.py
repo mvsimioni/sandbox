@@ -179,7 +179,7 @@ def scan_workbook(path: Path) -> dict:
         for r in wb["Checks"].iter_rows(min_row=5, values_only=True):
             if r[0] is not None and r[4] in ("FAIL", "VERIFY"):
                 (fails if r[4] == "FAIL" else verifies).append({"no": r[0], "check": str(r[1])[:110], "value": r[2], "limit": r[3],
-                                                                  "kind": r[6]})
+                                                                  "kind": (r[6] if len(r) > 6 else "")})
             if r[1] == "Calculation":
                 res["overall"] = r[4]
     res["fail_checks"] = fails

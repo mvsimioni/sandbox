@@ -38,7 +38,7 @@ def hyb_unit_note(tag: str) -> str:
     if not HYB_UNIT.match((tag or "").strip()):
         return ""
     return ("Conflict between documents: the MOT NSC schedule of modes (Appendix J, theatre MSOT 05.02.12) names this unit. The MOT NSC Overall AC Equipment Schedule lists only "
-            "AHU-B-07-05MOTHYB-01, and the zone schedule does not show this unit. No tender airflow is used. The tag is a variant of AHU-B-07-05MOTHYB-01: it is listed and it is not used (D-059).")
+            "AHU-B-07-05MOTHYB-01, and the zone schedule does not show this unit. No tender airflow is used. The tag is a variant of AHU-B-07-05MOTHYB-01: it is listed and it is not used.")
 
 
 def unit_note(tag: str) -> str:

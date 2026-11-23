@@ -138,7 +138,7 @@ def tender_base_rule(a: Dict[str, Any], sched_val: Optional[float], schematic_va
     placeholder = float(cfg.get("placeholder_supply_lps", 9000))
     reason, note = "", ""
     if is_mot:
-        return "MOT equipment is not resized: no reduction is stated for this unit", ""
+        return "MOT equipment is not resized: the reduction is not shown for this unit", ""
     others = a.get("tender_other_values") or []
     if sched_val is None:
         if len({round(v) for v, _ in others}) > 1:
@@ -146,7 +146,7 @@ def tender_base_rule(a: Dict[str, Any], sched_val: Optional[float], schematic_va
             return f"the sheets of the tender print two values ({vals} L/s) and the Equipment Schedule has none: no value is chosen", ""
         return "", ""
     if abs(sched_val - placeholder) < 0.5:
-        reason = (f"the Equipment Schedule prints {placeholder:,.0f} L/s for this unit, which may be a placeholder: no reduction is stated until the print is read again")
+        reason = (f"the Equipment Schedule prints {placeholder:,.0f} L/s for this unit, which may be a placeholder: the reduction is not shown until the print is read again")
         return reason, reason + ". VERIFY"
     if schematic_val is not None and sched_val > 0:
         d = abs(sched_val - schematic_val) / sched_val * 100.0

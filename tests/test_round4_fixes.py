@@ -272,25 +272,17 @@ def test_unit_names_in_d22_remarks_equal_the_unit_of_the_room():
 
 
 @needs_outputs
-def test_mothyb_02_consistent_in_workbook_master_and_zone_schedule():
-    note_key = "Conflict between documents"
+def test_mothyb_02_is_listed_and_not_used_in_workbook_master_and_zone_schedule():
+    """D-059: AHU-B-07-05MOTHYB-02 is a variant tag. It has no unit row in D22, the master or the zone schedule; D22 Flags list it."""
     tag = "AHU-B-07-05MOTHYB-02"
     ws = _wb("22")["AHU"]
-    hdr = [c.value for c in ws[5]]
-    row = next(r for r in ws.iter_rows(min_row=7, values_only=True) if r[0] == tag)
-    assert row[hdr.index("Tender airflow (supply)")] in (None, "") and note_key in row[hdr.index("Remarks")]
+    assert not [r for r in ws.iter_rows(min_row=7, values_only=True) if r[0] == tag]
+    fl = _wb("22")["Flags"]
+    assert any(tag in str(r[2]) and "not used" in str(r[3]) for r in fl.iter_rows(min_row=5, values_only=True))
     m = openpyxl.load_workbook(WB / "AHU_master_summary.xlsx", data_only=True)["AHU Master"]
-    mh = [c.value for c in m[5]]
-    mrow = next(r for r in m.iter_rows(min_row=7, values_only=True) if r[0] == tag)
-    assert mrow[mh.index("Tender airflow")] in (None, "") and note_key in mrow[mh.index("Remarks")]
+    assert not [r for r in m.iter_rows(min_row=7, values_only=True) if r[0] == tag]
     z = openpyxl.load_workbook(ROOT / "out" / "zoning" / "zone_schedule.xlsx", data_only=True)["AHU summary"]
-    zh = [c.value for c in z[1]]
-    zrow = next(r for r in z.iter_rows(min_row=2, values_only=True) if r[0] == tag)
-    assert zrow[zh.index("Tender airflow (L/s)")] in (None, "") and note_key in zrow[zh.index("Remarks")]
-    # the unit is not on the zoning drawing: no room, no area and no storey in the zone schedule (the rooms of the department workbooks are in the columns beside)
-    assert zrow[zh.index("Rooms")] == 0 and zrow[zh.index("Area (m²)")] == 0 and zrow[zh.index("Storeys served")] == "no information"
-    assert ".." not in str(zrow[zh.index("Remarks")])
-    assert mrow[mh.index("Rooms of the unit in the zone schedule")] in (0, None)
+    assert not [r for r in z.iter_rows(min_row=2, values_only=True) if r[0] == tag]
 
 
 # R3-07 -------------------------------------------------------------------------------------------------------------

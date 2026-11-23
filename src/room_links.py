@@ -221,12 +221,12 @@ def step0(univ: List[Dict[str, Any]], zone_rows: Dict[str, Dict[str, str]], res:
             # D-059: the Appendix J tag MOTHYB-02 is a variant (listed, not used); the Pod 3 hybrid unit is MOTHYB-01. A preparation room of another pod
             # (MSOT 03.x, Pod 1) does not join the Pod 3 unit: it takes the unit of the theatre of its own pod (MSOT 03.02.04).
             if "MOTHYB-02" in unit:
-                unit, note = unit.replace("MOTHYB-02", "MOTHYB-01"), "Appendix J tag MOTHYB-02 is a variant, listed and not used (D-059)"
+                unit, note = unit.replace("MOTHYB-02", "MOTHYB-01"), "the Appendix J tag is a variant of the Pod 3 hybrid unit: listed and not used (D-059)"
             mm = re.match(r"^(MSOT) (\d\d)\.01\.(\d\d)$", u["dpa_room_id"])
             if mm and "MOTHYB-01" in unit and mm.group(2) != "05":
                 th = by_id.get(f"MSOT {mm.group(2)}.02.04")
                 if th:
-                    unit, note = zdisp(th[0]), f"Appendix J row gives {u['prior_unit']}; the preparation room is of the pod of theatre MSOT {mm.group(2)}.02.04 (D-059)"
+                    unit, note = zdisp(th[0]), f"the Appendix J row gives the Pod 3 hybrid unit; the preparation room is of the pod of theatre MSOT {mm.group(2)}.02.04 (D-059)"
             res[k] = dict(unit=unit, step="0b", ref="MOT NSC schedule of modes (Appendix J) room row " + u["prior_src"], conf="medium", code="D",
                           other=u["prior_unit"] if note else "", note=note)
 
