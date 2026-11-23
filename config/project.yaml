@@ -310,3 +310,11 @@ reduction_round5:   # D-054, D-055
   zone_cover: {min: 0.9, max: 1.1}
   tender_diff_pct: {accept_up_to: 2, verify_up_to: 10}
   placeholder_supply_lps: 9000
+
+# D-076 (Marcus, 24 Nov 2026): added rooms are drawn as room boxes with the design-criteria table and duct connections (not a tabulated note).
+added_room_markup:
+  box_fields: [name, typical_count, mode, supply_L_s, return_L_s, exhaust_L_s, pressure, filter, temperature, rh, air_class, change_id, source]
+  ducts: [supply_from_ahu_header, return_to_return_header_or_exhaust_to_named_fan]
+  line_types: legend_IP-BH-00002
+  terminals: only_where_workbook_or_sheet_gives_one_else_query
+  markup_layers: {box: Rooms, ducts: New systems}
