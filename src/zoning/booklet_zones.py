@@ -55,8 +55,9 @@ MIN_NCC = 0.18                  # edge correlation of the warped keyplan with th
 NCC_RATIO = 1.6                 # ... and at least this multiple of the best correlation at shifts of 15 to 40 px (a wrong fit has no peak)
 MAX_RESIDUAL_MM = 1500.0        # task rule: reject fits above 1.5 m
 MIN_SPAN_FRAC = 0.2             # inliers must span this share of the keyplan width and height
-MIN_ROOM_OVERLAP = 0.30         # share of the zone area that must fall on tender room polygons (independent check)
+MIN_ROOM_OVERLAP = 0.30         # below this share of zone area on tender room polygons the page is noted (not rejected: untagged rooms are not in the register)
 SCALE_RANGE = (0.3, 3.0)        # tender px per booklet px
+LEGEND_RE = re.compile(r"^(?:recirculation|single pass|local non|ac\b|mv\b|nv\b|hc\b|na\b|pandemic|normal|mv zone|exhaust|non-recirc)", re.I)
 TAG_RE = re.compile(r"^(?:P?AHU|FCU|PAU|FAHU|MAU|DOAS|EAF|SAF)-\S+", re.I)
 LEGEND_PHRASES = [
     "Recirculation with HEPA", "Local Non-Recirculation via Exhaust", "Recirculation", "Single Pass",
@@ -523,7 +524,7 @@ def vector_zones(page, R, drawings: Sequence[dict], lines, clip) -> Tuple[List[d
         lab = None
         if poly.area < 4000 and 10 <= w <= 90 and 5 <= h <= 45:
             for txt, bb in lines:
-                if bb[0] >= r[2] - 2 and bb[0] - r[2] <= 55 and bb[1] - 4 <= (r[1] + r[3]) / 2 <= bb[3] + 4 and not TAG_RE.match(txt):
+                if bb[0] >= r[2] - 2 and bb[0] - r[2] <= 55 and bb[1] - 4 <= (r[1] + r[3]) / 2 <= bb[3] + 4 and not TAG_RE.match(txt) and LEGEND_RE.match(txt.strip()):
                     lab = (txt, bb)
                     break
         if lab is not None:
@@ -625,8 +626,8 @@ def raster_zones(page, R, clip, lines, z: float = BOOK_SC) -> Tuple[List[dict], 
             sel = np.zeros(m.shape, np.uint8)
             cv2.drawContours(sel, [c], -1, 1, -1)
             med = np.median(img[sel > 0], axis=0)
-            zones.append({"poly_pt": pg, "colour": "#%02X%02X%02X" % tuple(int(v) for v in med), "opacity": None, "kind": "raster",
-                          "legend": (label, lbb) if label else None, "palette_hex": hx})
+            zones.append({"poly_pt": pg, "colour": hx, "opacity": None, "kind": "raster", "legend": (label, lbb) if label else None,
+                          "median_hex": "#%02X%02X%02X" % tuple(int(v) for v in med), "default_palette": label is None})
         mask_total |= m > 0
     return zones, notes, img
 
@@ -833,7 +834,8 @@ def discover_pages(root: Path, only_storeys: Optional[Sequence[str]] = None) -> 
         k = (r["source_file"], int(r["pdf_page"]))
         pages.setdefault(k, {"file": r["source_file"], "page": int(r["pdf_page"]), "title": r["keyplan_title"], "key": key,
                              "department": r["department_label"] or r["department"], "booklet_page": r.get("booklet_page", ""),
-                             "legend_in_register": r.get("has_colour_legend", ""), "legend_source": r.get("legend_source", "")})
+                             "legend_in_register": r.get("has_colour_legend", ""), "legend_source": r.get("legend_source", ""),
+                             "legend_bbox": r.get("legend_bbox", "")})
     return sorted(pages.values(), key=lambda p: (p["key"], p["file"], p["page"]))
 
 
@@ -877,6 +879,12 @@ def process_page(root: Path, info: dict, tender: Tender, overlays: Optional[Path
         out["reason"] = "AHU zoning page without a coloured zone: no saturated vector fill and no legend colour found in the rendered plan"
         out["notes"] = notes
         return out
+    unl = sorted({z["colour"] for z in zones if not z["legend"]})
+    if unl and info.get("legend_in_register") == "Y" and info.get("legend_source") == "image":
+        out["second_read"].append("page %d: the colour legend is a picture (register legend box %s pt), so the meaning of %s was not read: read the legend picture" % (
+            info["page"], info.get("legend_bbox", ""), ", ".join(unl)))
+    elif unl:
+        out["second_read"].append("page %d: no legend text beside the colours %s in the text layer: meaning of the colours not read" % (info["page"], ", ".join(unl)))
     # tags
     tags = page_tags(page, R)
     tag_boxes(drawings, tags, R)
@@ -913,9 +921,8 @@ def process_page(root: Path, info: dict, tender: Tender, overlays: Optional[Path
         tot = sum(x for x, _ in overl) / max(1.0, sum(y for _, y in overl))
         out["room_overlap"] = tot
         if tot < MIN_ROOM_OVERLAP:
-            reg_ok = False
-            reg["ok"] = False
-            reg["reason"] = "zones fall on tender rooms for only %.0f%% of their area (need %.0f%%): fit rejected" % (100 * tot, 100 * MIN_ROOM_OVERLAP)
+            out["notes"].append("only %.0f%% of the zone area falls on tender room polygons (rooms without a tag are not in the register); fit kept, "
+                                "edge correlation %.2f against %.2f at shifted positions" % (100 * tot, reg["ncc"], reg["ncc_shift_max"]))
     out["reg_ok"] = reg_ok
     # rows
     for zi, z in enumerate(zones, 1):
@@ -937,7 +944,9 @@ def process_page(root: Path, info: dict, tender: Tender, overlays: Optional[Path
             row["colour_basis"] = "nominal vector fill colour"
             row["fill_opacity"] = "%.2f" % z["opacity"]
         else:
-            row["colour_basis"] = "median rendered pixel colour of the zone (tinted by the fill opacity)"
+            row["colour_basis"] = ("colour class of the segmentation: %s; median rendered pixel colour of the zone %s" % (
+                "default palette, nominal fill at 0.5 opacity (legend swatch is not text)" if z.get("default_palette") else "legend swatch pixel colour",
+                z.get("median_hex", "")))
         if z["legend"]:
             row["legend_label_as_printed"] = z["legend"][0]
             row["legend_location"] = "page %d bbox %s pt (text layer)" % (info["page"], bbox_str(z["legend"][1]))
@@ -959,7 +968,7 @@ def process_page(root: Path, info: dict, tender: Tender, overlays: Optional[Path
             row["registration_inliers"] = reg["n_inliers"]
             row["registration_scale_mm_per_pt"] = "%.2f" % (math.sqrt(abs(np.linalg.det(out["pt2mm"][:, :2]))))
             row["tender_room_overlap_pct"] = "%.0f" % (100 * z["overlap"])
-            conf = "high" if (reg["rms_mm"] < 250 and reg["n_inliers"] >= 40) else "medium"
+            conf = "high" if (reg["rms_mm"] < 250 and reg["n_inliers"] >= 40 and out.get("room_overlap", 0) >= MIN_ROOM_OVERLAP) else "medium"
             if z["kind"] == "raster" or (tg and tg[0][2] == "low"):
                 conf = "low"
             elif tg and tg[0][2] == "medium" and conf == "high":
@@ -979,15 +988,15 @@ def process_page(root: Path, info: dict, tender: Tender, overlays: Optional[Path
     if not reg_ok:
         out["reason"] = reg.get("reason", "")
     # overlay for the eye
-    if overlays is not None and reg_ok:
+    if overlays is not None and "pt2mm" in out:
         try:
-            _write_overlay(overlays, info, tender, zones, out["pt2mm"])
+            _write_overlay(overlays, info, tender, zones, out["pt2mm"], "" if reg_ok else "_REJECTED")
         except Exception as e:                                   # the overlay is a convenience only
             out["notes"].append("overlay not written: %s" % e)
     return out
 
 
-def _write_overlay(folder: Path, info: dict, tender: Tender, zones: List[dict], pt2mm: np.ndarray) -> None:
+def _write_overlay(folder: Path, info: dict, tender: Tender, zones: List[dict], pt2mm: np.ndarray, suffix: str = "") -> None:
     import cv2
     folder.mkdir(parents=True, exist_ok=True)
     img = tender.render_gray()
@@ -1012,7 +1021,7 @@ def _write_overlay(folder: Path, info: dict, tender: Tender, zones: List[dict], 
         over = over[max(0, y0):y1, max(0, x0):x1]
     s = 1500.0 / max(over.shape[:2])
     over = cv2.resize(over, None, fx=min(1.0, s), fy=min(1.0, s), interpolation=cv2.INTER_AREA)
-    name = "%s_%s_p%d.jpg" % (info["key"], re.sub(r"[^A-Za-z0-9]+", "", Path(info["file"]).stem)[:18], info["page"])
+    name = "%s_%s_p%d%s.jpg" % (info["key"], re.sub(r"[^A-Za-z0-9]+", "", Path(info["file"]).stem)[:18], info["page"], suffix)
     cv2.imwrite(str(folder / name), over, [cv2.IMWRITE_JPEG_QUALITY, 80])
 
 
@@ -1075,7 +1084,8 @@ def write_report(root: Path, results_by_key: Dict[str, List[dict]], tenders: Dic
              "refit on the inliers; tender page view tied to building mm by an affine fitted to the vertices of `room_polygons_<KEY>.csv`. "
              "Rejected above %.0f mm residual, below %d inliers, if the inliers span less than %.0f%% of the keyplan, if the edge correlation of the warped "
              "keyplan with the tender sheet at the fit is below %.2f or below %.1f x its best value at shifts of 15 to 40 px (independent check: a wrong fit "
-             "has no correlation peak), or if less than %.0f%% of the zone area falls on tender rooms." % (
+             "has no correlation peak). The share of a zone that falls on tender room polygons is reported per zone and noted below %.0f%%, but does not "
+             "reject a fit (rooms without a tag are not in the room register)." % (
                  MAX_RESIDUAL_MM, MIN_INLIERS, 100 * MIN_SPAN_FRAC, MIN_NCC, NCC_RATIO, 100 * MIN_ROOM_OVERLAP))
     L.append("- The fills of these pages are coloured by operating mode of the page legend (for example Recirculation, Single Pass, Recirculation with "
              "HEPA, AC, MV), not one colour per AHU. The AHU of a zone is read from the tag box whose leader line ends in the zone, else the tag printed "
