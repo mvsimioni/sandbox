@@ -166,12 +166,15 @@ class FreeSpace:
         return not any((r + (-pad, -pad, pad, pad)).intersects(q) for q in self.placed)
 
     def leader_ink(self, anchor: pymupdf.Rect, r: pymupdf.Rect) -> int:
-        """Ink pixels that the leader line from the anchor to the rectangle would cross (ends excluded)."""
+        """Ink pixels and placed notes that the leader line from the anchor to the rectangle would cross
+        (the two ends are excluded)."""
         cx, cy = (r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2
         p0 = (min(max(cx, anchor.x0), anchor.x1), min(max(cy, anchor.y0), anchor.y1))
         p1 = (min(max(p0[0], r.x0), r.x1), min(max(p0[1], r.y0), r.y1))
         n = max(2, int(math.hypot(p1[0] - p0[0], p1[1] - p0[1]) / 3))
         h, w = self.ink.shape
+        lb = pymupdf.Rect(min(p0[0], p1[0]), min(p0[1], p1[1]), max(p0[0], p1[0]), max(p0[1], p1[1])) + (-2, -2, 2, 2)
+        near = [q for q in self.placed if q.intersects(lb)]
         hit = 0
         for k in range(3, n - 2):
             x = p0[0] + (p1[0] - p0[0]) * k / n
@@ -179,44 +182,53 @@ class FreeSpace:
             xi, yi = int(x * SCALE), int(y * SCALE)
             if 0 <= xi < w and 0 <= yi < h and self.ink[yi, xi]:
                 hit += 1
+            elif near and any(q.x0 <= x <= q.x1 and q.y0 <= y <= q.y1 for q in near):
+                hit += 1
         return hit
 
-    def place(self, w: float, h: float, anchor: Optional[pymupdf.Rect], leader: bool = False) -> Optional[pymupdf.Rect]:
-        """Nearest free w x h rectangle to the anchor, searched on a grid.  With ``leader`` the leader line
-        from the anchor must cross no drawn line or text (the candidate with the least ink is taken)."""
+    last_ink = 0
+
+    def place(self, w: float, h: float, anchor: Optional[pymupdf.Rect], leader: bool = False,
+              max_ink: Optional[int] = None, max_dist: float = 700.0) -> Optional[pymupdf.Rect]:
+        """Free w x h rectangle near the anchor.  With ``leader`` the candidates are ranked by the ink and notes
+        that the leader line would cross (heavily) plus its length; ``max_ink`` rejects a candidate whose leader
+        crosses more than that (the caller then draws no leader).  ``last_ink`` holds the winner's value."""
         ax, ay = ((anchor.x0 + anchor.x1) / 2, (anchor.y0 + anchor.y1) / 2) if anchor else (
             self.rect.width / 2, self.rect.height / 2)
-        # near candidates first: rings around the anchor, then the whole page
-        cands: List[Tuple[float, pymupdf.Rect]] = []
-        step = 12.0
+        self.last_ink = 0
         if anchor is not None:
-            for dx in np.arange(-500, 501, step):
-                for dy in np.arange(-400, 401, step):
+            cands: List[Tuple[float, pymupdf.Rect]] = []
+            step = 10.0
+            for dx in np.arange(-600, 601, step):
+                for dy in np.arange(-450, 451, step):
                     r = pymupdf.Rect(ax + dx - w / 2, ay + dy - h / 2, ax + dx + w / 2, ay + dy + h / 2)
-                    if anchor is not None and r.intersects(anchor + (-3, -3, 3, 3)):
+                    if r.intersects(anchor + (-3, -3, 3, 3)):
                         continue
-                    cands.append((math.hypot(dx, dy), r))
+                    d = math.hypot(dx, dy)
+                    if d <= max_dist and self.free(r):
+                        cands.append((d, r))
             cands.sort(key=lambda t: t[0])
-            best_l = None
-            tried = 0
-            for dist, r in cands:
-                if not self.free(r):
-                    continue
-                if not leader:
-                    self.placed.append(r)
-                    return r
+            if cands and not leader:
+                self.placed.append(cands[0][1])
+                return cands[0][1]
+            best = None
+            for dist, r in cands[:260]:
                 ink = self.leader_ink(anchor, r)
+                if max_ink is not None and ink > max_ink:
+                    continue
+                cost = ink * 25 + dist
+                if best is None or cost < best[0]:
+                    best = (cost, r, ink)
                 if ink == 0:
-                    self.placed.append(r)
-                    return r
-                tried += 1
-                if best_l is None or ink + dist / 100 < best_l[0]:
-                    best_l = (ink + dist / 100, r)
-                if tried >= 150:
                     break
-            if best_l is not None:
-                self.placed.append(best_l[1])
-                return best_l[1]
+            if best is not None:
+                self.last_ink = best[2]
+                self.placed.append(best[1])
+                return best[1]
+            if max_ink is not None and cands:
+                self.last_ink = 99999
+                self.placed.append(cands[0][1])
+                return cands[0][1]
         step = 24.0
         best = None
         for x in np.arange(self.rect.x0 + MARGIN, self.rect.x1 - MARGIN - w, step):
@@ -226,6 +238,7 @@ class FreeSpace:
                 if (best is None or d < best[0]) and self.free(r):
                     best = (d, r)
         if best:
+            self.last_ink = 99999
             self.placed.append(best[1])
             return best[1]
         return None
@@ -367,9 +380,10 @@ class Marker:
         head_h = FS * 1.25 + 2
         total_h = ROW_H * len(rows) + head_h
         width = max(width, pymupdf.get_text_length(title, fontname=font, fontsize=FS) + 10)
-        place = self.space.place(width, total_h, anchor, leader=True)
+        place = self.space.place(width, total_h, anchor, leader=True, max_ink=0, max_dist=420)
         if place is None:
             return None
+        no_leader = self.space.last_ink != 0
         y = place.y0
         for i, (r, t) in enumerate(zip(rows, texts)):
             first = i == 0
@@ -377,7 +391,7 @@ class Marker:
             rr = pymupdf.Rect(place.x0, y, place.x0 + width, y + h)
             body = (title + "\n" if first else "") + t
             kw = {}
-            if first and anchor is not None:
+            if first and anchor is not None and not no_leader:
                 cx, cy = (rr.x0 + rr.x1) / 2, (rr.y0 + rr.y1) / 2
                 p0 = pymupdf.Point(min(max(cx, anchor.x0), anchor.x1), min(max(cy, anchor.y0), anchor.y1))
                 p1 = pymupdf.Point(min(max(p0.x, rr.x0), rr.x1), min(max(p0.y, rr.y0), rr.y1))
