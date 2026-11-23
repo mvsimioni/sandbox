@@ -261,7 +261,7 @@ def assemble_common_areas(root: Path = Path("."), with_others: bool = True) -> D
                                page=f"page {prow['booklet_page']}", location=prow.get("bbox", ""), text_as_read=criteria_text(prow),
                                method="Value read from the DD Booklet criteria table of a department", confidence=str(prow.get("confidence", "")))
                 ptpl = str((conf.presumed_cfg(root).get("remarks_template")) or "Presumed criteria: taken from {department} booklet p{page}, {row}. No row in this department. To confirm.")
-                ptxt = ptpl.format(department=dep_label, page=prow["booklet_page"], row=prow["room_type_as_printed"])
+                ptxt = ptpl.format(department=dep_label, page=prow["booklet_page"], row=prow["room_type_as_printed"].rstrip(". "))
                 room["criteria"] = criteria_from_row(prow, psid, hit["how"], "A", ptxt + f" Match: {hit['how']}.")
                 room["criteria"]["presumed"] = True
                 room["remark"] += "; " + ptxt.rstrip(".")

@@ -152,7 +152,7 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
                               zero="No room of this unit has a supply airflow.",
                               lead=g("leadtxt"), partial=g("cov"), note=g("tsrc"),
                               all_spec=f'AND({g("n")}>0,{g("nfix")}={g("n")})', oa_above=oa_above, oa_calc=g("oa_rule"), oa_tender=g("sched_oa"),
-                              extra=f'({shared}&IF({xx}="","",IF({shared}=""," ","")&{xx}))', small=small_zone(g("zr"), g("za")))[1:]
+                              extra=f'({shared}&IF(AND({shared}<>"",{xx}<>"")," ","")&{xx})', small=small_zone(g("zr"), g("za")))[1:]
         put(ws, g("rem"), f'=IF({g("n")}=0,"No room on Room Information is served by this unit: no calculation.",{inner})', "Remark")
 
 
