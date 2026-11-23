@@ -280,3 +280,5 @@ grid_typical_spacing_mm: 8400                              # D-041
 envelope: {source: "Short Version DD Booklet/20260129_AIGH_ETTV_Report.pdf", status: to_assess_before_issue}   # D-042
 equipment_provisional_w_m2: {allowed: true, style: Assumption-Load, flag: vendor data}                       # D-043
 common_areas_lb3_to_l01: build                             # D-044
+# D-048: booklet zoning by room list (booklet rooms -> SOA/DPA -> plan room polygons); picture registration = cross-check only
+zoning_d048: {root: dd_booklet_room_list, locate_via: [soa_rooms, dpa_rooms, room_polygons], zone_polygon: union_of_located_rooms, picture_registration: cross_check_only}
