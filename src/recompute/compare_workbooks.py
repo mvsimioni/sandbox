@@ -20,7 +20,7 @@ from typing import Any, Dict, List
 
 import openpyxl
 
-from .thermal import recompute
+from .thermal import WORKBOOK_RULES, recompute
 
 TOL_PCT = 0.5
 TOL_ABS = 0.05
@@ -40,10 +40,7 @@ def _round_areas(data: Dict[str, Any]) -> Dict[str, Any]:
     return dict(data, rooms=rooms)
 
 
-CAUSE_EXH = "required exhaust and no pressure offset: the workbook takes no supply floor from the exhaust, the recomputation takes supply not below exhaust"
 CAUSE_AREA = "area test at the tolerance edge: the workbook tests the areas rounded to 0.1 m2, the recomputation tests them unrounded"
-CAUSE_OFFSET = ("room with a pressure offset: the workbook exhausts the required exhaust (and, for a negative room, the offset air) and returns the rest of the extract, "
-                "the recomputation exhausts the whole extract and takes the outdoor air as the supply (rule difference, open for Marcus: OI-R401-1)")
 CAUSE_AHU = "follows from the room rows of this AHU that carry a cause"
 
 
@@ -59,8 +56,11 @@ def compare_one(dept: str, data: Dict[str, Any], xlsx: Path) -> List[Dict[str, A
     # a room with no area (design area 0 or blank, no SOA, no measured area): the area is unknown and is taken as 0, as in the workbook
     data = dict(data, rooms=[dict(r, soa_area_m2=0.0) if not any((r.get(k) or 0) > 0 for k in ("dpa_area_m2", "soa_area_m2", "measured_area_m2")) else r
                              for r in data["rooms"]])
-    res = recompute(data, "HIGHEST_FRACTION")
-    res_b = recompute(_round_areas(data), "HIGHEST_FRACTION")
+    # The two rules that the engines read differently (OI-13-1 supply floor from the exhaust, OI-R401-1 outdoor air of a room with an offset) are open for Marcus. The
+    # comparison reads both engines under the interim reading of the workbook, so that each engine implements the same stated rule on its own. The other reading is
+    # compared in ``sensitivity`` (not an explanation of a difference).
+    res = recompute(data, "HIGHEST_FRACTION", rules=WORKBOOK_RULES)
+    res_b = recompute(_round_areas(data), "HIGHEST_FRACTION", rules=WORKBOOK_RULES)
     wb = openpyxl.load_workbook(xlsx, data_only=True)
     rows: List[Dict[str, Any]] = []
     af = wb["Airflow"]
@@ -115,11 +115,6 @@ def compare_one(dept: str, data: Dict[str, Any], xlsx: Path) -> List[Dict[str, A
         ra = by_no[r["ref"]]
         if key and rb is not None and _row("", "", "", "", r["workbook"], rb[key])["within_tolerance"] == "yes":
             r["cause"] = CAUSE_AREA
-        elif key == "oa_lps" and ra.get("offset_kind") in ("exhaust", "supply") and not ra.get("single_pass") and abs(float(r["recomputed"]) - ra["supply_lps"]) <= 0.05 \
-                and float(r["workbook"]) < float(r["recomputed"]):
-            r["cause"] = CAUSE_OFFSET
-        elif key in ("supply_lps", "oa_lps") and ra.get("exhaust_required_lps", 0) > 0 and not ra.get("offset_kind") and ra.get("governing_case") == "exhaust_pressure":
-            r["cause"] = CAUSE_EXH
         elif r["metric"] == "pressure offset needed m3/h" and rb is not None and (rb.get("pressure") or {}).get("offset_needed_m3h") is not None \
                 and _row("", "", "", "", r["workbook"], rb["pressure"]["offset_needed_m3h"])["within_tolerance"] == "yes":
             r["cause"] = CAUSE_AREA
@@ -134,6 +129,25 @@ def compare_one(dept: str, data: Dict[str, Any], xlsx: Path) -> List[Dict[str, A
     return rows
 
 
+def sensitivity(dept: str, data: Dict[str, Any], rows_main: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Room values that the other reading of the two open rules (OI-13-1, OI-R401-1) would change: the recomputation under that reading against the same recomputation
+    under the reading of the workbook. Information for Marcus. It does not explain a difference of the main comparison."""
+    data = dict(data, rooms=[dict(r, soa_area_m2=0.0) if not any((r.get(k) or 0) > 0 for k in ("dpa_area_m2", "soa_area_m2", "measured_area_m2")) else r for r in data["rooms"]])
+    a = {r["number"]: r for r in recompute(data, "HIGHEST_FRACTION", rules=WORKBOOK_RULES)["rooms"]}
+    b = {r["number"]: r for r in recompute(data, "HIGHEST_FRACTION")["rooms"]}
+    out = []
+    for no, ra in a.items():
+        rb = b.get(no)
+        if rb is None:
+            continue
+        for lab, key in (("supply L/s", "supply_lps"), ("outdoor air L/s", "oa_lps")):
+            x = _row(dept, "room", no, lab, ra.get(key), rb.get(key))
+            if x["within_tolerance"] != "yes":
+                out.append(dict(dept=dept, ref=no, metric=lab, workbook_reading=x["workbook"], other_reading=x["recomputed"], diff_pct=x["diff_pct"],
+                                open_item="OI-13-1 and OI-R401-1: supply floor from the exhaust, and the outdoor air of a room with a pressure offset"))
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--inputs", default="out/loads/inputs")
@@ -141,6 +155,7 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default="out/qa/recompute_comparison.csv")
     ns = ap.parse_args(argv)
     allrows: List[Dict[str, Any]] = []
+    sens: List[Dict[str, Any]] = []
     for js in sorted(Path(ns.inputs).glob("D*.json")):
         dept = js.stem[1:]
         wbs = sorted(Path(ns.workbooks).glob(f"AIGH_C2_D{dept}_*.xlsx"))
@@ -152,6 +167,12 @@ def main(argv=None) -> int:
         unexp = sum(1 for r in rows if r["within_tolerance"] != "yes" and not r["cause"])
         print(f"D{dept}: {len(rows)} values, {bad} outside {TOL_PCT} %, {unexp} without a cause")
         allrows.extend(rows)
+        sens.extend(sensitivity(dept, json.loads(js.read_text(encoding="utf-8")), rows))
+    sp = Path(ns.out).with_name("recompute_sensitivity.csv")
+    with open(sp, "w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=["dept", "ref", "metric", "workbook_reading", "other_reading", "diff_pct", "open_item"])
+        w.writeheader()
+        w.writerows(sens)
     Path(ns.out).parent.mkdir(parents=True, exist_ok=True)
     with open(ns.out, "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=["dept", "level", "ref", "metric", "workbook", "recomputed", "diff", "diff_pct", "within_tolerance", "cause"])

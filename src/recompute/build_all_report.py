@@ -94,16 +94,11 @@ def main() -> int:
     by_dept = collections.Counter(r["dept"] for r in bad)
     w(f"- Departments with values outside: {', '.join(f'D{k} ({n})' for k, n in sorted(by_dept.items()))}.")
     w("")
-    w("The outdoor air that a booklet gives per m2 (data-centre rooms) is a floor of the room supply in both engines. Each value outside tolerance with no cause named above has no explanation yet and is listed in `out/qa/recompute_comparison.csv`.\n")
-    w("The causes are differences of rule between the two engines, not of arithmetic. None is changed silently:\n")
-    w("1. Exhaust without a pressure offset. The airflow rule says supply is not less than the exhaust and pressure regime require. The workbook raises supply from the exhaust only for a room with a calculated offset (Pressure tab). "
-      "The recomputation also takes supply not below the exhaust for a negative-regime room that has no pressure value. For toilets and change rooms with a required exhaust of 80 to 490 L/s and no AHU, the workbook gives supply 0 and the recomputation gives the exhaust. "
-      "The workbook reading keeps a toilet exhaust-only. Marcus to decide (proposed decision: a negative-regime room with no pressure value takes no supply floor from its exhaust).")
-    w("2. Area test at the tolerance edge. The workbook compares the design area and the measured area after taking each to 0.1 m2; the recomputation compares them unrounded. D22 AMSC 02.05.03 (design 10.22 m2, measured 9.709 m2, difference 0.511 m2 unrounded, 0.5 m2 rounded) is the case. "
+    w("Both engines are read under the interim reading of the two rules that are open for Marcus (OI-13-1 supply floor from the exhaust; OI-R401-1 outdoor air of a room with a pressure offset), so that each engine applies the same stated rule on its own. "
+      "The outdoor air that a booklet gives per m2 or per person is a floor of the room supply in both engines. A value outside tolerance with no cause named above has no explanation yet and is listed in `out/qa/recompute_comparison.csv`. "
+      "The values that the other reading of the two open rules would change are in `out/qa/recompute_sensitivity.csv`; they are not explanations of a difference.\n")
+    w("Known cause of a difference of arithmetic: area test at the tolerance edge. The workbook compares the design area and the measured area after taking each to 0.1 m2; the recomputation compares them unrounded. D22 AMSC 02.05.03 (design 10.22 m2, measured 9.709 m2, difference 0.511 m2 unrounded, 0.5 m2 rounded) is the case. "
       "The brief says to take areas to 0.1 m2 first, so the workbook reading follows the brief; the recomputation reproduces the workbook value when it rounds first.")
-    w("3. Room with a pressure offset (D-028 gives every room with a pressure target a Pressure row, so this rule difference now shows). The workbook exhausts the required exhaust and, for a negative room, the offset air, and returns the rest of the extract to the AHU. "
-      "The recomputation exhausts the whole extract (supply plus offset for a negative room, supply minus offset for a positive room) and takes the outdoor air as the supply. Only the outdoor air of these rooms (and of their AHU) differs; supply and loads agree. "
-      "Neither engine is changed before Marcus rules (OI-R401-1, same precedent as OI-13-1).")
     w("\nOne defect of the recomputation was corrected: it rounded areas with Python `round`, which takes 10.25 to 10.2, where the spreadsheet takes 10.3 (D04 ICHA 12.07.03). It now rounds halves away from zero (`_round_half_up` in `src/recompute/thermal.py`). "
       "A room with no area (design area 0, no SOA, no measured area) is taken as 0 m2 in the comparison, as in the workbook; people-based loads stay (D11, D29, D31, D39, D45).\n")
     w("## 5. AHU master summary and Calculated airflow\n")
@@ -158,7 +153,7 @@ def main() -> int:
               "`src/recompute/thermal.py`: half-up area rounding. `src/recompute/compare_workbooks.py`: the comparison. `src/zoning/fill_calculated.py` and `src/zoning/deliver.py`: zone schedule fill and README wording. `src/recompute/build_all_report.py`: this report."]:
         w(f"- {t}")
     w("\n## 7. Open items for Marcus\n")
-    for t in ["Decision on the exhaust floor rule for a negative-regime room with no pressure value (section 4, cause 1).",
+    for t in ["Decision on the exhaust floor rule for a negative-regime room with no pressure value (OI-13-1) and on the outdoor air of a room with a pressure offset (OI-R401-1): see `out/qa/recompute_sensitivity.csv`.",
               "Confirm the inferred department to unit entries listed in section 2 and the exclusion of DIIP CT Scan (L5) and SECU.",
               "Every room with a default ceiling height, default density or no criteria row is listed on the Flags tab of its workbook.",
               "AHU units of the zone schedule that no workbook covers have a blank Calculated airflow.",

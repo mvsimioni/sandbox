@@ -283,7 +283,7 @@ def _write_suites(ctx: Ctx, ws) -> None:
         put(ws, g("ratio"), f'=IF({mixed},"n/a",IF({g("needed")}>OffsetEps,{g("design")}/{g("needed")},"n/a"))', "Calc", "d2")
         put(ws, g("status"), f'=IF({mixed},"MIXED",IF(ISNUMBER({g("ratio")}),IF({g("ratio")}<RatioFail,"FAIL",IF({g("ratio")}<RatioVerify,"VERIFY","PASS")),"PASS"))',
             "Check")
-        put(ws, g("note"), f'=IF({mixed},"no single margin: see the space rows","internal doors cancel")', "Note")
+        put(ws, g("note"), f'=IF({mixed},"no single margin: see the space rows","all rooms of the suite have one kind of offset")', "Note")
     if ctx.suites:
         cf_text(ws, f"{PU.col('status')}{PU.first}:{PU.col('status')}{PU.last}", f"{PU.col('status')}{PU.first}", "FAIL")
         cf_text(ws, f"{PU.col('status')}{PU.first}:{PU.col('status')}{PU.last}", f"{PU.col('status')}{PU.first}", "VERIFY", fill="FFFFF2CC")

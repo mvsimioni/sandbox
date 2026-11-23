@@ -122,6 +122,9 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
             _val(ctx, ws, g("zr"), a.get("zone_rooms"), zc, fmt="d0", cref=g("zc"), sref=g("zs"), src=zsid, label="rooms of the unit in the zone schedule", room=a["tag"])
             _val(ctx, ws, g("za"), a.get("zone_area_m2"), zc, fmt="d1", cref=g("zc"), sref=g("zs"), src=zsid, label="area of the unit in the zone schedule", room=a["tag"])
             _prov_cells(ctx, ws, g("zc"), g("zs"), zc, zsid, zhas)
+            osrc = a.get("other_rooms_source", "")
+            _val(ctx, ws, g("oth"), a.get("other_rooms"), "D", fmt="d0", cref=g("othc"), sref=g("oths"), src=osrc, label="rooms of other departments on the unit", room=a["tag"])
+            _prov_cells(ctx, ws, g("othc"), g("oths"), "D", osrc, not blank(a.get("other_rooms")))
         else:
             A = ctx.lay["AH"]
             put(ws, g("sched"), f'=IF({A.local("sched", t)}="","",{A.local("sched", t)})', "Link", "d0")
@@ -129,21 +132,27 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
             put(ws, g("tsrc"), f'=IF({A.local("tsrc", t)}="","",{A.local("tsrc", t)})', "Link")
             put(ws, g("zr"), f'=IF({A.local("zr", t)}="","",{A.local("zr", t)})', "Link", "d0")
             put(ws, g("za"), f'=IF({A.local("za", t)}="","",{A.local("za", t)})', "Link", "d1")
+            put(ws, g("oth"), f'=IF({A.local("oth", t)}="","",{A.local("oth", t)})', "Link", "d0")
+            put(ws, g("othc"), f'=IF({A.local("othc", t)}="","",{A.local("othc", t)})', "Link")
+            put(ws, g("oths"), f'=IF({A.local("oths", t)}="","",{A.local("oths", t)})', "Link")
         if not after:
             # the room list of the unit is complete when the rooms counted here reach ZoneCoverMin of the zoned area (or, where the zone has no
             # measured area, when every zoned room is counted). Until then no reduction is stated.
-            put(ws, g("cov"), coverage_formula(g("zr"), g("za"), g("nok"), g("area_ok"), "ZoneCoverMin", g("nocrit")), "Calc").alignment = Alignment(horizontal="left")
+            put(ws, g("cov"), coverage_formula(g("zr"), g("za"), g("nok"), g("area_ok"), "ZoneCoverMin", g("nocrit"), g("oth")), "Calc").alignment = Alignment(horizontal="left")
         else:
             put(ws, g("cov"), f'={ctx.lay["AH"].local("cov", t)}', "Link").alignment = Alignment(horizontal="left")
         oa_above = f'AND(ISNUMBER({g("sched_oa")}),{g("oa_rule")}>{g("sched_oa")})'
         put(ws, g("red"), f'=IF(OR({g("sched")}="",{g("n")}=0,{g("sa_ahu")}=0,{incomplete(g("cov"))},{oa_above},{g("sa_ahu")}>={g("sched")}),"",{g("sched")}-{g("sa_ahu")})', "Calc", "d0")
         put(ws, g("redp"), f'=IF(OR({g("red")}="",{g("sched")}=0),"",{g("red")}/{g("sched")})', "Calc", "pct1")
         put(ws, g("leadtxt"), "=" + height_lead(ctx, ahu=g("ahu"), n=g("n"), noh=g("noh")), "Calc")
+        shared = (f'IF(IF(ISNUMBER({g("oth")}),{g("oth")},0)>0,"This unit is shared with other departments ("&{g("oth")}&IF({g("oth")}=1," room"," rooms")&"). '
+                  f'Its result against tender is on the AHU master summary.","")')
+        xx = unit_extra(g("spnote"), a.get("note"))
         inner = tender_remark(g("sched"), g("sa_ahu"), g("red"), g("redp"), f'IF({g("tsrc")}="","tender airflow",{g("tsrc")})',
                               zero="No room of this unit has a supply airflow.",
                               lead=g("leadtxt"), partial=g("cov"), note=g("tsrc"),
                               all_spec=f'AND({g("n")}>0,{g("nfix")}={g("n")})', oa_above=oa_above, oa_calc=g("oa_rule"), oa_tender=g("sched_oa"),
-                              extra=unit_extra(g("spnote"), a.get("note")), small=small_zone(g("zr"), g("za")))[1:]
+                              extra=f'({shared}&IF({xx}="","",IF({shared}=""," ","")&{xx}))', small=small_zone(g("zr"), g("za")))[1:]
         put(ws, g("rem"), f'=IF({g("n")}=0,"No room on Room Information is served by this unit: no calculation.",{inner})', "Remark")
 
 
@@ -161,19 +170,26 @@ def small_zone(zr: str, za: str) -> tuple:
             f'"Interim, open for Marcus (OI-R206-1): the zone schedule gives this unit "&{zr}&IF({zr}=1," room"," rooms")&" ("&TEXT({za},"#,##0")&" m²). The reduction may come from an incomplete room list. It is not a confirmed result."')
 
 
-def coverage_formula(zr: str, za: str, nok: str, area_ok: str, z: str, nc: str = None) -> str:
+def coverage_formula(zr: str, za: str, nok: str, area_ok: str, z: str, nc: str = None, oth: str = None) -> str:
     """Excel text: the completeness of the room list of a unit (D-027). It starts with 'Complete' when every zoned room of the unit is counted and with
-    'Not complete' otherwise, and it states 'n of m zoned rooms counted'. A unit is complete when
+    'Not complete' otherwise, and it gives the reason. A unit is complete when
     1. the zone schedule gives the unit at least one room (zr),
     2. the rooms counted with a criteria row and a supply airflow (nok) are at least as many as the zoned rooms,
-    3. no counted room lacks a criteria row (nc), and
-    4. the zone schedule gives the unit an area, and the area of the counted rooms is at least the share Z of it. A unit with a zoned area of 0 m² is not complete (its room tags lie in an open region of the plan).
+    3. no counted room lacks a criteria row (nc),
+    4. the zone schedule gives the unit an area, and the area of the counted rooms is at least the share Z of it, and
+    5. no other department has a room on the unit (oth): a unit that several departments share is judged on the AHU master summary, which adds up all of them.
     A reduction against tender is stated only for a complete unit."""
     nct = f'IF({nc}>0,"; "&{nc}&IF({nc}=1," room has"," rooms have")&" no criteria row","")' if nc else '""'
     zt = f'IF(AND(ISNUMBER({za}),{za}>0),"","; the zone schedule gives the unit no area")'
-    ok = f'AND({nok}>={zr},{nc}=0,ISNUMBER({za}),{za}>0,{area_ok}>={z}*{za})' if nc else f'AND({nok}>={zr},ISNUMBER({za}),{za}>0,{area_ok}>={z}*{za})'
+    at = (f'IF(AND(ISNUMBER({za}),{za}>0,{area_ok}<{z}*{za}),"; the rooms counted cover "&TEXT({area_ok}/{za},"0 %")&" of the zoned area of "&TEXT({za},"#,##0.0")&" m², '
+          f'less than the "&TEXT({z},"0 %")&" needed","")')
+    ot = f'IF(IF(ISNUMBER({oth}),{oth},0)>0,"; "&{oth}&IF({oth}=1," room of another department is"," rooms of other departments are")&" on this unit: the result of the unit is on the AHU master summary","")' if oth else '""'
+    ok = f'AND({nok}>={zr},{nc}=0,ISNUMBER({za}),{za}>0,{area_ok}>={z}*{za}' if nc else f'AND({nok}>={zr},ISNUMBER({za}),{za}>0,{area_ok}>={z}*{za}'
+    ok += (f',IF(ISNUMBER({oth}),{oth},0)=0)' if oth else ')')
+    cnt = (f'IF({nok}>={zr},IF({zr}=1,"the zoned room is counted","all "&{zr}&" zoned rooms are counted")&IF({nok}>{zr}," ("&{nok}&" rooms counted)",""),'
+           f'{nok}&" of "&{zr}&" zoned rooms counted")')
     return (f'=IF(OR({zr}="",{zr}=0),"Not complete: the unit is not in the zone schedule",'
-            f'IF({ok},"Complete: ","Not complete: ")&IF({nok}>{zr},"all "&{zr}&" zoned rooms counted ("&{nok}&" rooms counted)",{nok}&" of "&{zr}&" zoned rooms counted")&IF({ok},"",{nct}&{zt}))')
+            f'IF({ok},"Complete: ","Not complete: ")&{cnt}&IF({ok},"",{nct}&{zt}&{at}&{ot}))')
 
 
 def height_lead(ctx: Ctx, *, ahu: str = None, room: str = None, fan_tag: str = None, n: str = None, noh: str = None) -> str:
@@ -240,7 +256,7 @@ def write_ahu(ctx: Ctx) -> None:
              H("sched_oa", "Tender outdoor airflow", "L/s", 10), H("sched_c", "Code", "", 5), H("sched_s", "Source ID", "", 11),
              H("tsrc", "Tender source", "", 30),
              H("zr", "Rooms of the unit in the zone schedule", "no.", 10), H("za", "Area of the unit in the zone schedule", "m" + U, 10),
-             H("zc", "Code", "", 5), H("zs", "Source ID", "", 11), H("cov", "Room list of the unit (rooms counted)", "", 40),
+             H("zc", "Code", "", 5), H("zs", "Source ID", "", 11), H("oth", "Rooms of other departments on this unit", "no.", 12), H("othc", "Code", "", 5), H("oths", "Source ID", "", 11), H("cov", "Room list of the unit (rooms counted)", "", 40),
              H("red", "Reduction = tender − calculated supply", "L/s", 11),
              H("redp", "Reduction = (tender − calculated) ÷ tender", "%", 11), H("rem", "Remarks", "", 140),
              H("nfix", "Rooms specified by the MOT NSC", "no.", 10), H("area_ok", "Area of the rooms with a criteria row and a supply airflow", "m" + U, 12),

@@ -30,7 +30,7 @@ LISTS = OrderedDict([
 ])
 DOOR_CONSTANTS = {"DoorCd", "GapSides", "GapBottom", "GapHinged", "GapSliding", "GapBedWidth", "GapShaft", "SecPerHour", "CM2perM2"}
 PRESSURE_METHOD = (
-    "Pressure method for every room with a pressure target in Pa. The whole envelope complies with the airtightness limit of 2.5 m³/h per m² of internal surface at 50 Pa. "
+    "Pressure method for every room with a pressure target in Pa other than 0 Pa (a neutral room has no offset). The whole envelope complies with the airtightness limit of 2.5 m³/h per m² of internal surface at 50 Pa. "
     "Internal surface = 2 × floor area + perimeter × ceiling height. Doors and windows are part of the surface. Door gaps are not modelled. "
     "Envelope leakage at the set pressure: Q = limit × internal surface × (ΔP ÷ 50)^n, with n = 0.65. The sensitivity cases use n = 0.50 and n = 0.75. "
     "The reference space is the corridor outside the room at 0 Pa. Air flows from the higher to the lower pressure. "
@@ -200,7 +200,7 @@ def write_basis(ctx: Ctx) -> None:
              "supply-to-room temperature difference. Supply is the larger case, not less than exhaust and pressure require. Round once, at the end.",
              "AHU outdoor air = outdoor-air fraction of the highest-standard room on the AHU × AHU supply airflow. Add duct leakage to the supply first. "
              "The plain sum and the multiple-space value of the example are shown beside it.",
-             "Outdoor air is capped at room supply. An outdoor air that a criteria row gives per area or as a rate is a floor of the room supply. Transfer air from the adjacent spaces makes up any exhaust or pressure need beyond the supply. "
+             "Outdoor air is capped at room supply. The outdoor air of a room is the highest of its air-change value, its value per person times the occupancy, its value per area times the area, and the specified value. It is a floor of the room supply. Transfer air from the adjacent spaces makes up any exhaust or pressure need beyond the supply. "
              "Areas are taken to 0.1 m² (named cell AreaDecimals). Airflows are calculated unrounded and rounded once at the end.",
              "Coil duty keeps the method of the Rev A AHU Summary. The outdoor-air load takes the room condition of the first supply room of the AHU, in room order. "
              "The example's own basis is shown beside the rule-based duty. That basis is the maximum of the sum and the multiple-space value. "
@@ -209,15 +209,16 @@ def write_basis(ctx: Ctx) -> None:
              "Reduction = tender − calculated. Reduction (%) = (tender − calculated) ÷ tender. A calculated airflow above tender is marked VERIFY. "
              "A unit states a reduction only where the calculated airflow is below tender and the room list of the unit is complete. The room list is complete when the counted rooms "
              "with a criteria row and a supply airflow are at least as many as the rooms that the zone schedule gives the unit, no counted room lacks a criteria row, and the counted area is "
-             "at least the share ZoneCoverMin of the zoned area. The Room list column gives 'n of m zoned rooms counted'. In every other case the Remarks cell says nothing about a reduction. "
+             "at least the share ZoneCoverMin of the zoned area, and no other department has a room on the unit (a unit that several departments share is judged on the AHU master summary). The Room list column gives the count of rooms and, when the list is not complete, the reason. In every other case the Remarks cell says nothing about a reduction. "
              "A calculated airflow above tender, and a calculated outdoor air above the tender outdoor airflow, are marked VERIFY on every unit. The other departments on the unit are counted on the AHU master summary.",
              "Occupancy comes from the RDS. The default density by room use applies only where the RDS field is empty or the room has no RDS. "
              "It is rounded up to a whole person (red text, code A).",
              "Lighting and small power (plug load) come from a project document where one gives them. No project document does, so the ASHRAE value for the room use applies "
              "(plug load: ASHRAE Handbook, Fundamentals, plug-load densities; lighting: ASHRAE 90.1 space-by-space lighting power density). The cells are red text (code A) and the Remarks column "
              "gives the value and the room use. Equipment gain is 0 W: no equipment list is in the scope, and the rooms led by equipment have a VERIFY flag. Envelope gain is not assessed. It is not zero.",
-             "A room with no criteria row in its own department takes the row of the same space in the closest other department (same room type code, then same name, then same use class; "
-             "clinical rooms prefer clinical departments). The cells are italic green (code A). The booklet and the page of the row stay as the source, and the Remarks column says 'Presumed criteria'. "
+             "A room takes the row of its own department booklet where that booklet prints the same space (the same name, or the same name with a level or department prefix or a number in brackets; "
+             "the Remarks say which). A room with no such row takes the row of the same space in the closest other department (same room type code, then same name, then same use class and the same main word in the room type name; "
+             "clinical rooms prefer clinical departments). The cells of such a presumed row are italic green (code A). The booklet and the page of the row stay as the source, and the Remarks column says 'Presumed criteria'. "
              "A room that no other department covers has no criteria row and is listed on Flags with the reason.",
              "Area used (selector AUTO, the default): the design area is the DPA designed area, else the SOA area. "
              "It is used where no area is measured, or where the measured area agrees with it within the tolerance (named cells AreaTolPct and AreaTolM2). "
@@ -631,8 +632,8 @@ def write_checks(ctx: Ctx) -> None:
         ("Rooms whose final supply is below either airflow case or the pressure minimum", f'=COUNTIF({AF.rng("ok")},"FAIL")', 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
         ("Rooms with an AHU whose outdoor air is below the air-change minimum", f"=SUMPRODUCT(--({AF.rng('oa')}<{AF.rng('oa_air')}),--({AF.rng('supply')}>0),--({AF.rng('ahu')}<>\"\"))", 0, '=IF(C{r}=0,"PASS","FAIL")', "rooms with no AHU are counted in the check on rooms with no AHU; an exhaust-only room has no supply and takes transfer air"),
         ("Rooms whose outdoor-air requirement is above their supply", f"=SUMPRODUCT(--({AF.rng('oa_air')}>{AF.rng('supply')}),--({AF.rng('supply')}>0))", 0, '=IF(C{r}=0,"PASS","VERIFY")', "outdoor air is capped at supply; transfer air makes up the rest"),
-        ("Rooms with a pressure target in Pa and no row on Pressure", f'=SUMPRODUCT(--ISNUMBER({CR.rng("pa")}),--(COUNTIF({PS.rng("node")},{RI.rng("no")})=0))', 0,
-         '=IF(C{r}=0,"PASS","FAIL")', "every room with a pressure target in Pa is calculated from its internal surface"),
+        ("Rooms with a pressure target in Pa and no row on Pressure", f'=SUMPRODUCT(--ISNUMBER({CR.rng("pa")}),--({CR.rng("pa")}<>0),--(COUNTIF({PS.rng("node")},{RI.rng("no")})=0))', 0,
+         '=IF(C{r}=0,"PASS","FAIL")', "every room with a pressure target other than 0 Pa is calculated from its internal surface; a neutral room (0 Pa) has no offset"),
         ("Rooms fixed by the MOT specification", f"=SUM({AF.rng('fix')})", "information", '="INFO"', "rooms with specified airflows"),
         ("Specified (MOT) rooms where the calculation needs more supply than specified", f'=COUNTIF({AF.rng("ok")},"SPECIFIED")', 0,
          '=IF(C{r}=0,"PASS","VERIFY")', "specified airflows are not resized; listed for the MOT engineer"),
@@ -787,7 +788,7 @@ def write_readme(ctx: Ctx) -> None:
     for t in ("Inputs are on Room Information, Criteria, Envelope and the system tabs. Each input has a code and a source ID that "
               "links to Sources. Results follow by formula. No value is pasted and no number is typed inside a formula.",
               "The Room Zones tab of each storey calculates the room loads. Airflow applies both cases to every room. Pressure "
-              "calculates the offset of every room with a pressure target. AHU adds up the rooms of each AHU. Checks reconciles everything.",
+              "calculates the offset of every room with a pressure target other than 0 Pa. AHU adds up the rooms of each AHU. Checks reconciles everything.",
               "Unknown values are blank and are listed on Flags. Yellow cells are assumptions to confirm. On Room Information the Code and Source ID "
               "columns and the system detail are grouped: use the outline buttons above the column letters to show them."):
         put(ws, f"B{r}", t, "TextWrap")
@@ -844,7 +845,7 @@ def write_readme(ctx: Ctx) -> None:
             ("Envelope", "Façade segments per room, summed on the Room Zones tab")]
     tabs += [(ctx.sheet_for(s), f"Room loads, {ctx.label(s)}") for s in ctx.storeys]
     tabs += [("Airflow", "Both airflow cases, governing case, exhaust, return, outdoor air, outdoor-air rule"),
-             ("Pressure", "Pressure offset of every room with a pressure target, sensitivities and the known-answer test"),
+             ("Pressure", "Pressure offset of every room with a pressure target other than 0 Pa, sensitivities and the known-answer test"),
              ("AHU", "Airflow totals, outdoor air, coil duty"), ("FCU", "Rooms on fan coil units, including separated rooms"),
              ("Fans", "Return, exhaust and outdoor-air fan duties"), ("VAV", "Terminals: maximum, minimum, turndown"),
              ("Venturi Valves", "Valve ranges from Pressure"), ("Flow Balance", "Air in against air out"),

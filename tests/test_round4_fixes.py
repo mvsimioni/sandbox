@@ -199,7 +199,11 @@ def test_pressure_tab_calculates_every_room_with_a_target_and_no_door_wording():
         text = " ".join(str(c.value) for row in ws.iter_rows() for c in row if isinstance(c.value, str)).lower()
         assert "no door data" not in text and "door gaps:" not in text
         nodes = {r[0] for r in ws.iter_rows(min_row=7, values_only=True) if r[0]}
-        with_pa = [r["number"] for r in d["rooms"] if r["criteria"] and any(r["criteria"].get(k) is not None for k in ("pressure_pa_tender", "pressure_pa_working", "pressure_pa_booklet"))]
+        def _pa(r):
+            return next((r["criteria"][k] for k in ("pressure_pa_tender", "pressure_pa_working", "pressure_pa_booklet") if r["criteria"].get(k) is not None), None)
+        with_pa = [r["number"] for r in d["rooms"] if r["criteria"] and _pa(r) not in (None, 0)]          # a neutral room (0 Pa) has no Pressure row
+        neutral = [r["number"] for r in d["rooms"] if r["criteria"] and _pa(r) == 0]
+        assert not any(n in nodes for n in neutral), num
         assert with_pa and all(n in nodes for n in with_pa), num
         assert not any(r["gaps"].get("door") for r in d["rooms"])
         flags = " ".join(str(r[3]) for r in wb["Flags"].iter_rows(min_row=7, values_only=True) if r[0]).lower()
@@ -283,7 +287,10 @@ def test_mothyb_02_consistent_in_workbook_master_and_zone_schedule():
     zh = [c.value for c in z[1]]
     zrow = next(r for r in z.iter_rows(min_row=2, values_only=True) if r[0] == tag)
     assert zrow[zh.index("Tender airflow (L/s)")] in (None, "") and note_key in zrow[zh.index("Remarks")]
-    assert zrow[zh.index("Storeys served")] == "L05" and "..'" not in str(zrow[zh.index("Remarks")]) and ".." not in str(zrow[zh.index("Remarks")])
+    # the unit is not on the zoning drawing: no room, no area and no storey in the zone schedule (the rooms of the department workbooks are in the columns beside)
+    assert zrow[zh.index("Rooms")] == 0 and zrow[zh.index("Area (m²)")] == 0 and zrow[zh.index("Storeys served")] == "no information"
+    assert ".." not in str(zrow[zh.index("Remarks")])
+    assert mrow[mh.index("Rooms of the unit in the zone schedule")] in (0, None)
 
 
 # R3-07 -------------------------------------------------------------------------------------------------------------
@@ -314,3 +321,141 @@ def test_no_reduction_status_for_a_room_without_criteria():
         for r in ws.iter_rows(min_row=7, values_only=True):
             if r[0] and r[hdr.index("Against tender")] == "REDUCTION AGAINST TENDER":
                 assert crit.get(r[0]), (num, r[0])
+
+
+# round 4, pass 1 ----------------------------------------------------------------------------------------------------
+needs_registers = pytest.mark.skipif(not (ROOT / "out" / "registers" / "criteria.csv").exists(), reason="registers not present")
+
+
+@needs_registers
+def test_own_booklet_row_is_used_before_any_presumption():
+    from src.workbook.assemble import room_use, _expand_abbreviations
+    from src.workbook.linking import split_code
+    from src.workbook.presume import Presumption
+    P = Presumption(ROOT, room_use, split_code, _expand_abbreviations)
+    own = P.find_own("47", "Office - Typical", "L06", "Admin Workspace")
+    assert own and own["row"]["room_type_as_printed"] == "L6 Admin Workspace Office" and own["row"]["booklet_page"] == "293"
+    own = P.find_own("47", "Office - Typical", "L07", "Admin Workspace")
+    assert own and own["row"]["room_type_as_printed"] == "L7 Admin Workspace Office"
+    own = P.find_own("50", "Lecture Room", "L10", "TRED Learning Centre")
+    assert own and own["row"]["room_type_as_printed"] == "Lecture Room (64)"
+    assert P.find_own("04", "Foo Bar", "L04", "ICU") is None
+
+
+@needs_registers
+def test_use_class_alone_is_not_the_same_space():
+    from src.workbook.assemble import room_use, _expand_abbreviations
+    from src.workbook.linking import split_code
+    from src.workbook.presume import Presumption
+    P = Presumption(ROOT, room_use, split_code, _expand_abbreviations)
+    for name in ("Space for Roll Call", "Bay - Resus Trolley x", "Scrub Up"):
+        hit, why = P.find("30", name)
+        assert hit is None, (name, hit and hit["row"]["room_type_as_printed"])
+    hit, why = P.find("04", "Patient Bay - Holding, Recliner, 6 sqm")
+    assert hit is None or "NP Isolation" not in hit["row"]["room_type_as_printed"]
+    # a row at negative pressure or on single pass is not taken by a room whose name does not say toilet, dirty or isolation
+    for name in ("Store - Consumables, Anaesthetics", "Bay - Linen", "Staff Accom"):
+        hit, why = P.find("22", name)
+        if hit:
+            row = hit["row"]
+            assert not (row["single_pass"].upper().startswith("Y") or "NEG" in row["pressure_regime_as_printed"].upper()), (name, row["room_type_as_printed"])
+
+
+@needs_outputs
+def test_d47_rooms_use_their_own_rows_and_the_workbook_says_so():
+    ws = _wb("47")["Criteria"]
+    hdr = [c.value for c in ws[5]]
+    n_own = n_pres = 0
+    for r in ws.iter_rows(min_row=7, values_only=True):
+        if not r[0]:
+            continue
+        rem = r[hdr.index("Remark")] or ""
+        if "of the booklet of this department, mapped to the room type" in rem:
+            n_own += 1
+            assert "Admin Workspace" in r[hdr.index("Criteria row (as printed)")] and r[hdr.index("Code")] == "A"
+        if rem.startswith("Presumed criteria") and r[1] in ("Office - Typical", "Office - Type B"):
+            n_pres += 1
+        assert "same name" not in rem or "same space" not in rem
+    assert n_own >= 40 and n_pres == 0
+
+
+@needs_registers
+def test_outdoor_air_rates_are_read_from_the_printed_text():
+    import csv as _csv
+    from src.workbook.assemble import criteria_from_row
+    rows = list(_csv.DictReader(open(ROOT / "out" / "registers" / "criteria.csv", encoding="utf-8")))
+    mmd = next(r for r in rows if r["room_type_as_printed"] == "MMD Office")
+    c = criteria_from_row(mmd, "X", "same name")
+    assert c["oa_lps_per_m2"] == 0.6 and "Outdoor air as printed: 0.6 L/s per m²" in c["remark"]
+    lec = next(r for r in rows if r["room_type_as_printed"] == "Lecture Room (64)")
+    assert criteria_from_row(lec, "X", "same name")["oa_lps_per_person"] == 10
+    both = next(r for r in rows if "whichever higher" in r["raw_cells"])
+    c = criteria_from_row(both, "X", "same name")
+    assert c["oa_lps_per_person"] == 10 and c["oa_lps_per_m2"] == 0.6
+
+
+@needs_outputs
+def test_outdoor_air_of_rooms_with_a_rate_is_not_zero():
+    ws = _wb("31")["Airflow"]
+    hdr = [c.value for c in ws[5]]
+    rows = [r for r in ws.iter_rows(min_row=7, values_only=True) if r[0] and r[hdr.index("Final supply")]]
+    assert rows
+    cr = _wb("31")["Criteria"]
+    ch = [c.value for c in cr[5]]
+    per_area = {r[0] for r in cr.iter_rows(min_row=7, values_only=True) if r[0] and r[ch.index("Outdoor air per area")]}
+    assert per_area
+    zero = [r[0] for r in rows if r[0] in per_area and not r[hdr.index("Outdoor air")]]
+    assert not zero, zero[:5]
+
+
+@needs_outputs
+def test_no_double_stop_double_space_or_zero_width_in_any_workbook():
+    zw = re.compile("[\u200b\u200c\u200d\u2060\ufeff]")
+    for f in list(WB.glob("*.xlsx")) + [ROOT / "out" / "zoning" / "zone_schedule.xlsx"]:
+        for title, v in _all_text(f):
+            assert not zw.search(v), (f.name, title, v[:60])
+            assert not re.search(r"(?<![.\d])\.\.(?!\.)", v), (f.name, title, v[:80])
+            assert "  " not in v, (f.name, title, v[:80])
+
+
+@needs_outputs
+def test_no_door_wording_in_pressure_texts():
+    for f in WB.glob("*.xlsx"):
+        for title, v in _all_text(f):
+            low = v.lower()
+            assert "internal doors cancel" not in low and "door-gap" not in low and "provisional gap areas" not in low, (f.name, title, v[:80])
+
+
+@needs_outputs
+def test_shared_unit_is_not_stated_as_reduced_in_a_department_tab():
+    """A unit that other departments also serve is judged on the master only: no department tab states a reduction for it (D-027)."""
+    for f in WB.glob("AIGH_C2_D*_RevA.xlsx"):
+        ws = openpyxl.load_workbook(f, data_only=True)["AHU"]
+        hdr = [c.value for c in ws[5]]
+        for r in ws.iter_rows(min_row=7, values_only=True):
+            if not r[0] or r[0] == "TOTAL" or str(r[0]).startswith("B. "):
+                continue
+            oth = r[hdr.index("Rooms of other departments on this unit")]
+            if isinstance(oth, (int, float)) and oth > 0:
+                assert str(r[hdr.index("Room list of the unit (rooms counted)")]).startswith("Not complete"), (f.name, r[0])
+                assert "Reduced" not in str(r[hdr.index("Remarks")]), (f.name, r[0])
+                assert r[hdr.index("Reduction = tender − calculated supply")] in (None, ""), (f.name, r[0])
+
+
+@needs_outputs
+def test_completeness_text_gives_a_reason_and_is_grammatical():
+    for f in WB.glob("AIGH_C2_D*_RevA.xlsx"):
+        ws = openpyxl.load_workbook(f, data_only=True)["AHU"]
+        hdr = [c.value for c in ws[5]]
+        for r in ws.iter_rows(min_row=7, values_only=True):
+            t = str(r[hdr.index("Room list of the unit (rooms counted)")] or "")
+            assert "all 1 zoned rooms" not in t and "1 of 1 zoned rooms" not in t, (f.name, r[0], t)
+            if t.startswith("Not complete: the zoned room is counted") or re.match(r"Not complete: all \d+ zoned rooms are counted$", t):
+                pytest.fail(f"no reason: {f.name} {r[0]} {t}")
+
+
+def test_comparison_does_not_tag_an_open_rule_as_a_cause():
+    import src.recompute.compare_workbooks as cw
+    assert not hasattr(cw, "CAUSE_OFFSET") and not hasattr(cw, "CAUSE_EXH")
+    from src.recompute.thermal import WORKBOOK_RULES
+    assert WORKBOOK_RULES["offset_oa"] == "required_exhaust" and WORKBOOK_RULES["supply_floor"] == "pressure_only"

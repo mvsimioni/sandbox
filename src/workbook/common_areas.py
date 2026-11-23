@@ -58,7 +58,7 @@ def unit_tags(field: str) -> List[str]:
     return out
 
 
-def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
+def assemble_common_areas(root: Path = Path("."), with_others: bool = True) -> Dict[str, Any]:
     root = Path(root)
     cfg = conf.config(root)
     circ = cfg.get("circulation_default_criteria") or {}
@@ -107,7 +107,8 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
                 min_total_ach=_f(circ.get("min_total_ach")), temp_min_c=(circ.get("temp_c") or [None, None])[0], temp_max_c=(circ.get("temp_c") or [None, None])[1],
                 rh_max_pct=_f(circ.get("rh_max_pct")), pressure_regime=str(circ.get("pressure", "neutral")).upper(),
                 air_class=str(circ.get("air_class")) if circ.get("air_class") is not None else None, filter=circ.get("filter"), source=csid, code="A",
-                remark="No booklet row covers the common areas: default for circulation, corridor and lobby spaces.")
+                remark="Presumed criteria: the default row for circulation, corridor and lobby spaces, taken from the most frequent of the 45 corridor, circulation and lobby rows of the booklets. "
+                       "No row in this department. To confirm.", presumed=True)
 
     il = conf.internal_loads_cfg(root)
     plug_tab, light_tab = il.get("plug_w_m2") or {}, il.get("lighting_w_m2") or {}
@@ -119,7 +120,7 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
             method="Value taken from the project design basis. No project document gives a lighting load", confidence="medium")
     add_src("ASM-EQUIP", document="Workbook defaults", issue="", page="", location="equipment gain",
             text_as_read="equipment gain 0 W: no equipment list is in the scope", method="Assumption, to confirm", confidence="low")
-    pres = Presumption(root, room_use, split_code)
+    pres = Presumption(root, room_use, split_code, _expand_abbreviations)
     n_presumed = n_loads = n_loads_missing = 0
     booklet = _read(root / REG / "criteria.csv")
     crit_cache: Dict[str, Any] = {}
@@ -137,8 +138,8 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
         if key not in crit_cache and is_ac and (len(parts_) >= 2 or name == "Common space"):
             c_ = dict(crit)
             if len(parts_) >= 2:
-                c_["remark"] = (f"Outline with {len(parts_)} names ({name}), air-conditioned on App D. It is not split: the default for circulation and common space applies to "
-                                "the whole outline. To confirm.")
+                c_["remark"] = (f"Presumed criteria: the default row for circulation, corridor and lobby spaces. No row in this department. To confirm. "
+                                f"The outline has {len(parts_)} names ({name}) and is air-conditioned on App D. It is not split: the default applies to the whole outline.")
             crit_cache[key] = (c_, "default")
         if key not in crit_cache and len(parts_) >= 2:
             crit_cache[key] = (None, "none")
@@ -163,12 +164,15 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
                               issue=f"{row.get('department_label', 'booklet')} and other booklets", page=f"page {row['booklet_page']}",
                               location=row.get("bbox", ""), text_as_read=criteria_text(row),
                               method="most frequent row of this room type in the booklet criteria tables", confidence=str(row.get("confidence", "")))
+                lab_ = row.get("department_label") or f"department {row.get('dept_no', '')}"
                 c = criteria_from_row(row, sid, how, code="A",
-                                      remark=f"No booklet covers the common areas. Room type '{row['room_type_as_printed']}' is printed in the booklets; "
-                                             f"this is its most frequent row ({how})" + (f"; {len(variants)} other row(s) differ" if variants else "") + ". To confirm.")
+                                      remark=(f"Presumed criteria: taken from {lab_} booklet p{row['booklet_page']}, {row['room_type_as_printed']}. No row in this department. To confirm. "
+                                              f"No booklet covers the common areas: the booklets print this room type, and this is its most frequent row"
+                                              + (f"; {len(variants)} other row(s) differ" if variants else "") + "."))
+                c["presumed"] = True
                 crit_cache[key] = (c, "booklet")
             elif circ_part is not None:
-                crit_cache[key] = (dict(crit), "default")
+                crit_cache[key] = (dict(crit, presumed=True), "default")
             else:
                 crit_cache[key] = (None, "none")
         return crit_cache[key]
@@ -229,6 +233,9 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
                 n_default += 1
             else:
                 n_booklet += 1
+            if cc.get("presumed"):                  # D-026: the common areas have no booklet of their own, so every row of a booklet is a presumed row
+                n_presumed += 1
+                room["remark"] += "; " + cc["remark"].split("To confirm.")[0].rstrip(". ") + ". To confirm"
         elif kind == "plant":
             n_none += 1
             n_plant += 1
@@ -238,8 +245,15 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
             room["remark"] += "; plant space: no criteria row, airflow not calculated"
         else:
             hit, why_p = (None, "")
-            if len(re.split(r"\s/\s", name)) < 2 and name != "Common space" and room_use(name)[0] is not None:
+            parts_n = [x.strip() for x in re.split(r"\s/\s", name) if x.strip()]
+            if len(parts_n) < 2 and name != "Common space" and room_use(name)[0] is not None:
                 hit, why_p = pres.find("99", name)         # D-026: the same space in the closest other department (the common areas have no booklet of their own)
+            elif len(parts_n) >= 2:
+                uses_n = {room_use(x)[0] for x in parts_n}      # an outline whose names all have one room use ('Toilet / SAN': toilet and sanitary) is one room use
+                if len(uses_n) == 1 and None not in uses_n and "plant_room" not in uses_n:
+                    hit, why_p = pres.find("99", parts_n[0])
+                else:
+                    why_p = "the outline has several names that do not give one room use, so it is not one room type"
             if hit:
                 prow = hit["row"]
                 dep_label = prow.get("department_label") or f"department {hit['department']}"
@@ -261,7 +275,7 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
         # space, else 4 x the square root of the area (assumed, flagged).
         c_ = room["criteria"] or {}
         pa_ = next((c_[k] for k in ("pressure_pa_tender", "pressure_pa_working", "pressure_pa_booklet") if c_.get(k) is not None), None)
-        if pa_ is not None:
+        if pa_ is not None and pa_ != 0:          # a neutral space (0 Pa) has no offset to calculate
             ol = outlines.get((st, str(s["annotation_index"])))
             if ol is not None and ol.length > 0:
                 room["pressure"] = dict(mode="controlled", suite=number, perimeter_m=round(ol.length / 1000.0, 3), prov=["M", sid], doors=[])
@@ -389,6 +403,14 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
                           method="Rooms and area of the unit in the zone schedule", confidence="medium")
             a.update(zone_rooms=zt["rooms"], zone_area_m2=round(zt["area"], 1), zone_code="D", zone_source=zs_)
         ahus.append(a)
+    if with_others:
+        from .assemble import other_unit_rooms
+        oth = other_unit_rooms("00", root)
+        osid = add_src("UNIT-SHARE", document="Room lists of the other department workbooks (the same assembly of every department)", issue="Rev A", page="all departments",
+                       location="rooms with the unit of the AHU tab", text_as_read="number of rooms of the other departments that carry the unit, by unit tag",
+                       method="Count of the rooms of the other departments on the unit", confidence="high")
+        for a in ahus:
+            a.update(other_rooms=oth.get(zone_key(a["tag"]), 0), other_rooms_source=osid)
     # exhaust fan of a space: the nearest exhaust fan marked in it
     fan_tags = {f["tag"] for f in fans}
     for room in rooms:

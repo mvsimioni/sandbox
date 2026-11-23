@@ -21,8 +21,8 @@ BUILTIN_SOURCES = [
      "text_as_read": "duct leakage 10 %; outdoor-air rule: share 5 %, least drop in fraction 5 percentage points", "method": "Value taken from the project design basis",
      "confidence": "high"},
     {"id": "GEN-PRESSURE", "document": "Project pressure-offset method",
-     "issue": "project method", "page": "method", "location": "equations 1 to 6; provisional gap areas",
-     "text_as_read": "limit 2.5 m3/h per m2 at 50 Pa; n 0.65; Cd 0.6; air density 1.2 kg/m3",
+     "issue": "project method", "page": "method", "location": "airtightness limit, leakage exponent, internal surface",
+     "text_as_read": "limit 2.5 m3/h per m2 at 50 Pa; n 0.65; air density 1.2 kg/m3",
      "method": "Value set by the engineer", "confidence": "high"},
 ]
 
@@ -37,10 +37,10 @@ DEFAULTS: Dict[str, Tuple] = {
                         "template convention"),
     "AirSensibleFactor": ("Air constant, sensible (airflow from sensible load)", 1.21, "W per (L/s K)", "S",
                           "GEN-METHOD", "template"),
-    "AirDensity": ("Air density", 1.2, "kg/m³", "S", "GEN-PRESSURE", "also the density of the door-gap equation"),
+    "AirDensity": ("Air density", 1.2, "kg/m³", "S", "GEN-PRESSURE", "template convention"),
     "AirLatentFactor": ("Air constant, latent (infiltration)", 1.18, "W per (L/s kJ/kg)", "S", "GEN-METHOD", "template"),
     "ConvM3hPerLps": ("Conversion, m³/h per L/s", 3.6, "–", "S", "GEN-METHOD", "unit conversion"),
-    "SecPerHour": ("Seconds per hour", 3600, "s", "S", "GEN-PRESSURE", "door-gap equation"),
+    "SecPerHour": ("Seconds per hour", 3600, "s", "S", "GEN-PRESSURE", "unit conversion"),
     "WperkW": ("Watts per kilowatt", 1000, "W", "S", "GEN-METHOD", "unit conversion"),
     "LperM3": ("Litres per cubic metre", 1000, "L", "S", "GEN-METHOD", "unit conversion: airflow L/s to m³/s"),
     "PercentBase": ("Occupancy density base (persons per 100 m²)", 100, "m²", "S", "GEN-METHOD", "unit conversion"),

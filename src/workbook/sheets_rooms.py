@@ -227,7 +227,7 @@ def write_criteria(ctx: Ctx) -> None:
         if has and blank(src):
             raise ValueError(f"room {r['number']}: criteria have no source id")
         fields = [("crit", "criteria_row", "text", None), ("page", "page", "text", None), ("oa_ach", "min_oa_ach", "num", "d1"),
-                  ("oa_lpp", "oa_lps_per_person", "num", "d1"), ("oa_spec", "oa_specified_lps", "num", "d1"),
+                  ("oa_lpp", "oa_lps_per_person", "num", "d1"), ("oa_lpm2", "oa_lps_per_m2", "num", "d2"), ("oa_spec", "oa_specified_lps", "num", "d1"),
                   ("sa_ach", "min_total_ach", "num", "d1"), ("sa_lpm2", "supply_lps_m2", "num", "d2"),
                   ("sa_spec", "supply_specified_lps", "num", "d1"), ("ex_ach", "exhaust_ach", "num", "d1"),
                   ("ex_lpm2", "exhaust_lps_m2", "num", "d2"), ("ex_spec", "exhaust_specified_lps", "num", "d1"),
@@ -300,10 +300,10 @@ ENG_F: Dict[str, str] = {
     "sys": "={RI.systype}", "sptype": "={RI.sptype}", "cond": "={RI.cond}", "h": "={RI.h}", "area": "={RI.area}",
     "vol": "={area}*{h}", "glz": "={RI.glz}", "wall": "={RI.wall}", "roof": "={RI.roof}",
     "nenv": "=COUNTIF([EN.room],{no})",
-    "occ": "={RI.people}", "iof": "={RI.iof}", "oa_ach": "={CR.oa_ach}", "oa_lpp": "={CR.oa_lpp}", "oa_spec": "={CR.oa_spec}",
-    "oa": "=IF(AND({fix}=1,{oa_spec}>0),{oa_spec},MAX({occ}*{oa_lpp}*{iof},{oa_ach}*{vol}/ConvM3hPerLps,{oa_spec}))",
+    "occ": "={RI.people}", "iof": '=IF({RI.iof}="",1,{RI.iof})', "oa_ach": "={CR.oa_ach}", "oa_lpp": "={CR.oa_lpp}", "oa_lpm2": "={CR.oa_lpm2}", "oa_spec": "={CR.oa_spec}",
+    "oa": "=IF(AND({fix}=1,{oa_spec}>0),{oa_spec},MAX({occ}*{oa_lpp}*{iof},{oa_lpm2}*{area},{oa_ach}*{vol}/ConvM3hPerLps,{oa_spec}))",
     "sa_ach": "={CR.sa_ach}", "sa_lpm2": "={CR.sa_lpm2}", "sa_spec": "={CR.sa_spec}",
-    "sa_lps": "=MAX({sa_lpm2}*{area},{sa_ach}*{vol}/ConvM3hPerLps,{sa_spec},{oa_spec})",       # the specified outdoor air (for example L/s per m2) is a floor of the supply
+    "sa_lps": "=MAX({sa_lpm2}*{area},{sa_ach}*{vol}/ConvM3hPerLps,{sa_spec},{oa})",       # the outdoor air is a floor of the supply
     "ex_ach": "={CR.ex_ach}", "ex_lpm2": "={CR.ex_lpm2}", "ex_spec": "={CR.ex_spec}",
     "ex_lps": "=MAX({area}*{ex_lpm2},{ex_ach}*{vol}/ConvM3hPerLps)",
     "ex_fin": "=IF({ex_spec}>0,{ex_spec},IF({ex_lps}>0,ROUNDUP({ex_lps},RoundTo),0))",

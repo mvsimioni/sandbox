@@ -171,8 +171,9 @@ def main(argv=None) -> int:
         nxt += 1
         style_row(i)
         calc, tender_m = g(r, "Calculated airflow"), g(r, "Tender airflow")
-        vals = {1: tag, 2: g(r, "Type") or re.match(r"^([A-Z]+)", tag).group(1), 3: "; ".join(depts.get(tag, [])) or "no information", 4: _level_tokens(tag),
-                5: plant_level(tag), 6: g(r, "Rooms"), 7: round(float(g(r, "Area") or 0), 1), 8: None, col_i: tender_m,
+        # the unit is not in the zone schedule: no room, no area and no storey there (the rooms of the department workbooks are in the columns beside)
+        vals = {1: tag, 2: g(r, "Type") or re.match(r"^([A-Z]+)", tag).group(1), 3: "; ".join(depts.get(tag, [])) or "no information", 4: "no information",
+                5: plant_level(tag), 6: 0, 7: 0, 8: None, col_i: tender_m,
                 col_ts: (f"AHU_master_summary.xlsx, tender airflow: {g(r, 'Tender source') or 'see the master summary'}" if tender_m is not None else
                          str(g(r, 'Tender source') or "No information: no tender airflow in the master summary").rstrip(".")),
                 col_k: round(float(calc), 1) if isinstance(calc, (int, float)) and calc > 0 else None,

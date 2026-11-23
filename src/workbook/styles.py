@@ -164,6 +164,17 @@ def style_for_code(code: str) -> str:
     return CODE_STYLES[code][0]
 
 
+_ZERO_WIDTH = re.compile("[\u200b\u200c\u200d\u200e\u200f\u2060\ufeff]")
+
+
+def clean_text(s: str) -> str:
+    """Text of a cell with no zero-width characters, no double space and no double full stop (D-015)."""
+    s = _ZERO_WIDTH.sub("", s)
+    s = re.sub(r"[ \t\u00a0]{2,}", " ", s)
+    s = re.sub(r"(?<![.\d])\.\.(?!\.)", ".", s)
+    return s.strip(" \t") if "\n" not in s else s
+
+
 _LINK = re.compile(r"^=((?:'[^']+'|[A-Za-z_][\w ]*)!)?\$?[A-Z]{1,3}\$?\d+$")
 
 
@@ -174,6 +185,8 @@ def put(ws, ref: str, value: Any, style: str, fmt: Optional[str] = None, align: 
     c = ws[ref]
     if isinstance(value, str) and (text or style in ("LinkTag",)) and _LINK.match(value):
         value = f'=IF({value[1:]}="","",{value[1:]})'
+    if isinstance(value, str) and not value.startswith("="):
+        value = clean_text(value)
     c.value = value
     c.style = style
     if fmt:

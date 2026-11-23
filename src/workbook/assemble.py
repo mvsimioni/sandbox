@@ -19,6 +19,7 @@ import hashlib
 import json
 import math
 import re
+import threading
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -594,6 +595,9 @@ def _variant_text(first: Dict[str, Any], variants: List[Dict[str, Any]]) -> str:
             f" The table on page {first['booklet_page']} is used.")
 
 
+from .styles import clean_text
+
+
 def criteria_from_row(row: Dict[str, str], csid: str, how: str, code: str = "D", remark: Optional[str] = None) -> Dict[str, Any]:
     """Criteria block of the department input from one booklet criteria row."""
     reg_raw = row.get("pressure_regime_as_printed", "")
@@ -607,7 +611,34 @@ def criteria_from_row(row: Dict[str, str], csid: str, how: str, code: str = "D",
                 afterhours=row["afterhours"] or None, source=csid, code=code,
                 remark=remark or f"Matched to room type '{row['room_type_as_printed']}' ({how}).")
     apply_exhaust_only(crit, row["room_type_as_printed"])
+    _outdoor_air_rates(crit, row)
     return crit
+
+
+def _outdoor_air_rates(crit: Dict[str, Any], row: Dict[str, str]) -> None:
+    """The booklet prints the outdoor air of some rows per area ('0.6 L/s/m2') or per person ('10 L/s/person'), or both ('10 l/s/person or 0.6 l/s/m2, whichever
+    higher'), or as air changes in the text ('6 ACH'). The register keeps the text, and the air-change column is blank. The rates go to their own cells; the outdoor
+    air of the room is the highest of the values."""
+    try:
+        cells = json.loads(row.get("raw_cells") or "{}")
+    except ValueError:
+        cells = {}
+    txt = str(cells.get("min_oa") or "")
+    pp = re.search(r"([\d.]+)\s*l/s\s*/\s*(?:person|pax|p\b)", txt, re.I)
+    pa = re.search(r"([\d.]+)\s*l/s\s*/\s*m(?:2|²)", txt, re.I)
+    ach = re.fullmatch(r"\s*([\d.]+)\s*ACH\s*", txt, re.I)
+    rates = []
+    if pp:
+        crit["oa_lps_per_person"] = float(pp.group(1))
+        rates.append(f"{pp.group(1)} L/s per person")
+    if pa:
+        crit["oa_lps_per_m2"] = float(pa.group(1))
+        rates.append(f"{pa.group(1)} L/s per m²")
+    if ach and crit.get("min_oa_ach") is None:
+        crit["min_oa_ach"] = float(ach.group(1))
+        rates.append(f"{ach.group(1)} air changes")
+    if rates:
+        crit["remark"] = (crit.get("remark") or "").rstrip(". ") + ". Outdoor air as printed: " + (" or ".join(rates)) + (", whichever is higher" if len(rates) > 1 else "") + "."
 
 
 EXHAUST_ONLY = re.compile(r"toilet|\bwc\b|shower|ensuite|\bbath", re.I)
@@ -619,7 +650,7 @@ def apply_exhaust_only(crit: Dict[str, Any], type_text: str) -> None:
     if crit and EXHAUST_ONLY.search(type_text or "") and crit.get("pressure_regime") == "NEGATIVE" and crit.get("min_total_ach"):
         crit["exhaust_ach"] = crit["min_total_ach"]
         crit["min_total_ach"] = None
-        crit["remark"] = (crit.get("remark") or "") + ". Exhaust-only room: the booklet total air changes are the exhaust. Transfer air makes up the supply."
+        crit["remark"] = (crit.get("remark") or "").rstrip(". ") + ". Exhaust-only room: the booklet total air changes are the exhaust. Transfer air makes up the supply."
 
 
 def match_criteria(room_name: str, rows: List[Dict[str, str]], modal: bool = False) -> Tuple[Optional[Dict[str, str]], List[Dict[str, str]], str]:
@@ -784,7 +815,44 @@ def write_link_audit(data: Dict[str, Any], path: Path) -> None:
             w.writerow({k: r.get(k, "") for k in fields})
 
 
-def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path(".")) -> Dict[str, Any]:
+_UNIT_ROOMS: Dict[Tuple[str, str], Dict[str, int]] = {}
+_UNIT_ROOMS_LOCK = threading.Lock()
+
+
+def unit_rooms_of(dept: str, root: Path = Path(".")) -> Dict[str, int]:
+    """Rooms of one department on each unit (by zone key): the unit of a room as the assembly of the department sets it."""
+    ck = (str(Path(root).resolve()), str(dept))
+    with _UNIT_ROOMS_LOCK:
+        if ck in _UNIT_ROOMS:
+            return _UNIT_ROOMS[ck]
+    if str(dept) == "00":
+        from .common_areas import assemble_common_areas
+        rooms = assemble_common_areas(root, with_others=False)["rooms"]
+    else:
+        rooms = assemble_department(str(dept), None, root, with_others=False)["rooms"]
+    out: Dict[str, int] = defaultdict(int)
+    for r in rooms:
+        if r.get("ahu"):
+            out[zone_key(r["ahu"])] += 1
+    with _UNIT_ROOMS_LOCK:
+        _UNIT_ROOMS[ck] = dict(out)
+    return _UNIT_ROOMS[ck]
+
+
+def other_unit_rooms(dept: str, root: Path = Path(".")) -> Dict[str, int]:
+    """Rooms of the other departments (the common areas included) on each unit. A unit that several departments share is judged on the AHU master summary only."""
+    mine = str(dept).lstrip("0").zfill(2) if str(dept).strip("0") else "00"
+    nums = sorted({p.stem[1:] for p in (Path(root) / "out/loads/inputs").glob("D*.json")} | {"00"})
+    out: Dict[str, int] = defaultdict(int)
+    for n in nums:
+        if n == mine:
+            continue
+        for k, v in unit_rooms_of(n, root).items():
+            out[k] += v
+    return dict(out)
+
+
+def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path("."), with_others: bool = True) -> Dict[str, Any]:
     key = _dept_key(dept)
     root = Path(root)
     soa_all = [r for r in _read(root / REG / "soa_rooms.csv") if r["dept_no"] == key and r.get("governing", "").lower() == "yes"]
@@ -883,7 +951,7 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
             pick = next((g for g in group if (_f(g.get("designed_area_m2")) or 0) > 0), group[0])
             ident_storey = _storey_code(pick.get("storey_from_identifier") or "")
             soa_q = soa_by_code.get(ident)
-            dpa_rows.append(dict(number=ident, name=pick["room_name"], storey=ident_storey or storey_stack, dpa_area=_f(pick.get("designed_area_m2")),
+            dpa_rows.append(dict(number=ident, name=clean_text(pick["room_name"]), storey=ident_storey or storey_stack, dpa_area=_f(pick.get("designed_area_m2")),
                                  code=(pick.get("soa_std_room_code") or "").strip(), typical_count=int(_f(soa_q.get("qty")) or 1) if soa_q else 1,
                                  ref_area=_f(pick.get("designed_area_m2")) or soa_area_of(ident),
                                  row=pick, unit=code, differ=len({_f(g.get("designed_area_m2")) for g in group}) > 1,
@@ -959,10 +1027,11 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
     n_rls = n_ch_default = 0
     n_loads = n_loads_missing = 0
     n_presumed = 0
+    n_own_mapped = 0
     perim_of: Dict[str, Tuple[float, str]] = {}
     presumed_how: Dict[str, int] = defaultdict(int)
     from .presume import Presumption
-    pres = Presumption(root, room_use, split_code)
+    pres = Presumption(root, room_use, split_code, _expand_abbreviations)
 
     for d in dpa_rows:
         pick = d["row"]
@@ -1210,8 +1279,22 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
                 crit_done = True
         if not crit_done:
             row, variants, how = match_criteria(d["name"], criteria)
+        own_hit = None
+        if not crit_done and row is None:
+            # D-026 applies only where the own department has no row for the space: the own booklet prints the same space with a level or department prefix, or a number
+            own_hit = pres.find_own(key, d["name"], d["storey"], dept_name)
         if crit_done:
             pass
+        elif own_hit is not None:
+            orow = own_hit["row"]
+            csid = add_src(f"CRIT-{key}-{_norm(orow['room_type_as_printed'])}"[:60], document=_doc(orow["source_file"]), issue=orow.get("department_label", "booklet"),
+                           page=f"page {orow['booklet_page']}", location=orow.get("bbox", ""), text_as_read=criteria_text(orow),
+                           method="Value read from the DD Booklet criteria table", confidence=str(orow.get("confidence", "")))
+            room["criteria"] = criteria_from_row(orow, csid, own_hit["how"], "A",
+                                                 f"Booklet room type '{orow['room_type_as_printed']}' (page {orow['booklet_page']}) of the booklet of this department, mapped to the room type "
+                                                 f"'{d['name']}': {own_hit['reason']}. Confirm the mapping.")
+            crit_stats[orow["room_type_as_printed"] + " (own booklet, mapped)"].append(number)
+            n_own_mapped += 1
         elif row is not None:
             csid = add_src(f"CRIT-{key}-{_norm(row['room_type_as_printed'])}"[:60], document=_doc(row["source_file"]), issue=row.get("department_label", "booklet"),
                            page=f"page {row['booklet_page']}", location=row.get("bbox", ""), text_as_read=criteria_text(row),
@@ -1330,7 +1413,7 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
             gaps["loads"] = ("Lighting and small power are not set. " + ("The room name does not say what the room is used for, so no ASHRAE room use fits it." if not lk
                              else "The ASHRAE tables of the project have no value for this room use.") + " Give the room use or the values.")
             n_loads_missing += 1
-        room["remark"] = ". ".join(_sentence_case(x.replace("; ", ". ")) for x in remark) + "."
+        room["remark"] = ". ".join(_sentence_case(x.replace("; ", ". ")).rstrip(". ") for x in remark if x.strip(". ")) + "."
         room["remark"] += " " + ROOM_THERMAL_NOTE
         if EQUIPMENT_LED.search(d["name"]):
             gaps["equipment"] = "Equipment gain is 0 W: no equipment list is in the scope. VERIFY: the room is led by equipment, so the thermal load is not representative."
@@ -1474,7 +1557,7 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
         pa = None
         if c:
             pa = next((c[k] for k in ("pressure_pa_tender", "pressure_pa_working", "pressure_pa_booklet") if c.get(k) is not None), None)
-        if pa is None:
+        if pa is None or pa == 0:           # a neutral room (0 Pa) has no offset to calculate
             continue
         got = perim_of.get(room["number"])
         if got:
@@ -1509,6 +1592,13 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
                             location=f"unit {a['tag']}", text_as_read=f"{z['rooms']} zoned room(s), {z['area']:.1f} m² measured on the tender plan",
                             method="Rooms and area of the unit in the zone schedule", confidence="medium")
             a.update(zone_rooms=z["rooms"], zone_area_m2=round(z["area"], 1), zone_code="D", zone_source=sid_z)
+    if with_others:
+        oth = other_unit_rooms(key, root)
+        osid = add_src("UNIT-SHARE", document="Room lists of the other department workbooks (the same assembly of every department)", issue="Rev A", page="all departments",
+                       location="rooms with the unit of the AHU tab", text_as_read="number of rooms of the other departments that carry the unit, by unit tag",
+                       method="Count of the rooms of the other departments on the unit", confidence="high")
+        for a in ahus:
+            a.update(other_rooms=oth.get(zone_key(a["tag"]), 0), other_rooms_source=osid)
     dept_fans, fan_flags = department_fans(root, [a["tag"] for a in ahus], rooms, add_src)
     flags.extend(fan_flags)
     for a in ahus:
@@ -1594,7 +1684,7 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
         units_unresolved=res_units["unresolved"],
         plan_linked=len(pairs) + len(region_of) + len(zlinks), plan_pairs=len(pairs), plan_by_name_and_count=zl_count_count[0], plan_by_department_rule=zl_rule_count[0],
         rds_links_by_basis=dict(rds_basis_count), rds_unlinked_dpa=len(rds_link['unlinked_dpa']), rds_unlinked_rds=len(rds_link['unlinked_rds']),
-        loads_ashrae=n_loads, loads_missing=n_loads_missing, criteria_presumed=n_presumed, criteria_presumed_by=dict(presumed_how),
+        loads_ashrae=n_loads, loads_missing=n_loads_missing, criteria_presumed=n_presumed, criteria_own_mapped=n_own_mapped, criteria_presumed_by=dict(presumed_how),
         criteria_residue=len(unmapped_crit), criteria_residue_names={n: len(v) for n, v in unmapped_names.items()}, height_from_rls=n_rls, height_default=n_ch_default, height_conflicts=len(rls_link['conflicts']), rls_rows=len(rls_rows))
     audit: List[Dict[str, Any]] = []
     for d, room in zip(dpa_rows, rooms):

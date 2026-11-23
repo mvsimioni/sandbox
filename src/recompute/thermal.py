@@ -226,9 +226,9 @@ def room_loads(room: Dict[str, Any], c: Dict[str, Any], tables: Dict[str, Any]) 
 
     # airflow requirements independent of load
     oa_pp = _z(crit.get("oa_lps_per_person"))
-    oa_req = max(people * oa_pp * iof, _z(crit.get("min_oa_ach")) * vol / 3.6, _z(crit.get("oa_specified_lps")))
+    oa_req = max(people * oa_pp * iof, _z(crit.get("oa_lps_per_m2")) * area, _z(crit.get("min_oa_ach")) * vol / 3.6, _z(crit.get("oa_specified_lps")))
     min_supply = max(_z(crit.get("supply_lps_m2")) * area, _z(crit.get("min_total_ach")) * vol / 3.6,
-                     _z(crit.get("supply_specified_lps")), _z(crit.get("oa_specified_lps")))     # the specified outdoor air is a floor of the supply
+                     _z(crit.get("supply_specified_lps")), oa_req)     # the outdoor air is a floor of the supply
     exh_calc = max(_z(crit.get("exhaust_lps_m2")) * area, _z(crit.get("exhaust_ach")) * vol / 3.6)
     exh_spec = _num(crit.get("exhaust_specified_lps"))
     # the example rounds the calculated exhaust up once, like the supply: AG = ROUNDUP(AF, -1)
@@ -369,7 +369,12 @@ def solve_pressure(rooms: List[Dict[str, Any]], results: Dict[str, Dict[str, Any
 
 
 # ---- airflow rule --------------------------------------------------------------------------- #
-def _apply_airflow(res: Dict[str, Any], c: Dict[str, Any], pres: Optional[Dict[str, Any]]) -> None:
+# The two rules that the workbook and this recomputation read differently (open for Marcus: OI-13-1 and OI-R401-1). ``recompute(..., rules=WORKBOOK_RULES)`` reads them as
+# the workbook does (the interim state of the deliverables); the default reads them as the recomputation always did (the other option of each item).
+WORKBOOK_RULES = {"supply_floor": "pressure_only", "offset_oa": "required_exhaust"}
+
+
+def _apply_airflow(res: Dict[str, Any], c: Dict[str, Any], pres: Optional[Dict[str, Any]], rules: Optional[Dict[str, str]] = None) -> None:
     """Final supply, exhaust and OA of one supply room, with the governing case (brief 8.3)."""
     thermal, minimum = res["thermal_airflow_lps"], res["min_supply_lps"]
     exh_req = res["exhaust_required_lps"]
@@ -382,7 +387,7 @@ def _apply_airflow(res: Dict[str, Any], c: Dict[str, Any], pres: Optional[Dict[s
     elif kind == "supply":       # positive room: exhaust = supply - offset
         floor = exh_req + offset
     else:
-        floor = exh_req
+        floor = 0.0 if (rules or {}).get("supply_floor") == "pressure_only" else exh_req       # OI-13-1: no supply floor from the exhaust where there is no offset
     if res["fixed_by_specification"] and res["specified_supply_lps"] is not None:
         supply_raw = res["specified_supply_lps"]
         governing = "specified"
@@ -402,14 +407,25 @@ def _apply_airflow(res: Dict[str, Any], c: Dict[str, Any], pres: Optional[Dict[s
         exhaust = max(supply + offset, exh_req)
     elif kind == "supply":
         exhaust = max(supply - offset, 0.0)
+    elif (rules or {}).get("supply_floor") == "pressure_only":
+        exhaust = max(supply, exh_req)          # no offset: the extract is the supply, or the required exhaust where that is larger (transfer air makes up the rest)
     else:
         exhaust = exh_req
     oa = res["oa_required_lps"]
-    if res["single_pass"]:
+    if (rules or {}).get("offset_oa") == "required_exhaust":
+        # OI-R401-1, the workbook reading: the exhaust that needs outdoor air is the required exhaust (and, for a negative room, the offset air); the rest of the extract returns to the AHU
+        if res["single_pass"]:
+            ex_oa = exhaust
+        elif kind == "exhaust":
+            ex_oa = max(exh_req, offset)
+        else:
+            ex_oa = exh_req
+        oa = max(oa, ex_oa + (offset if kind == "supply" else 0.0))
+    elif res["single_pass"]:
         oa = max(oa, supply)
     elif exhaust > 0:
         oa = max(oa, min(exhaust, supply))
-    if kind == "supply" and not res["single_pass"]:
+    if kind == "supply" and not res["single_pass"] and (rules or {}).get("offset_oa") != "required_exhaust":
         # positive room: the exhaust and the air pushed out through leakage are both made up from outdoor air
         oa = max(oa, min(exhaust + offset, supply))
     if res["fixed_by_specification"] and res["specified_oa_lps"] is not None:
@@ -513,7 +529,7 @@ def oa_rule(rooms: List[Dict[str, Any]], supply_leak: float, c: Dict[str, Any]) 
 
 
 # ---- driver --------------------------------------------------------------------------------- #
-def recompute(data: Dict[str, Any], oa_method: Optional[str] = None) -> Dict[str, Any]:
+def recompute(data: Dict[str, Any], oa_method: Optional[str] = None, rules: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Recompute every room and AHU of a department input (schema version 1)."""
     if data.get("schema_version") not in (None, 1):
         raise RecomputeError(f"unsupported schema_version {data.get('schema_version')}")
@@ -547,14 +563,14 @@ def recompute(data: Dict[str, Any], oa_method: Optional[str] = None) -> Dict[str
         res.update({"number": no, "name": room.get("name"), "ahu": room.get("ahu"), "zone_tag": room.get("zone_tag"),
                     "storey": room.get("storey"), "exhaust_only": False})
         # nominal flows for the pressure solve: before any pressure offset
-        _apply_airflow(res, c, None)
+        _apply_airflow(res, c, None, rules)
         res["supply_lps_nominal"], res["exhaust_lps_nominal"] = res["supply_lps"], res["exhaust_lps"]
         results[no] = res
     pres, unresolved = solve_pressure(rooms_in, {**results}, data.get("pressure_nodes") or [])
     for no in unresolved:
         flags.append({"type": "VERIFY", "ref": no, "text": "pressure direction only, no value: not calculated"})
     for no, res in results.items():
-        _apply_airflow(res, c, pres.get(no))
+        _apply_airflow(res, c, pres.get(no), rules)
         res["pressure"] = pres.get(no)
         if pres.get(no) and pres[no]["status"] in ("FAIL", "VERIFY", "UNSOLVED"):
             flags.append({"type": "VERIFY", "ref": no, "text": f"pressure ratio {pres[no]['ratio']}: {pres[no]['status']}"})
