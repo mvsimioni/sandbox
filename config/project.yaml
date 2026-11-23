@@ -135,7 +135,7 @@ department_scope:
 
 # Marcus, 22 Nov 2026: final verification before delivery by Fable 5.2; fixes by Sonnet (code, extraction) and Opus (adjudication).
 final_verification:
-  verifier: fable
+  verifier: fable          # D-045: Fable 5.2 only for the last session (final verification and debrief); no intermediate Fable runs
   fixers: [sonnet, opus]
 # D-014: before the final verification, two reviewer roles on each workbook batch, fixes by sonnet.
 pre_verification_review:
