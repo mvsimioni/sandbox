@@ -193,12 +193,12 @@ def remarks_formula(i: int, zoned: bool = False, on_drawing: bool = True, note: 
     airflow (every unit, whatever the state of the room list). It states a reduction only where the calculated airflow is below tender and the room list of the unit is
     complete. In every other case it says nothing about a reduction. 'The reduction is an upper limit.' stands on a text that states a reduction and on no other.
     A unit that the zone schedule gives 2 rooms or fewer is marked as not confirmed (open for Marcus). `note` is a fixed note that the documents print for the unit."""
-    oa = ('IF({oa},"Outdoor air "&TEXT(U{r},"#,##0")&" L/s is above tender outdoor air "&TEXT(T{r},"#,##0")&" L/s ("&J{r}&"). VERIFY. ","")').format(oa=oa_above_f(i), r=i)
+    oa = ('IF({oa},"Outdoor air "&TEXT(U{r},"#,##0")&" L/s is above tender outdoor air "&TEXT(T{r},"#,##0")&" L/s ("&J{r}&"). VERIFY.","")').format(oa=oa_above_f(i), r=i)
     small = ('IF(AND(ISNUMBER(F{r}),F{r}>0,F{r}<=2)," Interim, open for Marcus (OI-R206-1): the zone schedule gives this unit "&F{r}&IF(F{r}=1," room"," rooms")&" ("&TEXT(G{r},"#,##0")&" m²). '
              'The reduction may come from an incomplete room list. It is not a confirmed result.","")').format(r=i)
     if not on_drawing:
         small = '""'
-    f = ('IF(I{r}="",J{r}&IF(ISNUMBER(SEARCH(".",J{r},LEN(J{r}))),"","."),IF(K{r}="","Tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). Calculated airflow not available. ",'
+    f = ('IF(I{r}="",J{r}&IF(ISNUMBER(SEARCH(".",J{r},LEN(J{r}))),"","."),IF(K{r}="","Tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). Calculated airflow not available.",'
          'IF(K{r}>I{r},"VERIFY: increase from "&TEXT(I{r},"#,##0")&" to "&TEXT(K{r},"#,##0")&" L/s (+"&TEXT((K{r}-I{r})/I{r},"0.0 %")&") against tender ("&J{r}&"). "&' + oa + ','
          'IF(' + oa_above_f(i) + ',"Supply "&TEXT(K{r},"#,##0")&" L/s against tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). "&' + oa + ','
          'IF(AND(ISNUMBER(L{r}),NOT(' + incomplete_f(i) + ')),"Reduced "&TEXT(I{r},"#,##0")&" to "&TEXT(K{r},"#,##0")&" L/s (−"&TEXT((I{r}-K{r})/I{r},"0.0 %")&") against tender ("&J{r}&")."&' + small + '&" ' + THERMAL_NOTE + '","")))))').format(r=i)

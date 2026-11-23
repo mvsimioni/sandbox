@@ -123,14 +123,15 @@ def process_text() -> str:
     """What the repository shows about commits, read from git."""
     import subprocess
     try:
-        log = subprocess.run(["git", "log", "--format=%h %s (%cd)", "--date=format:%H:%M", "-4"], capture_output=True, text=True, check=True).stdout.strip().splitlines()
+        log = subprocess.run(["git", "log", "--format=%h %s (%cd)", "--date=format:%H:%M", "-8"], capture_output=True, text=True, check=True).stdout.strip().splitlines()
         dirty = subprocess.run(["git", "status", "--short"], capture_output=True, text=True, check=True).stdout.strip().splitlines()
     except Exception as exc:                                   # noqa: BLE001
         return f"The git state could not be read: {exc}\n"
     wip = [x for x in log if "WIP" in x]
-    t = ("The brief says not to commit. " + (f"The repository has {len(wip)} commit(s) of the earlier pass of this round that the brief did not allow, in the history on top of the D-029 configuration commit: "
-         + "; ".join(f"`{x}`" for x in wip) + ". They were not rewritten or removed here. " if wip else "")
-         + f"This pass made no commit. The changes of this pass are in the working tree, not committed ({len(dirty)} changed paths under version control; `out/` is not under version control).\n")
+    t = ("The brief says not to commit. " + (f"The recent history has {len(wip)} commit(s) with 'WIP' in the message, made while this round ran (the first of the round, `cf9394f` 'WIP: round 4 (D-025..D-028, completeness) in progress, not yet verified', 05:29, was on top of `50d7799`, the D-029 configuration commit): "
+         + "; ".join(f"`{x}`" for x in wip) + ". An earlier version of this report said that nothing was committed; that was wrong. This pass ran no `git commit` command; commits that appear while it runs were made outside its commands, and it did not rewrite or remove them (the branch has a remote). "
+         "Changes of this pass can already sit inside such a commit. " if wip else "")
+         + f"At the time of this report {len(dirty)} path(s) under version control differ from HEAD; `out/` is not under version control.\n")
     return t
 
 

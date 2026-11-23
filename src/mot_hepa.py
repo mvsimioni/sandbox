@@ -61,7 +61,7 @@ AIRFLOW_COLUMNS = [
     "face_area_m2_total", "face_velocity_used_m_s", "face_velocity_source",
     "supply_l_s_face_area_x_velocity", "ahu_l_s_with_leakage", "duct_leakage_pct",
     "supply_l_s_at_spec_0p25", "supply_l_s_at_spec_0p40", "supply_l_s_at_ashrae_0p127", "supply_l_s_at_ashrae_0p178",
-    "scheduled_terminal_air_flow_l_s", "schematic_supply_norm_l_s", "schematic_supply_setback_l_s",
+    "scheduled_terminal_air_flow_l_s", "schematic_supply_norm_l_s", "schematic_supply_singlepass_l_s", "schematic_supply_setback_l_s", "schematic_compare_basis",
     "schematic_source", "ahu_tags_schematic", "ahu_schedule_supply_l_s", "ahu_schedule_source",
     "calc_vs_schematic_pct", "ahu_with_leakage_vs_ahu_schedule_pct",
     "other_suite_terminals", "status", "flags",
@@ -104,7 +104,9 @@ def fnum(text: str) -> Optional[float]:
 def fmt(x: Optional[float], nd: int = 3) -> str:
     if x is None:
         return ""
-    s = ("%.*f" % (nd, x)).rstrip("0").rstrip(".")
+    s = "%.*f" % (nd, x)
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
     return s or "0"
 
 
@@ -143,7 +145,7 @@ def find_latest(name_fragment: str, mot_dir: Path = MOT_DIR, register: Optional[
 COLS = [
     ("ref", 0, 200), ("location", 200, 520), ("description", 520, 700), ("filter_type", 700, 780),
     ("max_air_flow", 780, 880), ("max_face_velocity", 880, 960), ("nominal_depth", 960, 1085),
-    ("max_dp_initial", 1085, 1190), ("dp_allowance", 1190, 1280), ("duct_size", 1280, 1560), ("remarks", 1560, 99999),
+    ("max_dp_initial", 1085, 1190), ("dp_allowance", 1190, 1280), ("duct_size", 1280, 1400), ("remarks", 1400, 99999),
 ]
 SIZE_RE = re.compile(r"^(\d{2,4})\s*[xX×]\s*(\d{2,4})$")
 TAG_RE = re.compile(r"^HEPA-[A-Za-z0-9]+-[A-Za-z0-9-]+$")
@@ -402,6 +404,14 @@ def airflow_rows(terms: List[Dict[str, Any]], rooms: List[Dict[str, str]], ahu_s
     for r in sch_rows:
         for t in split_tags(r["hepa_terminal_tags"]):
             sch_by_hepa.setdefault(t, []).append(r)
+    # cath / angiography procedure rooms are not operating theatres on the schematic: their room box is the
+    # room named PROCEDURE ROOM (or CT - ANGIOGRAPHY for the NEP suite); the suite's other rooms share the tag list
+    proc_by_hepa: Dict[str, List[Dict[str, str]]] = {}
+    for r in rooms:
+        if r["source_kind"] == "air-side schematic room box" and r["is_operating_theatre"] != "y" and \
+                re.search(r"PROCEDURE ROOM|^CT - ANGIOGRAPHY", r["room_name_printed"]):
+            for t in split_tags(r["hepa_terminal_tags"]):
+                proc_by_hepa.setdefault(t, []).append(r)
     rows: List[Dict[str, Any]] = []
     done: set = set()
     # one row per OT / procedure-room terminal on the schedule
@@ -414,14 +424,19 @@ def airflow_rows(terms: List[Dict[str, Any]], rooms: List[Dict[str, str]], ahu_s
         vel = fnum(t["max_face_velocity_m_s_as_printed"])
         sup = area * vel * 1000.0 if area is not None and vel is not None else None
         ahu = sup * (1 + leak_pct / 100.0) if sup is not None else None
-        sch = sch_by_hepa.get(tag, [])
+        sch = sch_by_hepa.get(tag, []) if t["room_kind"] == "operating theatre" else proc_by_hepa.get(tag, [])
         core = re.sub(r"^HEPA-L\d-", "", tag)
         narrowed = [r for r in sch if core in r["ahu_pahu_tag"]]
         sch = narrowed or sch
         norm = [first_int(r["sa_norm_l_s"]) for r in sch if first_int(r["sa_norm_l_s"]) is not None]
         setb = [first_int(r["sa_setback_l_s"]) for r in sch if first_int(r["sa_setback_l_s"]) is not None]
+        sp = [first_int(r["sa_singlepass_l_s"]) for r in sch if first_int(r["sa_singlepass_l_s"]) is not None]
+        if not norm:  # rooms with a single value (no mode columns): the plain supply_air value
+            norm = [first_int(r["supply_air"]) for r in sch if r["mode_columns"].strip(" ,") in ("", "value") and first_int(r["supply_air"]) is not None]
         sch_norm = max(norm) if norm else None
+        sch_sp = max(sp) if sp else None
         sch_set = max(setb) if setb else None
+        cmp_val, cmp_basis = (sch_norm, "normal") if sch_norm is not None else ((sch_sp, "single pass (no normal mode on the room box)") if sch_sp is not None else (None, ""))
         if len(set(norm)) > 1:
             flags.append("schematic room boxes give different supply values %s" % sorted(set(norm)))
         sch_tags: List[str] = []
@@ -433,9 +448,21 @@ def airflow_rows(terms: List[Dict[str, Any]], rooms: List[Dict[str, str]], ahu_s
         sched_vals = []
         for a in sch_tags:
             s = sched_by_tag.get(a)
+            if s is None and "04CATH" in a:
+                alt = a.replace("AHU-B-07-04CATH", "AHU-B-04-04CATH")
+                s = sched_by_tag.get(alt)
+                if s is not None:
+                    flags.append("schematic tag %s is %s on the MOT AC schedule (Corr 2); see out/qa/mot_tag_differences.csv" % (a, alt))
             if s and fnum(s["supply_airflow_l_s"]) is not None:
                 sched_vals.append((a, fnum(s["supply_airflow_l_s"])))
-        ahu_sched = sum(v for _, v in sched_vals) if sched_vals else None
+        # A/B twins (same stem) are one duty: take the larger, never the sum (the schedule prints the same value on both)
+        stems: Dict[str, float] = {}
+        for a, v in sched_vals:
+            st = re.sub(r"[AB]$", "", a)
+            stems[st] = max(stems.get(st, 0.0), v)
+        ahu_sched = sum(stems.values()) if stems else None
+        if len(sched_vals) > len(stems):
+            flags.append("A/B twin units each scheduled at the same airflow; one unit's value used for the comparison (whether duty/standby or two units sharing is not written on the schedule)")
         sched_src = "; ".join("%s %s L/s" % (a, fmt(v, 0)) for a, v in sched_vals)
         if sched_vals:
             sched_src += " (out/registers/mot_ahu_schedule.csv, MOT AC schedule Corr 2)"
@@ -443,7 +470,7 @@ def airflow_rows(terms: List[Dict[str, Any]], rooms: List[Dict[str, str]], ahu_s
             flags.append("no schematic OT room box carries this terminal tag; schematic airflow blank")
         if sup is None:
             flags.append("face area or velocity not read; supply not calculated")
-        pct = ((sup - sch_norm) / sch_norm * 100.0) if (sup is not None and sch_norm) else None
+        pct = ((sup - cmp_val) / cmp_val * 100.0) if (sup is not None and cmp_val) else None
         apct = ((ahu - ahu_sched) / ahu_sched * 100.0) if (ahu is not None and ahu_sched) else None
         sched_flow = fnum(t["max_air_flow_l_s_as_printed"])
         if t["flags"]:
@@ -460,7 +487,8 @@ def airflow_rows(terms: List[Dict[str, Any]], rooms: List[Dict[str, str]], ahu_s
             "supply_l_s_at_ashrae_0p127": fmt(area * 127.0 if area is not None else None, 0),
             "supply_l_s_at_ashrae_0p178": fmt(area * 178.0 if area is not None else None, 0),
             "scheduled_terminal_air_flow_l_s": fmt(sched_flow, 0),
-            "schematic_supply_norm_l_s": fmt(sch_norm, 0), "schematic_supply_setback_l_s": fmt(sch_set, 0),
+            "schematic_supply_norm_l_s": fmt(sch_norm, 0), "schematic_supply_singlepass_l_s": fmt(sch_sp, 0),
+            "schematic_supply_setback_l_s": fmt(sch_set, 0), "schematic_compare_basis": cmp_basis,
             "schematic_source": "; ".join(sorted({"%s %s (%s)" % (r["source_file"].split("/")[-1][:70], r["page_or_sheet"], r["box_or_row"][:60]) for r in sch})) if sch else "",
             "ahu_tags_schematic": "; ".join(sch_tags), "ahu_schedule_supply_l_s": fmt(ahu_sched, 0), "ahu_schedule_source": sched_src,
             "calc_vs_schematic_pct": fmt(pct, 1), "ahu_with_leakage_vs_ahu_schedule_pct": fmt(apct, 1),
