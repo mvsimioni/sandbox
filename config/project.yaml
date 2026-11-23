@@ -222,3 +222,25 @@ ceiling_height:
   source_order: [rls, flagged_default]
   rls_pattern: "CH\\s*=\\s*(\\d{4})"
   flagged_default_m: 3.0
+
+# D-025 (Marcus, 23 Nov 2026): plug load from ASHRAE where no project value; lighting by the same rule (flagged).
+# W/m2 by room use. Plug: ASHRAE Handbook Fundamentals plug-load densities; lighting: ASHRAE 90.1 space-by-space LPD.
+# All values VERIFY against the issued editions. Cells red (as D-017) with a Remarks note.
+internal_loads:
+  style: {font_colour: "FFC00000", named_style: Assumption-Load, code: A}
+  remarks_template: "{what} assumed: {value} W/m2 (ASHRAE, {use}). No project value. To confirm."
+  equipment: {value: 0, flag: VERIFY, note: "SoE not processed (D-008); equipment-led rooms flagged"}
+  envelope: not_assessed
+  status: VERIFY
+  plug_w_m2:      {office: 10.8, meeting: 5.4, reception_waiting: 5.4, lobby: 2.0, corridor_circulation: 1.0, patient_room: 10.0, icu_hdu_bed: 15.0, exam_treatment: 15.0, operating_room: 20.0, recovery: 15.0, procedure_imaging: 20.0, nurse_station: 10.8, pharmacy: 15.0, laboratory: 20.0, break_room_pantry: 10.8, training_classroom: 10.8, computer_lab: 20.0, store: 1.0, toilet: 0.0, plant_room: 0.0, kitchen: 20.0, dining: 5.4, workshop: 15.0}
+  lighting_w_m2:  {office: 8.0, meeting: 10.4, reception_waiting: 9.0, lobby: 9.0, corridor_circulation: 9.9, patient_room: 6.7, icu_hdu_bed: 6.7, exam_treatment: 18.1, operating_room: 24.3, recovery: 12.4, procedure_imaging: 11.4, nurse_station: 8.1, pharmacy: 17.8, laboratory: 14.3, break_room_pantry: 6.4, training_classroom: 10.0, computer_lab: 10.0, store: 4.1, toilet: 6.8, plant_room: 4.6, kitchen: 11.7, dining: 4.3, workshop: 12.0}
+
+# D-026: presumed criteria from the same space in another department.
+presumed_criteria:
+  style: {font_italic: true, font_colour: "FF00B050", named_style: Presumed-Criteria, code: A}
+  remarks_template: "Presumed criteria: taken from {department} booklet p{page}, {row}. No row in this department. To confirm."
+  match_order: [same_room_type_code, same_name, same_use_class]
+
+# D-027: reduction stated only where Calculated < Tender and the unit's rooms are complete; otherwise silent.
+# D-028: pressure offsets from 2.5 m3/h.m2 @ 50 Pa on internal surface (doors included), n = 0.65; no door data.
+pressure_method_d028: {airtightness_m3h_m2_50pa: 2.5, n: 0.65, sensitivity_n: [0.50, 0.75], door_gaps: not_modelled}
