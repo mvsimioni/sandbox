@@ -175,8 +175,9 @@ def test_reviewer_freetext_is_not_read_as_cell_text(tmp_path):
     doc = pymupdf.open(str(pdf))
     pg = doc[0]
     pg.add_freetext_annot(pymupdf.Rect(300, 100, 520, 160), "REVIEWER SAYS HELLO", fontsize=8)
-    doc.save(str(pdf))
-    doc = pymupdf.open(str(pdf))
+    pdf2 = tmp_path / "annot2.pdf"
+    doc.save(str(pdf2))
+    doc = pymupdf.open(str(pdf2))
     ann = h.collect_annotations(doc)
     assert ann and ann[0]["content"] == "REVIEWER SAYS HELLO"
     tables, _ = h.extract_tables(doc)
