@@ -244,3 +244,10 @@ presumed_criteria:
 # D-027: reduction stated only where Calculated < Tender and the unit's rooms are complete; otherwise silent.
 # D-028: pressure offsets from 2.5 m3/h.m2 @ 50 Pa on internal surface (doors included), n = 0.65; no door data.
 pressure_method_d028: {airtightness_m3h_m2_50pa: 2.5, n: 0.65, sensitivity_n: [0.50, 0.75], door_gaps: not_modelled}
+
+# D-029 (Marcus, 23 Nov 2026): every electrical room (ELEC, LV, HV, switch rooms) is on duty/standby FCUs.
+electrical_rooms:
+  name_pattern: "\\b(ELEC|ELECT|ELECTRICAL|LV|HV|SWITCH|SWITCHRM|ESR|MSB)\\b"
+  class: FCU_duty_standby
+  tag_source_order: [equipment_schedule_corr5, airside_schematic, "FCU duty/standby (tag to confirm)"]
+  list_changes_from: [plan_mode_label, earlier_assignment]
