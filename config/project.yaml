@@ -282,3 +282,5 @@ equipment_provisional_w_m2: {allowed: true, style: Assumption-Load, flag: vendor
 common_areas_lb3_to_l01: build                             # D-044
 # D-048: booklet zoning by room list (booklet rooms -> SOA/DPA -> plan room polygons); picture registration = cross-check only
 zoning_d048: {root: dd_booklet_room_list, locate_via: [soa_rooms, dpa_rooms, room_polygons], zone_polygon: union_of_located_rooms, picture_registration: cross_check_only}
+# D-049: envelope = ETTV construction data per facade + openings per room from the building elevations (grid + level); WWR check per facade/storey, >10 % listed
+envelope_d049: {performance: ettv, openings: building_elevations, mapping: grid_model, wwr_check_tolerance_pct: 10, fallback: ettv_wwr_flagged}
