@@ -450,7 +450,7 @@ def test_completeness_text_gives_a_reason_and_is_grammatical():
         for r in ws.iter_rows(min_row=7, values_only=True):
             t = str(r[hdr.index("Room list of the unit (rooms counted)")] or "")
             assert "all 1 zoned rooms" not in t and "1 of 1 zoned rooms" not in t, (f.name, r[0], t)
-            if t.startswith("Not complete: the zoned room is counted") or re.match(r"Not complete: all \d+ zoned rooms are counted$", t):
+            if re.match(r"Not complete: (the zoned room is counted|all \d+ zoned rooms are counted)$", t):
                 pytest.fail(f"no reason: {f.name} {r[0]} {t}")
 
 

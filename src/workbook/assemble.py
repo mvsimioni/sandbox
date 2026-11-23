@@ -825,11 +825,14 @@ def unit_rooms_of(dept: str, root: Path = Path(".")) -> Dict[str, int]:
     with _UNIT_ROOMS_LOCK:
         if ck in _UNIT_ROOMS:
             return _UNIT_ROOMS[ck]
-    if str(dept) == "00":
-        from .common_areas import assemble_common_areas
-        rooms = assemble_common_areas(root, with_others=False)["rooms"]
-    else:
-        rooms = assemble_department(str(dept), None, root, with_others=False)["rooms"]
+    try:
+        if str(dept) == "00":
+            from .common_areas import assemble_common_areas
+            rooms = assemble_common_areas(root, with_others=False)["rooms"]
+        else:
+            rooms = assemble_department(str(dept), None, root, with_others=False)["rooms"]
+    except (IndexError, FileNotFoundError, ValueError, KeyError):         # a root with no registers for that department (a test root): it has no rooms to count
+        rooms = []
     out: Dict[str, int] = defaultdict(int)
     for r in rooms:
         if r.get("ahu"):

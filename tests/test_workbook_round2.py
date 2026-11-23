@@ -100,7 +100,7 @@ def test_master_counts_each_ahu_once(tmp_path):
     assert {k for k in rows if not str(k).startswith("TOTAL")} == {"AHU-SHARED-01", "AHU-ONLY-30", "AHU-ONLY-41"}
     sh = rows["AHU-SHARED-01"]
     assert sh["Departments"] == 2 and sh["Rooms"] == 6 and sh["Room supply"] == pytest.approx(1500.0) and sh["Calculated airflow"] == pytest.approx(1650.0)   # with 10 % leakage
-    assert sh["Tender airflow"] == 5000 and str(sh["Room list of the unit (rooms counted)"]).startswith("Complete: 6 of 6 zoned rooms counted")
+    assert sh["Tender airflow"] == 5000 and str(sh["Room list of the unit (rooms counted)"]).startswith("Complete: all 6 zoned rooms are counted")
     assert sh["Reduction = tender − calculated"] == pytest.approx(5000 - 1650) and sh["Reduction = (tender − calculated) ÷ tender"] == pytest.approx((5000 - 1650) / 5000)
     assert sh["Remarks"].startswith("Reduced 5,000 to 1,650 L/s") and sh["Outdoor air against tender"] == "within tender outdoor air"
     assert rows["AHU-ONLY-30"]["Against tender"] == "NO TENDER VALUE"

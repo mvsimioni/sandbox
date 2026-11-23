@@ -150,7 +150,7 @@ def tender_remark(tender: str, calc: str, red: str, redp: str, src: str, what: s
     zero_b = f'IF({calc}=0,"Calculated airflow is 0 L/s. "&IF({lead}="","{zero}",{lead}),' if zero else ""
     lead_sp = f'IF({lead}="","",{lead}&" ")'
     if oa_above:
-        oa_s = (f'"Outdoor air "&TEXT({oa_calc},"#,##0")&" L/s is above tender outdoor air "&TEXT({oa_tender},"#,##0")&" L/s ("&{src}&"). VERIFY. "')
+        oa_s = (f'"Outdoor air "&TEXT({oa_calc},"#,##0")&" L/s is above tender outdoor air "&TEXT({oa_tender},"#,##0")&" L/s ("&{src}&"). VERIFY."')
         oa_add = f'&IF({oa_above}," "&{oa_s},"")'
     else:
         oa_s, oa_add = None, ""

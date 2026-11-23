@@ -83,13 +83,13 @@ def test_completeness_wording_n_of_m(tmp_path):
     """D-027: the room list of a unit is 'Complete' or 'Not complete' and says 'n of m zoned rooms counted'. No 'partial' wording."""
     f = coverage_formula("B1", "C1", "D1", "E1", "G1", "H1")        # zoned rooms, zoned area, rooms counted, counted area, share, rooms with no criteria row
     cases = [
-        ({"B1": 10, "C1": 349, "D1": 1, "E1": 12, "G1": 0.9, "H1": 0}, "Not complete: 1 of 10 zoned rooms counted"),
-        ({"B1": 7, "C1": 2067, "D1": 8, "E1": 2527, "G1": 0.9, "H1": 8}, "Not complete: all 7 zoned rooms counted (8 rooms counted); 8 rooms have no criteria row"),
-        ({"B1": 10, "C1": 0, "D1": 10, "E1": 300, "G1": 0.9, "H1": 0}, "Not complete: 10 of 10 zoned rooms counted; the zone schedule gives the unit no area"),
+        ({"B1": 10, "C1": 349, "D1": 1, "E1": 12, "G1": 0.9, "H1": 0}, "Not complete: 1 of 10 zoned rooms counted; the rooms counted cover 3 % of the zoned area of 349.0 m², less than the 90 % needed"),
+        ({"B1": 7, "C1": 2067, "D1": 8, "E1": 2527, "G1": 0.9, "H1": 8}, "Not complete: all 7 zoned rooms are counted (8 rooms counted); 8 rooms have no criteria row"),
+        ({"B1": 10, "C1": 0, "D1": 10, "E1": 300, "G1": 0.9, "H1": 0}, "Not complete: all 10 zoned rooms are counted; the zone schedule gives the unit no area"),
         ({"B1": 10, "C1": 300, "D1": 9, "E1": 300, "G1": 0.9, "H1": 1}, "Not complete: 9 of 10 zoned rooms counted; 1 room has no criteria row"),
-        ({"B1": 10, "C1": 300, "D1": 10, "E1": 200, "G1": 0.9, "H1": 0}, "Not complete: 10 of 10 zoned rooms counted"),
-        ({"B1": 10, "C1": 300, "D1": 10, "E1": 300, "G1": 0.9, "H1": 0}, "Complete: 10 of 10 zoned rooms counted"),
-        ({"B1": 3, "C1": 120, "D1": 11, "E1": 415, "G1": 0.9, "H1": 0}, "Complete: all 3 zoned rooms counted (11 rooms counted)"),
+        ({"B1": 10, "C1": 300, "D1": 10, "E1": 200, "G1": 0.9, "H1": 0}, "Not complete: all 10 zoned rooms are counted; the rooms counted cover 67 % of the zoned area of 300.0 m², less than the 90 % needed"),
+        ({"B1": 10, "C1": 300, "D1": 10, "E1": 300, "G1": 0.9, "H1": 0}, "Complete: all 10 zoned rooms are counted"),
+        ({"B1": 3, "C1": 120, "D1": 11, "E1": 415, "G1": 0.9, "H1": 0}, "Complete: all 3 zoned rooms are counted (11 rooms counted)"),
         ({"B1": 0, "C1": 0, "D1": 4, "E1": 100, "G1": 0.9, "H1": 0}, "Not complete: the unit is not in the zone schedule"),
     ]
     for cells, want in cases:
