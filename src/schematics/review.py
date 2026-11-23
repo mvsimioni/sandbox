@@ -87,7 +87,7 @@ def tag_keys(text: str) -> frozenset:
     out = set()
     for t in TAG_RE.findall(text or ""):
         pre, _, rest = t.partition("-")
-        pair = re.search(r"^(.*-)(\d+)/(\d+)$", rest)
+        pair = re.search(r"^(.*-)(\d+)/(\d+)[A-Z]?$", rest)
         if pair:
             for n in (pair.group(2), pair.group(3)):
                 out.add(f"{pre}:{pair.group(1)}{n}")
@@ -768,6 +768,7 @@ class Review:
                 if u["akeys"] & gk:
                     g["members"].append(u)
                     u["groups"].append(g)
+        self._synthesise_systems()
         # working systems to units
         self.sys_keys: Dict[str, frozenset] = {}
         for s in i.working:
@@ -820,6 +821,90 @@ class Review:
             for a in s["ahus"]:
                 for k in tag_keys(a["tag"]["value"]):
                     self.work_tag_keys[k].append({"sheet": s["sheet"], "tag": a["tag"]["value"]})
+
+    def _sheet_units(self, sheet: str) -> Dict[str, Tuple[Dict[str, Any], List[float], str]]:
+        """Units of the zone schedule whose AHU, FCU or CRAC tag the sheet prints (unit tag -> unit, box, text)."""
+        out: Dict[str, Tuple[Dict[str, Any], List[float], str]] = {}
+        for t, b in self.i.st.lines(sheet):
+            m = re.match(r"^((?:AHU|FCU|CRAC)-[A-Z0-9][A-Za-z0-9\-]*(?:/[A-Z0-9]+)?(?:\s[A-Z])?)", t)
+            if not m:
+                continue
+            for k in tag_keys(m.group(1)):
+                for u in self.units_by_key.get(k, []):
+                    if u["tag"] not in out:
+                        out[u["tag"]] = (u, b, m.group(1).strip())
+        return out
+
+    def _synthesise_systems(self) -> None:
+        """Room boxes on a sheet with no AHU system in the model (the model did not link them to a unit): give
+        each box to the unit whose tag the sheet prints, so that the box is reviewed.  A sheet that prints no unit
+        tag continues the sheet before it in the series."""
+        i = self.i
+        have = {s["sheet"] for s in i.working}
+        synth: List[Dict[str, Any]] = []
+        keep: List[Dict[str, Any]] = []
+        self.synth_sheets: Dict[str, List[str]] = {}
+        for us in i.unassigned:
+            sheet = us["sheet"]
+            if sheet in have or not us["rooms"]:
+                keep.append(us)
+                continue
+            cands = self._sheet_units(sheet)
+            if not cands:
+                prev = sheet[:-1] + str(int(sheet[-1]) - 1) if sheet[-1].isdigit() and sheet[-1] != "0" else ""
+                for w in i.working:
+                    if w["sheet"] == prev:
+                        for k in w["ahus"]:
+                            for kk in tag_keys(k["tag"]["value"]):
+                                for u in self.units_by_key.get(kk, []):
+                                    cands.setdefault(u["tag"], (u, k["tag"].get("box") or [0, 0, 0, 0], k["tag"]["value"]))
+            if not cands:
+                keep.append(us)
+                continue
+            groups = [t for t, (u, _, _) in cands.items() if u.get("is_group")]
+            assign: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+            rest: List[Dict[str, Any]] = []
+            for rm in us["rooms"]:
+                n = canon(rm["name"]["value"])
+                if groups:
+                    assign[groups[0]].append(rm)
+                    continue
+                if len(cands) == 1:
+                    assign[next(iter(cands))].append(rm)
+                    continue
+                best, bt = 0.0, None
+                for tg, (u, _, _) in sorted(cands.items()):
+                    for zn, v in list(self.zone_rooms(u).items()) + list(self.plan_for(u).items()):
+                        r = difflib.SequenceMatcher(None, n, zn).ratio()
+                        if plan_matches(v["name"], rm["name"]["value"]):
+                            r = max(r, 0.9)
+                        if r > best:
+                            best, bt = r, tg
+                if bt and best >= 0.6:
+                    assign[bt].append(rm)
+                else:
+                    rest.append(rm)
+            for tg, rms in assign.items():
+                u, b, txt = cands[tg]
+                dn = i.st.duty_near(sheet, b)
+                tagd = {"value": txt, "as_written": txt, "box": b, "box_level": "tag", "sheet": sheet, "page": us["page"]}
+                duty = {"value": dn[0] if dn else None, "as_written": "", "box": dn[1] if dn else b, "box_level": "duty",
+                        "sheet": sheet, "page": us["page"]}
+                synth.append({
+                    "system_id": f"synthetic:{sheet}:{tg}", "kind": "working_ahu_system", "source_set": "working",
+                    "sheet": sheet, "page": us["page"], "storey": us["storey"], "title": us.get("title"),
+                    "ahus": [{"tag": tagd, "duty_supply_L_s": duty}], "duty_standby": None, "plant_level": None,
+                    "served_level": None, "outdoor_air": {"source": "", "lines": [], "pahu_rows": []},
+                    "return_air": {"fans": []}, "spill_relief": {"lines": [], "louvres": [], "note": ""},
+                    "exhaust_fans": [], "isolation_exhaust": {"header_labels": [], "line_rows": []},
+                    "bibo_units": [], "toilet_exhaust_louvres": [], "filters_on_room_boxes": [], "totals_register": None,
+                    "rooms": rms, "requirement_note_numbers": []})
+                self.synth_sheets.setdefault(sheet, []).append(tg)
+            if rest:
+                keep.append(dict(us, rooms=rest))
+        i.working = i.working + synth
+        i.systems = i.systems + synth
+        i.unassigned = keep
 
     def units_by_key_for_system(self, s: Dict[str, Any]) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
