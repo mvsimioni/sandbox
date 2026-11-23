@@ -108,6 +108,13 @@ def shown(v: str, uom: str = "") -> str:
 
 
 def new_value_text(row: Dict[str, str]) -> str:
+    t = _new_value_text(row)
+    if row["note"].startswith("Room list not confirmed"):
+        t += ". Room list not confirmed: check it before you apply this value"
+    return t
+
+
+def _new_value_text(row: Dict[str, str]) -> str:
     cls = row["class"]
     unit = row["unit_of_measure"]
     q = row["quantity"]
@@ -117,6 +124,33 @@ def new_value_text(row: Dict[str, str]) -> str:
         return "%s: change duty %s to %s" % (row["item"], shown(row["drawn"], unit), shown(row["required"], unit))
     return "%s %s: change %s to %s" % (row["item"], q[:1].lower() + q[1:] if q[:2].islower() or not q[:2].isupper() else q,
                                        shown(row["drawn"], unit), shown(row["required"], unit))
+
+
+def _isnum(v: str) -> bool:
+    try:
+        float((v or "").replace(",", ""))
+        return True
+    except ValueError:
+        return False
+
+
+def query_text(row: Dict[str, str]) -> str:
+    """The reason of a query, with the values, in one or two short lines (the label on the sheet)."""
+    a = re.sub(r"^Query:\s*", "", row["action"]).strip()
+    a = re.sub(r"\s*\(change ID [^)]*\)", "", a)
+    a = a[:1].upper() + a[1:]
+    d, r, u = row["drawn"], row["required"], row["unit_of_measure"]
+    if row["quantity"] == "Pressure target":
+        def pa(v: str) -> str:
+            return ("%+g Pa" % float(v)) if _isnum(v) else v
+        txt = "Pressure: sheet %s, workbook %s" % (pa(d), pa(r)) + (". Direction reversed" if "reversed" in row["note"] else "")
+    elif _isnum(d) and _isnum(r):
+        txt = "%s. Drawn %s, workbook %s" % (a, shown(d, u), shown(r, u))
+    elif _isnum(d) or _isnum(r):
+        txt = "%s. %s" % (a, ("Drawn " + shown(d, u)) if _isnum(d) else ("Workbook " + shown(r, u)))
+    else:
+        txt = a
+    return txt if len(txt) <= 150 else txt[:147].rsplit(" ", 1)[0] + " ..."
 
 
 def wrap(text: str, width: float, fs: float = FS, font: str = "helv") -> List[str]:
@@ -344,15 +378,24 @@ class Marker:
         a.set_border(width=1.2, dashes=[4, 3])
         self._finish(a, row, "query box (square)", "%s. %s %s" % (row["action"], row["item"], row["note"]))
         self.space.placed.append(r + (-3, -3, 3, 3))
-        label = row["change_id"]
-        w = pymupdf.get_text_length(label, fontname="helv", fontsize=8) + 6
-        lr = pymupdf.Rect(r.x0, r.y0 - 12, r.x0 + w, r.y0 - 1)
+        lines = wrap(row["change_id"] + "  " + query_text(row), 190, 7.5)
+        w = max(pymupdf.get_text_length(l, fontname="helv", fontsize=7.5) for l in lines) + 6
+        h = len(lines) * 9.0 + 3
+        lr = pymupdf.Rect(r.x0, r.y0 - h - 1, r.x0 + w, r.y0 - 1)
         if not self.space.free(lr, pad=1):
-            lr = self.space.place(w, 11, r)
+            lr = self.space.place(w, h, r, max_dist=160)
+        fs = 7.5
+        if lr is None:           # no room for the reason: the change ID alone, as before
+            lines, fs = [row["change_id"]], 8
+            w = pymupdf.get_text_length(lines[0], fontname="helv", fontsize=8) + 6
+            h = 11
+            lr = pymupdf.Rect(r.x0, r.y0 - 12, r.x0 + w, r.y0 - 1)
+            if not self.space.free(lr, pad=1):
+                lr = self.space.place(w, h, r)
         if lr is not None:
             self.space.placed.append(lr)
-            b = freetext(self.page, lr, label, 8, "helv", col, 0.5)
-            self._finish(b, row, "query label (FreeText)", "Query " + label)
+            b = freetext(self.page, lr, "\n".join(lines), fs, "helv", col, 0.5)
+            self._finish(b, row, "query label (FreeText)", "Query " + row["change_id"])
 
     def table(self, rows: List[Dict[str, str]], anchor: Optional[pymupdf.Rect]):
         """Rows of one tabulated note, one FreeText per change ID, stacked."""
@@ -362,18 +405,29 @@ class Marker:
         data = []
         for r in rows:
             val = r["required"]
+            if _isnum(val):
+                val = num_text(val)
             if r["unit_of_measure"] and not val.lower().startswith("not"):
                 val += " " + r["unit_of_measure"]
-            data.append((r["change_id"], r["item"], r["quantity"], val))
+            item, qty = r["item"], r["quantity"]
+            if item == r["unit"]:
+                item = "(the unit)"
+            if qty.lower().startswith(item.lower()) and item != "(the unit)":
+                qty = qty[len(item):].strip() or qty
+            data.append((r["change_id"], item, qty, val))
         if OVERALL_ADD in rows[0]["quantity"]:
             data = [(d[0], d[1], "AHU", d[3]) for d in data]
-        w_item = min(34, max(len(d[1]) for d in data))
+        w_item = min(46, max(len(d[1]) for d in data))
         w_q = max(len(d[2]) for d in data)
         w_v = max(len(d[3]) for d in data)
         w_id = len(data[0][0])
-        texts = ["%-*s %-*s %-*s %*s" % (w_id, d[0], w_item, d[1][:w_item], w_q, d[2], w_v, d[3]) for d in data]
+        texts = ["%-*s %-*s %-*s %*s" % (w_id, d[0], w_item, d[1] if len(d[1]) <= w_item else d[1][:w_item - 3].rstrip() + "...",
+                                         w_q, d[2], w_v, d[3]) for d in data]
         width = max(len(t) for t in texts) * cw + 10
         unit = rows[0]["unit"]
+        if unit.startswith("AHU group:"):
+            tg = re.findall(r"AHU-[A-Z0-9][A-Za-z0-9\-/]*", unit)
+            unit = "GROUP " + "; ".join(tg[:3]) + (" ..." if len(tg) > 3 else "")
         title = "ADD ON " + unit + " (note, see " + ("rooms" if rows[0]["layer_type"] == "rooms" else rows[0]["layer_type"]) + ")"
         if OVERALL_ADD in rows[0]["quantity"]:
             title = "ADD THESE AHUs TO THE OVERALL SCHEMATIC (note, see new systems)"
@@ -482,7 +536,10 @@ def verify(sheet: str, out_dir: Path = OUT_DIR) -> Dict[str, object]:
         ma = pa.get_pixmap(annots=False).samples
         mb = pb.get_pixmap(annots=False).samples
         same_px &= ma == mb
+        own = {x.xref for x in pa.annots()}       # annotations that the source sheet already carries
         for an in pb.annots():
+            if an.xref in own:
+                continue
             ids.add(an.info["subject"])
             unflattened += 1
             cl = b.xref_get_key(an.xref, "CL")

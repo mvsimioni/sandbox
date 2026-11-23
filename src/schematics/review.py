@@ -92,7 +92,7 @@ def tag_keys(text: str) -> frozenset:
             for n in (pair.group(2), pair.group(3)):
                 out.add(f"{pre}:{pair.group(1)}{n}")
             continue
-        rest = re.sub(r"(?<=\d)[A-Z](?:/[A-Z])*$", "", rest)
+        rest = re.sub(r"(?<=\d)(?:/[A-Z])+$|(?<=\d)[A-Z](?:/[A-Z])*$", "", rest)
         out.add(f"{pre}:{rest}")
     return frozenset(out)
 
@@ -687,11 +687,38 @@ def parse_pressure(text: Any) -> Optional[float]:
         return None
     if t.startswith("NEUTRAL"):
         return 0.0
-    m = re.search(r"([+\-−]?)\s*(\d+(?:\.\d+)?)", t)
+    m = re.search(r"([+\-−]?)\s*(\d+(?:\.\d+)?)\s*PA\b", t)
+    if not m and re.fullmatch(r"[+\-−]?\s*\d+(?:\.\d+)?", t):
+        m = re.search(r"([+\-−]?)\s*(\d+(?:\.\d+)?)", t)
     if not m:
         return None
     v = float(m.group(2))
     return -v if m.group(1) in ("-", "−") else v
+
+
+def pressure_sign(text: Any) -> Optional[int]:
+    """-1 or +1 where the sheet gives the regime in words ('-VE', 'NEGATIVE', 'POSITIVE') and no value."""
+    t = str(text or "").strip().upper()
+    if re.match(r"^(-VE|NEGATIVE|NEG)\b", t):
+        return -1
+    if re.match(r"^(\+VE|POSITIVE|POS)\b", t):
+        return 1
+    return None
+
+
+ABBR = {"Off": "Office", "Mtg": "Meeting", "Str": "Store", "Cln": "Cleaner", "Tfr": "Transfer", "Mp": "Multi-purpose"}
+ABBR_RE = re.compile(r"\b(%s)\b" % "|".join(ABBR))
+
+
+def dedupe_words(name: Any) -> str:
+    """'WASHER WASHER WASHER DISINFECTOR DISINFECTOR' gives 'WASHER DISINFECTOR' (a box name read once for each line)."""
+    t = str(name or "")
+    for _ in range(3):
+        t2 = re.sub(r"\b((?:\S+ ){0,3}\S+)(?: \1\b)+", r"\1", t)
+        if t2 == t:
+            break
+        t = t2
+    return t
 
 
 def short_wb(dept: str, wb: Dict[str, Any]) -> str:
@@ -969,6 +996,20 @@ class Review:
                 e["tagkeys"] |= set(tags)
         return out
 
+    def long_name(self, z: Dict[str, Any]) -> str:
+        """Name of a zoned room for a note: the workbook name where the plan name is an abbreviation."""
+        nm = str(z["name"])
+        if re.search(r"\b(?:%s|CU|SAN|HC|Multi)\b" % "|".join(ABBR), nm):
+            for lk in z.get("links", []):
+                dept = f"{int(lk['dept']):02d}" if str(lk["dept"]).isdigit() else str(lk["dept"])
+                w = self.wb_room.get((dept, lk["dpa_room_id"]))
+                if w and w.get("name") and not re.fullmatch(r"[A-Za-z]{1,4}", str(w["name"])) and not ABBR_RE.search(str(w["name"])):
+                    return str(w["name"])
+            nm = ABBR_RE.sub(lambda m: ABBR[m.group(1)], nm)
+            if re.search(r"\b(?:CU|SAN|HC|Multi)\b", nm):
+                nm += " (plan label)"
+        return nm
+
     def zone_rooms(self, u: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         """Zone rooms of the unit: its own links, those of its alias, of its groups and, for a group, of its members."""
         src: List[Dict[str, str]] = list(u["links"])
@@ -1049,7 +1090,7 @@ class Review:
                 self.fans_block(u, rows, d054, info)
             else:
                 rows.append(mk(tag, "queries", "AHU total", tag, "Unit", "", "drawn", "n/a", "not reviewed",
-                               "Query: unit type is " + str(u["type"]) + "; the totals are reviewed under its AHU", True,
+                               "No mark-up: unit type is " + str(u["type"]) + "; its rooms are reviewed above", False,
                                sheet, page, tagbox, u["source"]))
         if u["mot"]:
             # D-057: the specified values of a MOT theatre unit are kept; reviewed and listed, not marked up
@@ -1067,9 +1108,74 @@ class Review:
         self.rows.extend(rows)
         info["rows"] = rows
 
+    def pahu_raw(self, k: str) -> str:
+        """The PAHU tag as the source writes it (for example PAHU-B-B1-B1AHU-01A), not the key of the tag."""
+        if not hasattr(self, "_praw"):
+            self._praw: Dict[str, str] = {}
+            for s in self.i.working:
+                for t in TAG_RE.findall(s["outdoor_air"].get("source") or ""):
+                    for kk in tag_keys(t):
+                        self._praw.setdefault(kk, t)
+                for ln in s["outdoor_air"].get("lines", []):
+                    for t in TAG_RE.findall(ln.get("from") or ""):
+                        for kk in tag_keys(t):
+                            self._praw.setdefault(kk, t)
+            for sh, tl in self.tags_on_sheets().items():
+                if sh.startswith("PAHU:"):
+                    self._praw.setdefault(sh, tl[0][2])
+        return self._praw.get(k, "PAHU-" + key_only(k))
+
+    def tags_on_sheets(self) -> Dict[str, List[Tuple[str, List[float], str]]]:
+        """Every unit tag that a working sheet prints: tag key -> (sheet, box, text), read from the text of the sheets."""
+        if not hasattr(self, "_tos"):
+            self._tos: Dict[str, List[Tuple[str, List[float], str]]] = defaultdict(list)
+            for sh, v in sorted(self.i.model["sheets"].items()):
+                if v.get("issue") != "working drawing":
+                    continue
+                for t, b in self.i.st.lines(sh):
+                    for m in re.finditer(r"(?:PAHU|AHU|FCU|CRAC)-[A-Z0-9][A-Za-z0-9\-]*(?:/[A-Z0-9]+)?(?:\s[A-D](?![A-Za-z0-9]))?", t):
+                        for k in tag_keys(m.group(0)):
+                            self._tos[k].append((sh, b, m.group(0)))
+        return self._tos
+
+    def drawn_unit_row(self, u: Dict[str, Any], rows: List[Row], info: Dict[str, Any]) -> bool:
+        """A unit that the model did not link to a system but that a working sheet prints by its tag: review the
+        drawn duty against the workbook instead of declaring the unit missing."""
+        hits = [h for k in u["akeys"] for h in self.tags_on_sheets().get(k, [])
+                if k.split(":")[0] == str(u["tag"]).split("-")[0].split(" ")[0]]
+        hits = [h for h in hits if h[0] not in self.i.mot_sheets] or hits
+        if not hits:
+            return False
+        sh, box, txt = hits[0]
+        tag = u["tag"]
+        pg = 1
+        m = self.i.master.get(tag)
+        req = (m or {}).get("Calculated airflow")
+        dn = self.i.st.duty_near(sh, box)
+        src = f"Working drawing {sh} p{pg}, tag {txt}" + ("; Workbook master summary, tab AHU Master, row %s" % m["_row"] if m else "")
+        sheets = ", ".join(sorted({h[0] for h in hits}))
+        if dn and req:
+            cls, act, need = judge(dn[0], req, False)
+            if cls in ("no change", "margin", "reduction"):
+                act, need = "No change", False
+            lay = "airflows" if need else "queries"
+            rows.append(mk(tag, lay, "AHU total", tag, "Supply airflow", "L/s", dn[0], req, cls, act, need, sh, pg, dn[1], src,
+                           f"The unit is drawn on {sheets}. The sheet draws it and no system of the sheet is linked to it. Drawn duty compared with the workbook."))
+            info["counts"][cls] += 1
+        else:
+            rows.append(mk(tag, "queries", "AHU total", tag, "Unit drawn on a working sheet", "L/s", "drawn on " + sheets,
+                           req if req else "not established", "drawn, not compared",
+                           "Query: unit is drawn on this sheet; confirm its duty against the workbook", True, sh, pg, box, src,
+                           "The sheet prints the tag. It prints no duty line under the tag, or the workbook gives no value."))
+            info["counts"]["drawn, not compared"] += 1
+        info["sheets_found"] = sorted({h[0] for h in hits})
+        return True
+
     def no_drawn_unit(self, u: Dict[str, Any], rows: List[Row], info: Dict[str, Any]) -> None:
         tag = u["tag"]
         keys = u["keys"]
+        if not u["mot"] and self.drawn_unit_row(u, rows, info):
+            return
         mot = [e for k in keys for e in self.mot_tag_keys.get(k, [])]
         if mot:
             sh = sorted({e["sheet"] for e in mot})
@@ -1149,8 +1255,8 @@ class Review:
             bx = rm["name"]["box"] if rm else tagbox
             sh = d["sheet"] if d else sheet
             pg = d["page"] if d else page
-            dtext = (d["name"] or "no name read on the box") if d else "not drawn"
-            ztext = z["name"] if z else "not in zone list"
+            dtext = dedupe_words(d["name"] or "no name read on the box") if d else "not drawn"
+            ztext = self.long_name(z) if z else "not in zone list"
             item = dtext if d else ztext
             note = ""
             if r["cls"] in ("name differs", "renamed"):
@@ -1256,13 +1362,26 @@ class Review:
             setp = prs[0][2]["set"]
             woff = [w["offset"] for _, _, w in wbr if w["offset"] is not None]
             pb = (d["rm"].get("pressure") or {}).get("box")
-            if pdrawn is None:
+            psign = pressure_sign((d["rm"].get("pressure") or {}).get("value")) if pdrawn is None else None
+            if psign is not None and setp != 0:
+                if psign * setp > 0:
+                    cls, act, need = "no change", "No change", False
+                else:
+                    cls, act, need = "differs", "Query: pressure target differs", True
+            elif pdrawn is None:
                 cls, act, need = "not drawn", "Mark up: show the pressure target", True
             elif abs(pdrawn - setp) > 0.5:
                 cls, act, need = "differs", "Query: pressure target differs", True
             else:
                 cls, act, need = "no change", "No change", False
-            note = "Offset air needed: " + (f"{woff[0]:,.0f} L/s" if woff else "not given") + \
+            note = ""
+            if psign is not None and need:
+                note = f"The sheet shows the regime in words ({'negative' if psign < 0 else 'positive'}). The Pressure tab sets {setp:+,.0f} Pa. The direction is reversed. "
+            if pdrawn is not None and abs(pdrawn - setp) > 0.5:
+                note = f"The sheet shows {pdrawn:+,.0f} Pa. The Pressure tab sets {setp:+,.0f} Pa. "
+                if pdrawn * setp < 0:
+                    note += "The direction is reversed (a negative room against a positive target, or the opposite). "
+            note += "Offset air needed: " + (f"{woff[0]:,.0f} L/s" if woff else "not given") + \
                    " (Pressure tab). The sheet does not draw the offset in L/s."
             rows.append(mk(tag, "queries" if need else "airflows", "Room airflow", name, "Pressure target", "Pa",
                            pdrawn if pdrawn is not None else "not drawn", setp, cls, act, need, sheet, page, pb,
@@ -1285,8 +1404,25 @@ class Review:
         fan (RAF), not the AHU, so the match is by system and not by tag."""
         items = []
         for tg, (s, f) in self.return_fans(u).items():
-            items.append((tg, f["duty"]["value"], f["duty"]))
+            if not f.get("unmatched"):
+                items.append((tg, f["duty"]["value"], f["duty"]))
         return items
+
+    def unclaimed_tags(self, u: Dict[str, Any], prefixes: Tuple[str, ...]) -> List[Tuple[Dict[str, Any], str, List[float]]]:
+        """Fan tags that the sheets of the unit print and that name no unit of the zone schedule (a fan tag with
+        its own name, such as EAF-B-04-DIMRI-01).  The sheet draws them on the system, so the system has the fan."""
+        if not hasattr(self, "_all_cores"):
+            self._all_cores = {self.core(k) for k, us in self.units_by_key.items() if any(x["systems"] for x in us)}
+        out = []
+        for s in u["systems"]:
+            for t, b in self.i.st.lines(s["sheet"]):
+                m = re.match(r"^((?:%s)-[A-Z0-9][A-Za-z0-9\-]*(?:/[A-Z0-9]+)?)" % "|".join(prefixes), t)
+                if not m:
+                    continue
+                ks = tag_keys(m.group(1))
+                if ks and not any(self.core(k) in self._all_cores for k in ks):
+                    out.append((s, re.sub(r"\s+", "", m.group(1)), b))
+        return out
 
     @staticmethod
     def core(key: str) -> str:
@@ -1322,6 +1458,14 @@ class Review:
                 continue
             dn = self.i.st.duty_near(s["sheet"], b)
             out[tg] = (s, {"tag": {"value": tg, "box": b},
+                           "duty": {"value": dn[0] if dn else None, "box": dn[1] if dn else b}, "type": "RETURN"})
+        if out:
+            return out
+        for s, tg, b in self.unclaimed_tags(u, ("RAF",)):
+            if tg in out:
+                continue
+            dn = self.i.st.duty_near(s["sheet"], b)
+            out[tg] = (s, {"tag": {"value": tg, "box": b}, "unmatched": True,
                            "duty": {"value": dn[0] if dn else None, "box": dn[1] if dn else b}, "type": "RETURN"})
         return out
 
@@ -1391,7 +1535,7 @@ class Review:
         # once-through unit: the workbook recirculates no air, so a return fan is wrong; the spill needs a relief path
         once_through = bool(have_wb and recirc is not None and recirc <= BAL_LPS)
         info["once_through"] = once_through
-        will_add_fan = (not ret_items and not once_through and ret_req and ret_req > BAL_LPS
+        will_add_fan = (not self.return_fans(u) and not once_through and ret_req and ret_req > BAL_LPS
                         and spill_req and spill_req > BAL_LPS)
 
         def bx(refs):
@@ -1591,6 +1735,15 @@ class Review:
                     iso_present = True
         # return fans: matched by system (a return fan tag names the fan, not the AHU)
         ret_fans = self.return_fans(u)
+        for tg in [t for t, (_, f) in ret_fans.items() if f.get("unmatched")]:
+            s0, f0 = ret_fans.pop(tg)
+            rows.append(mk(tag, "fans", "Fan", tg, "Return fan airflow", "L/s", f0["duty"]["value"], "not compared",
+                           "not compared", "No mark-up: the sheet draws this return fan under a tag that does not name the unit",
+                           False, s0["sheet"], s0["page"], f0["duty"].get("box") or f0["tag"].get("box"),
+                           f"Working drawing {s0['sheet']} p{s0['page']}",
+                           "The return fan is on the sheet. Its tag does not name this unit, so its duty is not compared with this unit."))
+            info["counts"]["fan: tag does not name the unit"] += 1
+        ret_drawn_any = bool(self.return_fans(u))
         req = info.get("req", {})
         ret_req, spill_req = req.get("return"), req.get("spill")
         rest: Dict[str, Tuple[Dict[str, Any], Dict[str, Any]]] = {}
@@ -1649,7 +1802,7 @@ class Review:
                            s0["sheet"], s0["page"], f0["duty"].get("box") or f0["tag"].get("box"),
                            f"Working drawing {s0['sheet']} p{s0['page']}; Workbook AHU tab (return = recirculated + spill)", keep))
             info["counts"]["fan: " + cls] += 1
-        if not ret_fans and not info.get("once_through") and ret_req and ret_req > BAL_LPS and spill_req and spill_req > BAL_LPS:
+        if not ret_drawn_any and not info.get("once_through") and ret_req and ret_req > BAL_LPS and spill_req and spill_req > BAL_LPS:
             mr = mk(tag, "fans", "Fan", "Return fan", "Return fan airflow", "L/s", "not drawn", round(ret_req, 1), "to add",
                     "Mark up: add a return fan", True, sheet, page, tagbox,
                     f"Working drawing {sheet} p{page}; Workbook AHU tab (return = recirculated + spill)",
@@ -1706,6 +1859,7 @@ class Review:
         if not exh_present:
             # exhaust fans and links that the sheet prints and the model did not read
             exh_present = bool(self.sheet_tags(u, ("EAF", "TEAF", "TEF", "HPF"))) or \
+                bool(self.unclaimed_tags(u, ("EAF", "TEAF", "TEF", "HPF"))) or \
                 any(self.i.st.exhaust_links(x["sheet"]) for x in u["systems"])
         if exh_need > BAL_LPS and not exh_present and not iso_present:
             mr = mk(tag, "new systems", "Missing system", tag, "Exhaust system", "L/s", "not drawn", round(exh_need, 1),
@@ -1886,6 +2040,34 @@ class Review:
                     self.unit_info[src_unit["tag"]]["counts"]["missing system"] += 1
                     mr["unit"] = src_unit["tag"]
                 self.rows.append(mr)
+        # AHUs drawn on a working sheet that no unit of the zone schedule carries: no tab, no query so far.  Raise
+        # one query for each, with the rooms the sheet draws on it and the unit that the zoning gives them to.
+        for s in i.working:
+            if s["kind"] != "working_ahu_system" or s["system_id"].startswith("synthetic") or not s["ahus"]:
+                continue
+            if any(self.units_by_key.get(k) for k in self.sys_keys[s["system_id"]]):
+                continue
+            if self.sys_keys[s["system_id"]] & i.mot_keys or s["sheet"] in i.mot_sheets or \
+                    s["sheet"] in ("IP-BH-07050", "IP-BH-07051", "IP-BH-07052"):
+                continue                      # MOT theatre units: the MOT differences tab covers them
+            tgs = [a["tag"]["value"] for a in s["ahus"]]
+            names = [rm["name"]["value"] for rm in s["rooms"]]
+            holders = Counter()
+            for n in names:
+                for h in self.zone_names.get(s["storey"], {}).get(canon(n), []):
+                    holders[h[0]] += 1
+            where = ("The zoning gives " + ", ".join(f"{c} of these rooms to {t}" for t, c in holders.most_common(3)) + ".") \
+                if holders else "The zone list gives none of these rooms to a unit under this name."
+            a0 = s["ahus"][0]
+            dval = a0["duty_supply_L_s"]["value"]
+            mr = mk(tgs[0], "queries", "Missing system", ", ".join(tgs), "Unit drawn on the sheet, not in the zone schedule",
+                    "L/s", dval if dval is not None else "drawn", "no unit in the zone schedule", "differs",
+                    "Query: AHU drawn on the sheet is in no unit of the zone schedule", True, s["sheet"], s["page"],
+                    a0["tag"].get("box"), f"Working drawing {s['sheet']} p{s['page']}",
+                    f"The sheet draws this AHU with {len(names)} room box(es): {short(', '.join(names), 160)}. "
+                    f"The unit has no tab and no workbook row. {where} Rooms moved off a drawn AHU are listed here, not marked up.")
+            self.rows.append(mr)
+            self.missing.append(mr)
         # outdoor-air units referred to and not drawn
         named: Dict[str, Dict[str, Any]] = {}
         for s in i.working:
@@ -1897,11 +2079,13 @@ class Review:
                     if ln and not named[k]["box"]:
                         named[k]["box"] = ln[0].get("box")
         eq_pahu = {k for e in i.equip if e["issue_set"] == "working" and e["type"] == "PAHU" for k in tag_keys(e["tag"])}
+        done_raw = set()
         for k, v in sorted(named.items()):
-            if k in eq_pahu:
+            if k in eq_pahu or self.pahu_raw(k) in done_raw:
                 continue
+            done_raw.add(self.pahu_raw(k))
             sh = sorted(v["sheets"])
-            mr = mk(key_only(k), "new systems", "Missing system", "PAHU " + key_only(k), "Outdoor-air unit referred to, not drawn",
+            mr = mk(self.pahu_raw(k), "new systems", "Missing system", self.pahu_raw(k), "Outdoor-air unit referred to, not drawn",
                     "L/s", "not drawn", "to confirm", "missing system", "New system: draw the outdoor-air unit", True,
                     "NEW", 1, v["box"], f"Working drawing {', '.join(sh)}; outdoor-air note",
                     f"The sheets {', '.join(sh)} name this unit as the outdoor-air source. No sheet draws it with its duty.")
@@ -1993,7 +2177,11 @@ class Review:
                     t["ahus"].append(ln["to"])
                     t["sheet"] = t["sheet"] or s["sheet"]
                     t["box"] = t["box"] or ln.get("box")
+        seen_raw = set()
         for k, t in sorted(taken.items()):
+            if self.pahu_raw(k) in seen_raw:
+                continue
+            seen_raw.add(self.pahu_raw(k))
             duty = [num(e["duty_as_written"]) for e in i.equip if e["issue_set"] == "working" and e["type"] == "PAHU"
                     and k in tag_keys(e["tag"])]
             duty = [d for d in duty if d]
@@ -2009,7 +2197,7 @@ class Review:
                 ("not established", "Query: duty of the outdoor-air unit is not drawn", True)
             if cls in ("no change", "margin"):
                 act, need = "No change", False
-            self.consist.append(mk(key_only(k), "queries" if need else "airflows", "Consistency", "PAHU " + key_only(k),
+            self.consist.append(mk(self.pahu_raw(k), "queries" if need else "airflows", "Consistency", self.pahu_raw(k),
                                    "Duty of the outdoor-air unit against the sum of the AHU outdoor air", "L/s",
                                    drawn_duty if drawn_duty is not None else "not drawn", round(t["drawn"], 1), cls, act, need,
                                    t["sheet"] or "", 1, t["box"], f"Working drawings; outdoor-air lines of {len(set(t['ahus']))} AHU tags",
@@ -2203,6 +2391,26 @@ class Review:
                 out.append(mk("App D", "airflows" if cls != "not established" else "queries", "Duty against workbook", t,
                               f"Storey {st}", "L/s", sched, round(wv, 1) if wv is not None else None, cls, act, need,
                               "App D", pg, bx, f"{src}; Equipment schedule (Corr 5) p{r['schedule_pages'] or '-'}; {wsrc}", note))
+        # 1b systems of an App D layout that a working sheet draws as well: one sheet holds the system (the working
+        # sheet, where it is marked up); the App D sheet refers to it
+        done_w = set()
+        for sy in i.appd:
+            if sy["kind"] == "appd_space_without_equipment":
+                continue
+            for e in sy["equipment"]:
+                t = e["tag_as_written"]
+                hits = [h for k in tag_keys(t) for h in self.work_tag_keys.get(k, []) if h.get("sheet")]
+                if not hits or t in done_w:
+                    continue
+                done_w.add(t)
+                shs = sorted({h["sheet"] for h in hits})
+                st_ = (sy.get("storey") or [""])[0]
+                out.append(mk("App D", "queries", "App D tag on a working sheet", t, f"Level {int(st_):02d}", "", "drawn on " + ", ".join(shs), None,
+                              "on working sheet", "Query: system is drawn on a working sheet; the App D sheet refers to it", True,
+                              "App D", e.get("page") or 1, e.get("box"),
+                              f"Appendix D, drawing {', '.join(sy.get('drawing_numbers') or [])}, p{e.get('page') or ''}; working drawing {', '.join(shs)}",
+                              f"The working sheet {', '.join(shs)} draws this unit and the changes to it are marked up there. "
+                              "The App D sheet does not draw it again."))
         # 2 schedule tags for common areas that no layout shows
         for r in read_csv(i.reg / "ahu_schedule.csv"):
             if "common" not in (r.get("served_area [Description]") or "").lower():
@@ -2370,8 +2578,11 @@ class Review:
                                   "result": "tag difference: " + (r["difference_type"] or "")[:80], "issue": "", "page": "",
                                   "box": "", "source": "MOT tag cross-reference, row " + str(r["crossref_row"]),
                                   "note": (r["detail"] or "")[:300] + " Listed, not marked up."})
-        # keep AHU rows with no scheduled counterpart or a different duty only for the count
-        # ids
+        # the MOT tag-difference text comes from a source file: remove internal words (D-015)
+        for m_ in self.mot_rows:
+            for k_ in ("result", "note", "source", "tag"):
+                if isinstance(m_.get(k_), str):
+                    m_[k_] = clean(m_[k_])
 
     def list_mot_sheet_rows(self) -> None:
         """Rows on a sheet titled MOT ACMV: listed, not marked up (D-072, D-074 provisional)."""
@@ -2741,7 +2952,7 @@ def write_xlsx(rv: Review, path: Path) -> Dict[str, str]:
 
     # Summary
     ws = wb.create_sheet("Summary", 0)
-    r = title(ws, "Schematic update register", [
+    r = title(ws, "Schematic update list", [
         proj,
         f"Revision {REVISION}. {today}. Status: draft for checking.",
         "Review of every AHU, PAHU and FCU group of the zone schedule against the working drawings."])

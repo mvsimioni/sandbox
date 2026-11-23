@@ -117,7 +117,7 @@ def build_rows() -> List[Dict[str, str]]:
             why = ("Reviewed. The sheet draws room boxes with no AHU tag and the zone schedule gives no unit to them, "
                    "so no value can be marked up. The rooms are on the tab of the unit that the zone schedule names.")
         else:
-            why = ("Reviewed. The register has no change row for this sheet: each drawn value is equal to the required "
+            why = ("Reviewed. The change list has no row for this sheet: each drawn value is equal to the required "
                    "value, or the sheet is covered on the tab of another unit.")
         rows.append(dict(
             drawing_number=sh, number_status="working issue", title=title_of(model, sh), storey=storey_of(model, sh),
@@ -128,7 +128,7 @@ def build_rows() -> List[Dict[str, str]]:
             drawing_number="IP-BH-00100", number_status="working issue", title="INPATIENT OVERALL ACMV SCHEMATIC 1",
             storey="", kind="reviewed, not marked up", revision="working issue", status="REVIEWED, no mark-up",
             sheet_size=SHEET_SIZE, systems="", change_id_count="0", change_ids="", files="",
-            notes=("Reviewed. Its tags are above level 07 and outside the zoning, so the register has no change row. "
+            notes=("Reviewed. Its tags are above level 07 and outside the zoning, so the change list has no row. "
                    "The tags are listed on the Consistency tab. The revised AHU list is on IP-BH-00101.")))
     # MOT NSC sheets: from the MOT differences tab of the update workbook
     import openpyxl

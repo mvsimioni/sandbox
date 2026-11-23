@@ -650,7 +650,7 @@ def unit_card_stack(U: Dict[str, Any], w: float) -> Stack:
     st.text(fnum1(zc["Area (m²)"][0]), H, "IP-EQUIPTEXT", Value("zone_area_m2", fnum1(zc["Area (m²)"][0]), chg, zsrc("Area (m²)"), owner),
             dx=1.6, prefix="ZONED AREA ", suffix=" m2", gap=0.1)
     st.text(str(U["n_rooms_wb"]), H, "IP-EQUIPTEXT",
-            Value("wb_rooms", str(U["n_rooms_wb"]), chg, "Register room_unit_links.csv, unit_class %s, rooms found on the workbook tab Airflow" % tag,
+            Value("wb_rooms", str(U["n_rooms_wb"]), chg, "List room_unit_links.csv, unit_class %s, rooms found on the workbook tab Airflow" % tag,
                   owner),
             dx=1.6, prefix="ROOMS COUNTED IN THE WORKBOOKS ", gap=0.1)
     st.gap(1.0)
@@ -687,6 +687,15 @@ def unit_queries(U: Dict[str, Any]) -> List[str]:
     rl = str(zc["Room list of the unit"][0] or "")
     if rl.startswith("Not complete"):
         q.append("QUERY %s: ROOM LIST NOT COMPLETE. %s" % (chg, rl[len("Not complete: "):].split(";")[0].upper() + "."))
+    # the room boxes come from the workbooks; the approved zoning may give the unit other rooms or none
+    awb = sum(float(m["area"] or 0) for g in U["room_groups"] for m in g["members"])
+    nz = len(U["zone_rooms"])
+    az = float(zc["Area (m²)"][0] or 0)
+    if U["n_rooms_wb"] and (nz == 0 or abs(awb - az) > 0.1 * max(az, 1.0)):
+        q.append("QUERY %s: THE WORKBOOKS COUNT %d ROOMS (%s M2) FOR THIS UNIT. THE APPROVED ZONING GIVES %d ROOM%s (%s M2). "
+                 "THE BOXES SHOW THE WORKBOOK ROOMS AND THEIR VALUES. THE ZONING TABLE SHOWS THE ZONED ROOMS. "
+                 "CONFIRM WHICH ROOMS THE UNIT SERVES." % (chg, U["n_rooms_wb"], numtxt(round(awb, 1)), nz, "" if nz == 1 else "S",
+                                                            numtxt(round(az, 1))))
     if any(g["first"]["ea"] not in (None, 0) and float(g["first"]["ea"]) > 0 for g in U["room_groups"]) and not U["fans"]:
         q.append("QUERY %s: ROOMS OF THIS UNIT HAVE EXHAUST. NO EXHAUST FAN IS IN THE SCHEDULE FOR THIS UNIT. CONFIRM THE FAN." % chg)
     return q
@@ -1019,11 +1028,11 @@ def pahu_stack(P: Dict[str, Any], w: float) -> Stack:
     st = Stack(w - 3.2)
     st.owner = owner
     st.gap(1.2)
-    msrc = "Register missing_systems.csv, change ID %s, column system" % chg
+    msrc = "List missing_systems.csv, change ID %s, column system" % chg
     st.text(P["tag"], HT, "IP-EQUIPTEXT", Value("tag", P["tag"], chg, msrc, owner), dx=1.6)
     st.text("OUTDOOR-AIR UNIT. NOT DRAWN ON ANY SHEET.", HS, "IP-EQUIPTEXT", dx=1.6)
     st.text(", ".join(P["sheets"]), H, "IP-EQUIPTEXT", Value("named_on_sheets", ", ".join(P["sheets"]), chg,
-                                                             "Register missing_systems.csv, change ID %s, column source" % chg, owner),
+                                                             "List missing_systems.csv, change ID %s, column source" % chg, owner),
             dx=1.6, prefix="NAMED AS OUTDOOR-AIR SOURCE ON ", gap=0.4)
     for r in P["sched"]:
         pg = r["page(s)"]
@@ -1055,8 +1064,8 @@ def draw_pahu(sh: Sheet, cx: Ctx, P: Dict[str, Any], gx: float, ytop: float, nco
     sh.text(ax + aw / 2 + 3, y_card + 6.0, "OUTDOOR-AIR INTAKE: NOT SHOWN IN ANY DOCUMENT", H, "IP-DUCT-OA", owner=owner)
     sh.line((ax + aw / 2, y_card + 10.0), (ax + aw / 2, y_card), nd.DUCT_LAYER["OA"])
     st = pahu_stack(P, aw)
-    ht = draw_card(sh, st, "BOX_LABELLED", ax, y_card, aw, chg, "SOURCE: MISSING SYSTEMS REGISTER", owner,
-                   foot_src="Register missing_systems.csv, change ID %s, column source" % chg)
+    ht = draw_card(sh, st, "BOX_LABELLED", ax, y_card, aw, chg, "SOURCE: MISSING SYSTEMS LIST", owner,
+                   foot_src="List missing_systems.csv, change ID %s, column source" % chg)
     y = y_card - ht
     # one outdoor-air duct and one line per system on the working sheets that takes outdoor air from this unit
     x_main = ax + 12.0
@@ -1068,7 +1077,7 @@ def draw_pahu(sh: Sheet, cx: Ctx, P: Dict[str, Any], gx: float, ytop: float, nco
         ofs = s["oa_L_s_as_written"]
         txt = "%s: %s" % (s["ahu_tags"], ofs if ofs.replace(":", "").strip() else "OUTDOOR AIRFLOW NOT WRITTEN")
         v = Value("pahu_serves", s["ahu_tags"] + " | " + s["oa_L_s_as_written"], chg,
-                  "Register schematic_systems.csv, system_id %s, columns ahu_tags and oa_L_s_as_written" % s["system_id"], owner)
+                  "List schematic_systems.csv, system_id %s, columns ahu_tags and oa_L_s_as_written" % s["system_id"], owner)
         sh.values.append(v)
         lines = wrap(s["sheet"] + "  " + v.text, H, aw + 90 - 16)
         sh.line((x_main, yy - 1.0), (x_main + 8.0, yy - 1.0), nd.DUCT_LAYER["OA"])
@@ -1203,7 +1212,7 @@ def strip2(sh: SheetX) -> None:
          "OUTDOOR-AIR RULE, AND OUTDOOR-AIR UNITS THAT THE WORKING SHEETS NAME AND NO SHEET DRAWS.") % LEVEL_NAME[sh.storey]
         + " IT SHALL BE READ WITH THE ACMV NOTES AND LEGEND SHEETS IP-BH-00001 AND IP-BH-00002."
         + ("" if sh.total == 1 else " THE LEVEL IS ON %d SHEETS: %s. EACH UNIT IS ON ONE SHEET." % (sh.total, ", ".join(sh.numbers))),
-        "EACH VALUE HAS A CHANGE ID AND A SOURCE. THE CHANGE ID GIVES THE ENTRY IN THE SCHEMATIC UPDATE REGISTER AND IN THE MISSING SYSTEMS LIST.",
+        "EACH VALUE HAS A CHANGE ID AND A SOURCE. THE CHANGE ID GIVES THE ENTRY IN THE SCHEMATIC UPDATE LIST AND IN THE MISSING SYSTEMS LIST.",
         "ROOM NAMES, AREAS AND AIRFLOWS ARE FROM THE DEPARTMENT WORKBOOKS (TAB AIRFLOW). PRESSURE IS SHOWN ONLY FOR A ROOM WITH A PRESSURE TARGET "
         "(TAB PRESSURE). A VALUE THAT THE WORKBOOK DOES NOT GIVE IS SHOWN AS NOT GIVEN.",
         "TENDER VALUES ARE FROM THE ZONE SCHEDULE. WORKBOOK VALUES ARE FROM THE AHU MASTER SUMMARY. SCHEDULE VALUES AND TAGS ARE AS WRITTEN IN THE "

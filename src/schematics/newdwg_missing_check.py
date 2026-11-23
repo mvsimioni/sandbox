@@ -111,17 +111,17 @@ def expected(S: Sources, v: Dict[str, Any]):
         if f == "fan_type":
             return {"Axial": "AXIAL", "Centrif SISW": "CENTRIFUGAL"}.get(val, "?" + val)
         return nd.fnum(val) if re.fullmatch(r"-?[\d.]+", val or "") else val
-    m = re.match(r"Register missing_systems.csv, change ID (\S+), column (\w+)", src)
+    m = re.match(r"List missing_systems.csv, change ID (\S+), column (\w+)", src)
     if m:
         r = S.miss[m.group(1)]
         if f == "named_on_sheets":
             return ", ".join(re.findall(r"IP-BH-\w{5}", r["source"]))
         return r[m.group(2)]
-    m = re.match(r"Register schematic_systems.csv, system_id (\S+), columns", src)
+    m = re.match(r"List schematic_systems.csv, system_id (\S+), columns", src)
     if m:
         r = S.sys[m.group(1)]
         return r["ahu_tags"] + " | " + r["oa_L_s_as_written"]
-    m = re.match(r"Register room_unit_links.csv, unit_class (.+?), rooms found", src)
+    m = re.match(r"List room_unit_links.csv, unit_class (.+?), rooms found", src)
     if m:
         n = 0
         for l in S.links:
@@ -174,7 +174,7 @@ def main(results: List[Dict[str, Any]]) -> int:
             chg_seen.add(v["chg"])
             if v["field"] == "tag" and v["src"].startswith("Zone schedule"):
                 seen_tags[v["value"]] += 1
-            if v["field"] == "tag" and v["src"].startswith("Register missing_systems"):
+            if v["field"] == "tag" and v["src"].startswith("List missing_systems"):
                 seen_tags[v["value"]] += 1
             if v["field"] == "room_no" and v["owner"] if False else False:
                 pass

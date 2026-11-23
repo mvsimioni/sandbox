@@ -170,6 +170,27 @@ def appd_reports() -> Dict[Any, List[Dict[str, Any]]]:
     return memo("appd_reports", load)
 
 
+def tag_keys_of(t: str):
+    from src.schematics.review import tag_keys
+    return tag_keys(t)
+
+
+def working_tag_keys() -> set:
+    def load():
+        from src.schematics.review import tag_keys
+        ks = set()
+        for e in rcsv(ROOT / "out" / "registers" / "schematic_equipment.csv"):
+            if e.get("issue_set") == "working":
+                ks |= set(tag_keys(e["tag"]))
+        m = json.load(open(ROOT / "out" / "registers" / "schematic_model.json"))
+        for s in m["systems"]:
+            if s["source_set"] == "working":
+                for a in s["ahus"]:
+                    ks |= set(tag_keys(a["tag"]["value"]))
+        return ks
+    return memo("working_tag_keys", load)
+
+
 def check_p4_appd_tags(ctx) -> Tuple[str, List[str]]:
     reg = ROOT / "out" / "registers"
     bad, ev = [], []
@@ -189,6 +210,9 @@ def check_p4_appd_tags(ctx) -> Tuple[str, List[str]]:
         coverage = {r["item"]: r for r in rcsv(NEWD / f"appd_L0{st}_coverage.csv") if r["kind"] != "Highlighted space"}
         for t in sorted(want):
             n = on.get(t, 0)
+            if n >= 1 and (tag_keys_of(t) & working_tag_keys()):
+                bad.append(f"L0{st} {t}: drawn on an App D sheet and on a working sheet")
+                continue
             if n == 1:
                 continue
             if n == 0 and sched_on.get(t) == 1 and "listed" in coverage.get(t, {}).get("reason", ""):
@@ -307,8 +331,13 @@ def check_p4_markup_register(ctx) -> Tuple[str, List[str]]:
         sh = os.path.basename(p)[:11]
         ids, strays = set(), 0
         doc = pymupdf.open(p)
-        for page in doc:
+        srcs = sorted(glob.glob(str(ROOT / "data/source/Basis/Working Drawings" / (sh + "_*.pdf"))))
+        sdoc = pymupdf.open(srcs[0]) if srcs else None
+        for pno, page in enumerate(doc):
+            own = {x.xref for x in sdoc[pno].annots()} if sdoc is not None else set()   # the source sheet's own annotations
             for a in page.annots():
+                if a.xref in own:
+                    continue
                 subj = (a.info or {}).get("subject", "")
                 if ID_RE.fullmatch(subj or ""):
                     ids.add(subj)
@@ -578,4 +607,45 @@ def check_p4_issue(ctx) -> Tuple[str, List[str]]:
         long_ = lint_sentences(prose)
         if long_:
             bad.append(f"README: {len(long_)} sentences with more than 25 words")
+    # language of the other files: update workbook, lists, text of the new drawings, text of the mark-ups (D-015).
+    # A word that the source drawing prints in a room name (WORKFLOW TRAINING) stays as written.
+    if ISSUE.exists():
+        bad += language_hits()
     return (FAIL if bad else PASS), [f"{n} files of the drawing register in the issue folder"] + bad[:10]
+
+
+def language_hits() -> List[str]:
+    from src.workbook.conf import forbidden_terms
+    import openpyxl
+    import pymupdf
+    terms = forbidden_terms(ROOT)
+    hits: Counter = Counter()
+    first: Dict[str, str] = {}
+
+    def scan(src: str, text: str) -> None:
+        for t in terms:
+            for m in re.finditer(r"\b" + re.escape(t) + r"(s|es)?\b", text, 0 if t == "AI" else re.I):
+                if t == "workflow" and re.match(r"\s*TRAINING", text[m.end():], re.I):
+                    continue
+                hits[(src, t)] += 1
+                first.setdefault(f"{src}/{t}", text[max(0, m.start() - 25):m.end() + 25].replace("\n", " "))
+    wb = openpyxl.load_workbook(ISSUE / "schematic_update_register.xlsx", read_only=True)
+    for ws in wb:
+        for row in ws.iter_rows(values_only=True):
+            for v in row:
+                if isinstance(v, str):
+                    scan("update workbook", v)
+    for f in ("change_list.csv", "missing_systems.csv", "drawing_register.csv"):
+        if (ISSUE / f).exists():
+            for r in rcsv(ISSUE / f):
+                for v in r.values():
+                    scan(f, v or "")
+    for p in sorted((ISSUE / "new_drawings").glob("*.pdf")):
+        d = pymupdf.open(p)
+        scan("new drawings", "\n".join(pg.get_text() for pg in d))
+    for p in sorted((ISSUE / "markups").glob("*.pdf")):
+        d = pymupdf.open(p)
+        for pg in d:
+            for a in pg.annots():
+                scan("mark-ups", a.info.get("content", "") or "")
+    return [f"{src}: forbidden term {t!r} {n} times, for example: {first.get(f'{src}/{t}', '')}" for (src, t), n in sorted(hits.items())]

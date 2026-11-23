@@ -155,6 +155,12 @@ def load_inputs(storey: int) -> Dict[str, Any]:
     unserved = [s for s in appd["systems"] if s["storey"] == [storey] and s["kind"] == "appd_space_without_equipment"]
     chg = read_csv(OUT / "change_register.csv")
     new_rows = {r["unit"]: r for r in chg if r["sheet"] == "App D" and r["layer_type"] == "new systems"}
+    # a unit that a working sheet draws as well is not drawn again on this sheet: the sheet refers to the working sheet
+    on_work = {r["item"]: r for r in chg if r["sheet"] == "App D" and "drawn on a working sheet" in r["action"]}
+    for s_ in systems:
+        for e_ in s_["equipment"]:
+            if e_["tag_as_written"] in on_work:
+                new_rows[s_["system_id"]] = on_work[e_["tag_as_written"]]
     q_rows = [r for r in chg if r["sheet"] == "App D" and r["layer_type"] == "queries"
               and r["quantity"] == "Storey %d" % storey]
     spaces = {int(r["annotation_index"]): r for r in read_csv(REG / "appd_spaces.csv") if r["storey"] == str(storey)}
@@ -180,12 +186,13 @@ def load_inputs(storey: int) -> Dict[str, Any]:
     air_rows = {r["item"]: r for r in chg if r["sheet"] == "App D" and r["layer_type"] == "airflows"
                 and r["quantity"] == "Storey %d" % storey}
     sched_only = [r for r in chg if r["sheet"] == "App D" and r["layer_type"] == "queries"
-                  and r["quantity"] == "Level %02d" % storey and "on no App D layout" in r["action"]]
+                  and r["quantity"] == "Level %02d" % storey
+                  and ("on no App D layout" in r["action"] or "drawn on a working sheet" in r["action"])]
     equip_rows = [r for r in read_csv(REG / "appd_equipment.csv") if r["storey"] == str(storey)]
     fan_types = {r["tag_as_written"]: r.get("Fan Type (1)", "") for r in read_csv(REG / "equipment_schedule_fans.csv")}
     return dict(appd=appd, systems=systems, unserved=unserved, new_rows=new_rows, q_rows=q_rows,
                 spaces=spaces, recon=recon, chg=chg, d00=d00_cells(storey), sp_q=sp_q, fan_types=fan_types,
-                un_q=un_q, equip_rows=equip_rows, air_rows=air_rows, sched_only=sched_only)
+                un_q=un_q, equip_rows=equip_rows, air_rows=air_rows, sched_only=sched_only, on_work=on_work)
 
 
 def d00_cells(storey: int) -> Dict[int, Dict[str, Any]]:
@@ -677,8 +684,8 @@ def draw_sched_table(sh, inp, rows, gx, ytop) -> None:
     colw = 250.0
     ncol = 1 if len(rows) <= 12 else (2 if len(rows) <= 44 else 3)
     per = math.ceil(len(rows) / ncol)
-    head = ("SCHEDULED FOR THE COMMON AREAS OF THIS STOREY, ON NO APP D LAYOUT. NOT DRAWN: NO SPACE IS TIED TO THEM "
-            "ON THE LAYOUT.")
+    head = ("LISTED, NOT DRAWN ON THIS SHEET. EACH ROW GIVES THE REASON: SCHEDULED FOR THE COMMON AREAS OF THIS STOREY "
+            "AND ON NO APP D LAYOUT, OR DRAWN ON A WORKING SHEET.")
     y0 = ytop
     for i, ln in enumerate(wrap(head, 3.0, ncol * colw - 4)):
         sh.text(gx, y0 - 3.0 - i * 4.4, ln, 3.0, "IP-NOTES", owner="schedtable")
@@ -879,7 +886,13 @@ def draw_ahu_group(sh, inp, plan, s, bx, gx, ytop, ncols, qmap) -> None:
     vt = Value("tag", tag, chg, src, owner)
     lines.append((tag, vt, HT, ""))
     n_lab = len(s["equipment"])
-    if r.get("airflow"):
+    if tag in inp["on_work"]:
+        # drawn on a working sheet: this sheet keeps the room boxes and refers to that sheet for the unit
+        wr = inp["on_work"][tag]
+        lines = [(tag, None, HT, ""), ("DRAWN ON " + re.sub(r"^drawn on ", "", wr["drawn"]).upper(), None, H, ""),
+                 ("NOT DRAWN AGAIN ON THIS SHEET", None, H, "")]
+        r = {}
+    elif r.get("airflow"):
         v = Value("supply_airflow_L_s", fnum(r["airflow"]), chg, src, owner)
         lines.append(("SUPPLY AIRFLOW %s L/s" % v.text, v, H, ""))
     if r.get("outdoor_air"):
@@ -1134,7 +1147,7 @@ def strip(sh: Sheet, inp, plan, sym) -> None:
         "THE SHEET SHOWS COMMON-AREA SYSTEMS OF THE %s STOREY IN APPENDIX D. IT SHALL BE READ WITH THE ACMV NOTES AND LEGEND SHEETS IP-BH-00001 AND IP-BH-00002." % ORD[sh.storey]
         + ("" if sh.total == 1 else " THE STOREY IS ON %d SHEETS: %s. EACH SYSTEM IS ON ONE SHEET." % (sh.total, ", ".join(sh.numbers))),
         "THE AREAS, MODES AND EQUIPMENT TAGS ARE AS WRITTEN IN APPENDIX D. THE DUTIES AND FAN TYPES ARE AS WRITTEN IN THE EQUIPMENT SCHEDULE.",
-        "EACH VALUE HAS A CHANGE ID. THE CHANGE ID GIVES THE ENTRY IN THE SCHEMATIC UPDATE REGISTER.",
+        "EACH VALUE HAS A CHANGE ID. THE CHANGE ID GIVES THE ENTRY IN THE SCHEMATIC UPDATE LIST.",
         "SPACE NAMES, SUPPLY, RETURN AND EXHAUST AIRFLOWS AND PRESSURES ARE FROM THE COMMON-AREAS WORKBOOK (D00). A VALUE THAT THE WORKBOOK DOES NOT GIVE IS SHOWN AS NOT GIVEN.",
         "APPENDIX D DOES NOT SHOW THE OUTDOOR-AIR INTAKE OR THE EXHAUST DISCHARGE. THEY ARE NOT DRAWN.",
         "A DASHED DUCT LINE SHOWS A SPACE WITH A TAG NEAR IT, NOT INSIDE IT.",

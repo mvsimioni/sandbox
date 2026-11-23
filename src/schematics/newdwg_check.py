@@ -101,7 +101,7 @@ def compare_registers(rb: Dict[str, Any], storey: int) -> Dict[str, Any]:
             n_cmp += 1
             row = chg.get(c)
             sched_tags.append(val)
-            if not row or row["item"] != val or "on no App D layout" not in row["action"]:
+            if not row or row["item"] != val or not ("on no App D layout" in row["action"] or "drawn on a working sheet" in row["action"]):
                 errors.append("%s: schedule-only tag %r does not match change row %s" % (vid, val, c))
             continue
         m = re.match(r"Appendix D, (\S+), p(\d+), annotation (\d+)$", v["src"]) or \
@@ -409,9 +409,10 @@ def main_storey(results: List[Dict[str, Any]]) -> int:
         spaces_not_in_exactly_one_box=sorted(i for i in spaces if len(space_sheet.get(i, [])) != 1),
         spaces_on_unknown=sorted(i for i in space_sheet if i not in spaces),
         tags_in_register=len(equip_tags | set(recon)),
-        tags_not_drawn_exactly_once=sorted(t for t in (equip_tags | set(recon)) if len(tag_sheet.get(t, [])) != 1),
+        tags_not_drawn_exactly_once=sorted(t for t in (equip_tags | set(recon)) if len(tag_sheet.get(t, [])) != 1
+                                           and not (not tag_sheet.get(t) and len(sched_sheet.get(t, [])) == 1)),
         tags_drawn_not_in_register=sorted(t for t in tag_sheet if t not in (equip_tags | set(recon))),
-        schedule_only_rows=len([r for r in qrows if "on no App D layout" in r["action"]]),
+        schedule_only_rows=len([r for r in qrows if "on no App D layout" in r["action"] or "drawn on a working sheet" in r["action"]]),
         schedule_only_listed=len(sched_sheet),
         queries_in_register=len(qrows), queries_missing=q_missing,
         values_without_change_row=sorted({x for rep in reps for x in rep["register_comparison"]["values_without_change_row"]}),
@@ -432,6 +433,10 @@ def main_storey(results: List[Dict[str, Any]]) -> int:
             rows.append(dict(kind="Schedule tag on no layout", item=r["item"], schedule_form=r["item"],
                              drawing=";".join(sched_sheet.get(r["item"], [])) or "NOT LISTED",
                              reason="not drawn: no App D layout shows it; listed in the table with %s" % r["change_id"]))
+        elif "drawn on a working sheet" in r["action"]:
+            rows.append(dict(kind="Tag on a working sheet", item=r["item"], schedule_form=r["item"],
+                             drawing=";".join(sched_sheet.get(r["item"], [])) or "NOT LISTED",
+                             reason="not drawn again: a working sheet draws it (%s); listed in the table with %s" % (r["drawn"], r["change_id"])))
     for i in sorted(spaces):
         rows.append(dict(kind="Highlighted space", item="SPACE %d" % i, schedule_form="",
                          drawing=";".join(space_sheet.get(i, [])) or "NOT IN A BOX", reason="room box"))
