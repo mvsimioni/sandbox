@@ -260,3 +260,21 @@ single_pass_rule:                                             # D-031
   classification_status: ASSUMPTION
 ahu_balance: per_room_then_ahu                                # D-032: OA, recirculated, spill, supply adjusted at AHU
 oa_per_area_or_person_is_supply_floor: true                   # D-033
+
+# D-034..D-044 (Marcus, 23 Nov 2026)
+ceiling_height_two_values: highest                         # D-035 (replaces most-frequent/lowest)
+hfds:                                                      # D-036, D-037
+  file: "data/source/Basis/HFDS (uploaded)/HFDS - Mechanical reverse-brief.pdf"
+  use_for: [plant_rooms, comms_riser_rooms, it_lan_ups_battery_rooms, innovation_lab, rooms_with_no_use_mapped, b1_r001_ahu_deck]
+  it_lan_ups_battery_class: FCU
+  ahu_plant_rooms: spill_air_from_ahu_supply
+mot:                                                       # D-038, D-039
+  tag_authority: ["Short Version DD Booklet/AHU Cross Verification - MOT NSC Register.xlsx", MOT NSC]
+  ot_airflow: "sum(HEPA terminal face area x required face velocity) x (1 + duct leakage)"
+  hepa_schedule: MOT NSC HEPA module schedule (latest corrigendum)
+  face_velocity_source: "3. AH MOT NSC - Tech Specs for ACMV Services (Corri 3).pdf"
+zoning_d040: {governing: dd_booklet_ahu_zoning, markups: unflattened_polygons_colour_coded, other_evidence: fills_gaps_only}
+grid_typical_spacing_mm: 8400                              # D-041
+envelope: {source: "Short Version DD Booklet/20260129_AIGH_ETTV_Report.pdf", status: to_assess_before_issue}   # D-042
+equipment_provisional_w_m2: {allowed: true, style: Assumption-Load, flag: vendor data}                       # D-043
+common_areas_lb3_to_l01: build                             # D-044
