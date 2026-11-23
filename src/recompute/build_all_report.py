@@ -19,7 +19,7 @@ def _flags_and_checks(path: Path) -> Dict[str, Any]:
     fl = [r for r in wb["Flags"].iter_rows(min_row=7, values_only=True) if r[0]]
     by = collections.Counter(r[1] for r in fl)
     checks = [(r[1], r[2], r[4]) for r in wb["Checks"].iter_rows(min_row=7, values_only=True) if r[1] and r[4] and r[0] != None]
-    overall = next((r[4] for r in wb["Checks"].iter_rows(min_row=7, values_only=True) if r[1] == "Overall"), "")
+    overall = next((r[4] for r in wb["Checks"].iter_rows(min_row=7, values_only=True) if r[1] == "Calculation"), "")
     return dict(flags=sum(by.values()), by_type=dict(by), fail=[c[0] for c in checks if c[2] == "FAIL"], verify=[c[0] for c in checks if c[2] == "VERIFY"], overall=overall)
 
 

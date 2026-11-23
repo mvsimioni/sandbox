@@ -56,19 +56,21 @@ def read_department_workbook(path: Path) -> Dict[str, Any]:
         if not tag or tag == "TOTAL":
             break
         out.append(dict(tag=str(tag), type=row[idx["type"]], rooms=row[idx["n"]] or 0, area_m2=row[idx["area"]] or 0.0, rooms_no_height=row[idx["noh"]] or 0,
-                        room_supply_lps=row[idx["sa_room"]] or 0.0, outdoor_air_lps=row[idx["oa_sum"]] or 0.0,
+                        room_supply_lps=(row[idx["sa_room"]] or 0.0) + (row[idx["ucvadd"]] or 0.0),      # D-058: the future ultra-clean duty governs the unit
+                         outdoor_air_lps=row[idx["oa_sum"]] or 0.0,
                         frac=row[fi] or 0.0, zone_rooms=row[idx["zr"]], zone_area_m2=row[idx["za"]],
                         tender_lps=row[idx["sched"]], tender_source=row[idx["tsrc"]], tender_source_id=row[idx["sched_s"]],
                         rooms_specified=row[idx["nfix"]] or 0, area_ok_m2=row[idx["area_ok"]] or 0.0,
                         tender_oa_lps=row[idx["sched_oa"]], rooms_ok=row[idx["nok"]] or 0, rooms_no_criteria=row[idx["nocrit"]] or 0, area_no_criteria_m2=row[idx["area_nocrit"]] or 0.0,
                         frac_not_single_pass=row[idx["fsp"]] or 0.0, single_pass_room=row[idx["spr"]] or "", single_pass_room_supply_lps=row[idx["spl"]] or 0.0,
-                        frac_other_rooms=row[idx["spy"]] or 0.0))
+                        frac_other_rooms=row[idx["spy"]] or 0.0, oa_balance_lps=row[idx["oa_bal"]] or 0.0, second_rooms=row[idx["second"]],
+                        no_reduction=row[idx["norr_why"]] or ""))
     checks: Dict[str, Any] = {}
     if "Checks" in wb.sheetnames:
         for row in wb["Checks"].iter_rows(min_row=7, values_only=True):
             if row[1]:
                 checks[str(row[1])] = row[2]
-                if row[1] == "Overall":
+                if row[1] == "Calculation":
                     checks["Overall"] = row[4]
     rooms_total = sum(1 for r in wb["Room Information"].iter_rows(min_row=7, values_only=True) if r[0]) if "Room Information" in wb.sheetnames else 0
     dchk = dict(rooms=rooms_total, supply_on_unit=checks.get("AHU room supply equals the Airflow total of the rooms that have an AHU"),
@@ -195,11 +197,15 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
                                                  "used only in the Remarks wording; no calculation uses it"),
                                                 ("Closure tolerance of the checks, absolute (L/s)", 10, "BalTolLps", "same value as the department workbooks"),
                                                 ("Share of the zoned area that the counted rooms of a unit must reach before the room list of the unit is complete", 0.9, "ZoneCoverMin",
-                                                 "same value as the department workbooks; to confirm")), 5):
+                                                 "same value as the department workbooks; to confirm"),
+                                                ("Largest share of the zoned area that the counted rooms of a unit may reach", 1.1, "ZoneCoverMax",
+                                                 "same value as the department workbooks; to confirm"),
+                                                ("Smallest share of the tender airflow that the units stating a reduction must carry before the percentage of the total is shown", 0.5,
+                                                 "MasterShareMin", "to confirm")), 5):
         put(ba, f"A{rr}", label, "Text")
-        put(ba, f"B{rr}", val, "Specified" if nm != "ZoneCoverMin" else "Assumption", "d0" if nm == "BalTolLps" else "pct1")
+        put(ba, f"B{rr}", val, "Specified" if nm not in ("ZoneCoverMin", "ZoneCoverMax", "MasterShareMin") else "Assumption", "d0" if nm == "BalTolLps" else "pct1")
         put(ba, f"C{rr}", f"{'L/s' if nm == 'BalTolLps' else 'fraction'}  ({nm})", "Text")
-        put(ba, f"D{rr}", "S" if nm != "ZoneCoverMin" else "A", "Code")
+        put(ba, f"D{rr}", "S" if nm not in ("ZoneCoverMin", "ZoneCoverMax", "MasterShareMin") else "A", "Code")
         put(ba, f"E{rr}", "GEN-BASIS", "Tag")
         link_to(ba[f"E{rr}"], "Sources", "A7")
         put(ba, f"F{rr}", rem, "Remark")
@@ -243,9 +249,12 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
           ("fnsp", "Highest fraction of the rooms that are not single pass", "%", 14), ("spr", "Single-pass room that sets the fraction", "", 30),
           ("spl", "Supply of that room", "L/s", 11), ("spy", "Highest fraction of the other rooms", "%", 12),
           ("key", "Key (helper)", "", 12), ("idx", "Row (helper)", "", 8),
-          ("nok", "Rooms with a criteria row and a supply airflow", "no.", 12)]
+          ("nok", "Rooms with a criteria row and a supply airflow", "no.", 12),
+          ("oab", "Outdoor air, balance basis (exhaust, offset air, spill air)", "L/s", 14), ("sl", "Rooms of the second room list", "no.", 12),
+          ("nr", "Reason that no reduction is stated (tender base)", "", 40), ("nrk", "Unit with a reason (helper)", "", 12)]
+    from openpyxl.utils import get_column_letter as _gcl
     for i, (k, h, u, w) in enumerate(dh):
-        col = chr(65 + i)
+        col = _gcl(i + 1)
         put(dr, f"{col}5", h, "Header" if k not in ("name",) else "HeaderLeft")
         put(dr, f"{col}6", u or None, "Unit")
         dr.column_dimensions[col].width = w
@@ -275,6 +284,10 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
             put(dr, f"V{row}", f'=IF(S{row}<>"",A{row}&"|"&TEXT(I{row},"0.0000"),"")', "Calc")
             put(dr, f"W{row}", f"=ROW()", "Calc", "d0")
             put(dr, f"X{row}", a.get("rooms_ok") or 0, "Input", "d0")
+            put(dr, f"Y{row}", a.get("oa_balance_lps") or 0, "Input", "d1")
+            put(dr, f"Z{row}", a.get("second_rooms") if a.get("second_rooms") not in ("", None) else None, "Input", "d0")
+            put(dr, f"AA{row}", a.get("no_reduction") or None, "Input").alignment = Alignment(horizontal="left")
+            put(dr, f"AB{row}", f'=IF(AA{row}<>"",A{row},"")', "Calc")
             put(dr, f"J{row}", "D", "Code")
             put(dr, f"K{row}", f"DEPT-{dn}", "Tag")
             link_to(dr[f"K{row}"], "Sources", f"A{src_row[f'DEPT-{dn}']}")
@@ -330,7 +343,9 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
           ("nfix", "Rooms specified by the MOT NSC", "no.", 12), ("aok", "Area of the rooms with a criteria row and a supply airflow", "m²", 14),
           ("nnc", "Rooms with no criteria row", "no.", 12), ("anc", "Area of the rooms with no criteria row", "m²", 14),
           ("nok", "Rooms with a criteria row and a supply airflow", "no.", 12),
-          ("spnote", "Single-pass note (helper)", "", 20)]
+          ("spnote", "Single-pass note (helper)", "", 20),
+          ("oab", "Outdoor air, balance basis (exhaust, offset air, spill air)", "L/s", 14), ("sl", "Rooms of the second room list", "no.", 12),
+          ("nr", "Reason that no reduction is stated (tender base)", "", 40)]
     from openpyxl.utils import get_column_letter
     col = {k: get_column_letter(i + 1) for i, (k, *_r) in enumerate(mh)}
     for i, (k, h, u, w) in enumerate(mh):
@@ -357,7 +372,11 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
         put(am, g("calc"), f"={g('sa')}*(1+{g('leak')})", "Result", "d1")
         put(am, g("oa"), f"=SUMIFS({rng('G')},{rng('A')},{g('ahu')})", "Calc", "d1")
         put(am, g("frac"), f"=_xlfn.MAXIFS({rng('I')},{rng('A')},{g('ahu')})", "Calc", "pct1")
-        put(am, g("oa_rule"), f"={g('frac')}*{g('calc')}", "Calc", "d1")
+        put(am, g("oab"), f"=SUMIFS({rng('Y')},{rng('A')},{g('ahu')})", "Calc", "d1")
+        put(am, g("sl"), f'=IF(COUNTIFS({rng("A")},{g("ahu")},{rng("Z")},">0")=0,"",_xlfn.MAXIFS({rng("Z")},{rng("A")},{g("ahu")}))', "Calc", "d0")
+        put(am, g("nr"), f'=IF(ISNUMBER(MATCH({g("ahu")},{rng("AB")},0)),INDEX({rng("AA")},MATCH({g("ahu")},{rng("AB")},0)),"")', "Calc")
+        # D-032: the larger of the fraction basis and the air that leaves the rooms of all the departments on the unit
+        put(am, g("oa_rule"), f"=MIN({g('calc')},MAX({g('frac')}*{g('calc')},{g('oab')}))", "Calc", "d1")
         # R1-10 decided item 3 (information only, feeds nothing): larger of (sum of room outdoor air x (1 + DuctLeakage)) and (highest fraction of the rooms that are
         # not single pass x calculated airflow)
         put(am, g("oa_mb"), f"=MAX({g('oa')}*(1+{g('leak')}),_xlfn.MAXIFS({rng('R')},{rng('A')},{g('ahu')})*{g('calc')})", "Calc", "d1")
@@ -385,7 +404,7 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
             flags.append(dict(type="VERIFY", ref=tag, text=f"AHU {tag}: no tender airflow is used. " + (str(note_) + "." if note_ else "No department workbook gives one.")))
         put(am, g("zr"), f"=_xlfn.MAXIFS({rng('L')},{rng('A')},{g('ahu')})", "Calc", "d0")
         put(am, g("za"), f"=_xlfn.MAXIFS({rng('M')},{rng('A')},{g('ahu')})", "Calc", "d1")
-        put(am, g("cov"), coverage_formula(g("zr"), g("za"), g("nok"), g("aok"), "ZoneCoverMin", g("nnc")), "Calc").alignment = Alignment(horizontal="left")
+        put(am, g("cov"), coverage_formula(g("zr"), g("za"), g("nok"), g("aok"), "ZoneCoverMin", g("nnc"), zmax="ZoneCoverMax", sl=g("sl"), n=g("n"), norr=g("nr")), "Calc").alignment = Alignment(horizontal="left")
         oa_above = f'AND(ISNUMBER({g("toa")}),{g("oa_rule")}>{g("toa")})'
         put(am, g("oaflag"), f'=IF(NOT(ISNUMBER({g("toa")})),"not scheduled",IF({oa_above},"VERIFY: ABOVE TENDER OUTDOOR AIR","within tender outdoor air"))', "Calc").alignment = Alignment(horizontal="left")
         put(am, g("red"), f'=IF(OR({g("tender")}="",{g("calc")}=0,{incomplete(g("cov"))},{oa_above},{g("calc")}>={g("tender")}),"",{g("tender")}-{g("calc")})', "Calc", "d0")
@@ -416,8 +435,11 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
         put(am, f"{col[k]}{tr1}", (f"=SUM({rng_k})" if k == "red" else f"=SUMPRODUCT(--ISNUMBER({red_rng}),{rng_k})"), "Total", fmt)
         put(am, f"{col[k]}{tr2}", f"=SUM({rng_k})", "Total", fmt)
     # the percentage compares the reduction of the rows that state one with the tender of the same rows
-    put(am, f"{col['redp']}{tr1}", f'=IF({col["tender"]}{tr1}=0,"",{col["red"]}{tr1}/{col["tender"]}{tr1})', "Total", "pct1")
-    put(am, f"{col['rem']}{tr1}", "The TOTAL row adds only the rows that state a reduction: its tender − calculated = its reduction. The row 'TOTAL, all rows' adds every row.", "Note")
+    # D-054: the percentage of the total stays blank while the units that state a reduction carry less than MasterShareMin of the tender airflow of all units
+    share = f'IF({col["tender"]}{tr2}=0,0,{col["tender"]}{tr1}/{col["tender"]}{tr2})'
+    put(am, f"{col['redp']}{tr1}", f'=IF(OR({col["tender"]}{tr1}=0,{share}<MasterShareMin),"",{col["red"]}{tr1}/{col["tender"]}{tr1})', "Total", "pct1")
+    put(am, f"{col['rem']}{tr1}", (f'="The TOTAL row adds only the rows that state a reduction: its tender − calculated = its reduction. These units carry "&TEXT({share},"0 %")&" of the tender airflow of all units. '
+                                   f'The percentage stays blank while that share is below "&TEXT(MasterShareMin,"0 %")&". The row \'TOTAL, all rows\' adds every row."'), "Note")
     tr = tr2
     cf_formula(am, f"{col['flag']}{FIRST}:{col['flag']}{last}", f'LEFT({col["flag"]}{FIRST},6)="VERIFY"', bold=False, fill="FFFFF2CC")
     cf_formula(am, f"{col['oaflag']}{FIRST}:{col['oaflag']}{last}", f'LEFT({col["oaflag"]}{FIRST},6)="VERIFY"', bold=False, fill="FFFFF2CC")
@@ -494,11 +516,16 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
         put(ck, f"F{rr}", note, "Note")
     ck_last = FIRST + len(tests) - 1
     rr = ck_last + 2
-    put(ck, f"B{rr}", "Overall", "ResultText")
+    put(ck, f"B{rr}", "Calculation", "ResultText")
     put(ck, f"E{rr}", f'=IF(COUNTIF(E{FIRST}:E{ck_last},"FAIL")>0,"FAIL",IF(COUNTIF(E{FIRST}:E{ck_last},"VERIFY")>0,"VERIFY","PASS"))', "ResultCheck")
     for c in "ACD":
         put(ck, f"{c}{rr}", None, "ResultText")
-    put(ck, f"F{rr}", "FAIL if any check fails; VERIFY if none fails and some need review", "ResultText")
+    put(ck, f"F{rr}", "Calculation checks. FAIL if any check fails; VERIFY if none fails and some need review", "ResultText")
+    put(ck, f"B{rr + 1}", "Inputs complete", "ResultText")
+    put(ck, f"E{rr + 1}", "NOT COMPLETE", "ResultCheck")
+    for c in "ACD":
+        put(ck, f"{c}{rr + 1}", None, "ResultText")
+    put(ck, f"F{rr + 1}", "The AHU totals cover only the rooms that are linked to a unit. Read the coverage lines on the README before you use a total. DRAFT, acceptance open", "ResultText")
     cf_formula(ck, f"E{FIRST}:E{rr}", f'E{FIRST}="FAIL"')
     cf_formula(ck, f"E{FIRST}:E{rr}", f'E{FIRST}="VERIFY"', bold=False, fill="FFFFF2CC")
     for c, w in zip("ABCDEF", (6, 80, 16, 18, 10, 60)):
@@ -512,6 +539,15 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
         rd.column_dimensions[c].width = w
     rd.column_dimensions["H"].width = 30
     r = 4
+    put(rd, f"B{r}", "Read this first: coverage of the AHU totals", "Section")
+    r += 1
+    put(rd, f"C{r}", f'="PARTIAL. The AHU totals add only the rooms that are linked to a unit: room supply on a unit is "&TEXT(SUM({dcr("D")}),"#,##0")&" L/s, against "'
+                     f'&TEXT(SUM({dcr("D")})+SUM({dcr("E")})+SUM({dcr("F")}),"#,##0")&" L/s of room supply in the department workbooks, and "&TEXT(SUM({ahu_rng("tender")}),"#,##0")&" L/s of tender airflow on the units listed. '
+                     f'Read every unit total as partial. A reduction against tender is stated only for a unit whose room list is complete."', "Calc").alignment = Alignment(wrap_text=True, vertical="top")
+    put(rd, f"B{r}", "Coverage", "Text")
+    rd.merge_cells(f"C{r}:H{r}")
+    rd.row_dimensions[r].height = 58
+    r += 2
     put(rd, f"B{r}", "Purpose and scope", "Section")
     r += 1
     for t in ("Each AHU is counted once across the department workbooks. The department workbooks give the room supply that each department takes from the AHU.",
@@ -530,7 +566,7 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
     for label, f in (("Checks", f'=IF(COUNTIF({ck_rng},"FAIL")>0,COUNTIF({ck_rng},"FAIL")&" CHECK(S) FAIL",IF(COUNTIF({ck_rng},"VERIFY")>0,"NO CHECK FAILS; "&COUNTIF({ck_rng},"VERIFY")&" TO VERIFY","ALL CHECKS PASS"))'),
                      ("Room supply on an AHU", f'=TEXT(SUM({dcr("D")}),"#,##0")&" of "&TEXT(SUM({dcr("D")})+SUM({dcr("E")})+SUM({dcr("F")}),"#,##0")&" L/s ("&TEXT(IF(SUM({dcr("D")})+SUM({dcr("E")})+SUM({dcr("F")})=0,0,SUM({dcr("D")})/(SUM({dcr("D")})+SUM({dcr("E")})+SUM({dcr("F")}))),"0.0 %")&")"'),
                      ("Rooms on no unit and with no system class", f'=SUM({dcr("G")})&" of "&SUM({dcr("C")})'),
-                     ("Thermal load case", '="PEOPLE, LIGHTING AND SMALL POWER (ASHRAE values where no project value). Equipment gain is not included. Envelope gain is not assessed."'),
+                     ("Thermal load case", '="PEOPLE, LIGHTING AND SMALL POWER (ASHRAE values where no project value). A provisional equipment gain is included for equipment-led rooms. Envelope gain is assessed by the simple facade method for external rooms."'),
                      ("Department workbooks listed below", f"=COUNTA($B${list_first}:$B${list_last})"),
                      ("AHU rows", f"=COUNTA({ahu_rng('ahu')})"),
                      ("Open flags", f"=COUNTIF('Flags'!$E$5:$E${fl_last + 1},\"OPEN\")")):
@@ -605,7 +641,7 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
         put(rd, f"{c}{r}", h, "HeaderLeft")
     r += 1
     ppl = conf.people(Path(root))
-    for c, v in zip("BCDEFG", ("A", date, "Issued for review", ppl["by"], ppl["checked"], ppl["approved"])):
+    for c, v in zip("BCDEFG", ("A", date, "DRAFT, acceptance open", ppl["by"], ppl["checked"], ppl["approved"])):
         put(rd, f"{c}{r}", v, "Text")
     r += 1
     rd_last = r
@@ -631,5 +667,7 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
     wb.properties.creator = ppl["by"]
     wb.properties.title = f"{project}: AHU master summary"
     Path(out).parent.mkdir(parents=True, exist_ok=True)
+    from .clean import clean_workbook
+    clean_workbook(wb)
     wb.save(out)
     return dict(departments=len(recs), ahus=len(tags), flags=len(flags), out=str(out))

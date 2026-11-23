@@ -142,6 +142,7 @@ README = [
     ("Area is the measured area of the room on the tender plan. It is blank where the plan shows no closed room area.", ""),
     ("Confidence is a number from 0 to 1. A value below 0.9 has an amber fill. Check these rooms first.", ""),
     ("Sources lists the documents with number, issue, sheet and page. Remarks give the basis of the class and any difference between documents.", ""),
+    ("Basis gives the source that sets the class, in this order: RFI-ME-0233 zoning, MOT NSC, DD Booklet zoning, working air-side schematic, App D, tender air-side schematic, plan mode label. No unit evidence means that no document gives the system for the room.", ""),
     ("AHU summary", "h"),
     ("Departments, Storeys served and Plant level come from the room sheets and from the unit tag.", ""),
     ("Tender airflow is the supply airflow in L/s. The first source is Equipment Schedule SCH/1 (Corr 5). For the units of the MOT NSC (operating theatres, day surgery theatres, sterile services, cath lab and angiography), the source is the MOT NSC Overall AC Equipment Schedule (Corr 2); the tender air-side schematics IP-BH-16xxx show the same units. If no schedule has a figure, the source is the tender air-side schematic. The next column names the source.", ""),
@@ -296,8 +297,8 @@ def build_xlsx(storeys: List[str], out: Path) -> dict:
     _print_setup(sm, len(heads), last, 1, "AHU summary", date)
 
     # ---- storey sheets ---------------------------------------------------------------------------
-    rheads = ["Room ID", "Room tag", "Room name", "Storey", "Department", "System / class", "Area (m²)", "Confidence", "Sources", "Remarks", "Code"]
-    rwidths = [12, 24, 26, 8, 22, 28, 10, 11, 50, 60, 6]
+    rheads = ["Room ID", "Room tag", "Room name", "Storey", "Department", "System / class", "Area (m²)", "Confidence", "Sources", "Remarks", "Code", "Basis"]
+    rwidths = [12, 24, 26, 8, 22, 28, 10, 11, 50, 60, 6, 24]
     counts = {}
     for k in storeys:
         w = wb.create_sheet(k)
@@ -311,8 +312,8 @@ def build_xlsx(storeys: List[str], out: Path) -> dict:
             if "CATH-0" in cls:
                 note = (note + " " + cath_tag_note(cls)).strip()
             vals = [a["room_id"], a["room_tag"], a["room_name"], k, tc.clean_dept(a["department"], cls) or "no information", cls, (_num(a["area_m2"]) or None), _num(a["confidence"]),
-                    "; ".join(tc.split_citations(a["sources"], g_)), note, "D"]
-            sty = ["Tag", "Tag", "TextWrap", "Text", "TextWrap", "Tag", "Calc", "Calc", "TextWrap", "Remark", "Code"]
+                    "; ".join(tc.split_citations(a["sources"], g_)), note, "D", a.get("basis", "")]
+            sty = ["Tag", "Tag", "TextWrap", "Text", "TextWrap", "Tag", "Calc", "Calc", "TextWrap", "Remark", "Code", "Tag"]
             for j, v in enumerate(vals, 1):
                 c = w.cell(row=i, column=j, value=v)
                 c.style = sty[j - 1]
@@ -327,7 +328,7 @@ def build_xlsx(storeys: List[str], out: Path) -> dict:
         w.auto_filter.ref = "A1:%s%d" % (get_column_letter(len(rheads)), lr)
         w.conditional_formatting.add("H2:H%d" % lr, FormulaRule(formula=["$H2<0.9"], fill=PatternFill("solid", bgColor=AMBER, fgColor=AMBER)))
         w.conditional_formatting.add("F2:F%d" % lr, FormulaRule(formula=['$F2="no information"'], font=Font(name=SANS, italic=True, color="6B7780")))
-        w.conditional_formatting.add("A2:K%d" % lr, FormulaRule(formula=["MOD(ROW(),2)=0"], fill=PatternFill("solid", bgColor="FFF4F4F4", fgColor="FFF4F4F4")))
+        w.conditional_formatting.add("A2:L%d" % lr, FormulaRule(formula=["MOD(ROW(),2)=0"], fill=PatternFill("solid", bgColor="FFF4F4F4", fgColor="FFF4F4F4")))
         _print_setup(w, len(rheads), lr, 1, "%s  %s" % (k, storey_info(k)["storey_label"]), date)
         counts[k] = len(rows)
     from ..workbook.tender_lookup import record_conflicts
@@ -335,6 +336,8 @@ def build_xlsx(storeys: List[str], out: Path) -> dict:
     wb.properties.creator = "AIGH IP ACMV design team"
     wb.properties.title = "AHU zone schedule, LB3 to L07"
     out.parent.mkdir(parents=True, exist_ok=True)
+    from ..workbook.clean import clean_workbook
+    clean_workbook(wb)
     wb.save(str(out))
     return {"rooms_per_storey": counts, "units": len(units), "units_without_tender_airflow": n_no_tender, "tender_conflicts_listed": n_conf}
 

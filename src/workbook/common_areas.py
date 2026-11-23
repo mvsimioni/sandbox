@@ -17,15 +17,20 @@ from typing import Any, Dict, List, Optional
 
 from . import conf
 from .common import ROOM_THERMAL_NOTE
-from .assemble import (REG, _sentence_case, _expand_abbreviations, _f, _norm, _read, _tag_candidates, _tender_for_tag, criteria_from_row, criteria_text, load_use, load_zone_assignments,
+from .assemble import (_storey_label, REG, _sentence_case, _expand_abbreviations, _f, _norm, _read, _tag_candidates, _tender_for_tag, criteria_from_row, criteria_text, load_use, load_zone_assignments,
                        match_criteria, room_use, zone_key, zone_totals)
 from .linking import split_code
+from . import hfds as hf
+from . import round5 as r5
+from . import envelope as envm
 from .presume import Presumption
 from .build import build_workbook
 from .reva import build_reva_input
 
 STOREYS = {"2": "L02", "3": "L03", "4": "L04", "5": "L05", "6": "L06", "7": "L07"}
-NOISE = re.compile(r"^(FFL|SFL|PLL|BLL)\b.*|^[A-Z]$|^(AC|MV|NV)\b.*|^\?$", re.I)
+NOISE = re.compile(r"^(FFL|SFL|FLL|SLL|PLL|BLL)\b.*|^[A-Z]$|^(AC|MV|NV)\b.*|^\?$", re.I)
+PLAN_STOREYS = ["LB3", "B3", "B2", "B1", "L01"]          # D-044: the common areas outside App D
+AHU_ROOM = re.compile(r"^(AHU|PAHU|FAHU)(?: room| space)?$", re.I)
 UNIT_TYPES = ("AHU", "PAHU", "FCU")
 
 
@@ -120,11 +125,15 @@ def assemble_common_areas(root: Path = Path("."), with_others: bool = True) -> D
             method="Value taken from the project design basis. No project document gives a lighting load", confidence="medium")
     add_src("ASM-EQUIP", document="Workbook defaults", issue="", page="", location="equipment gain",
             text_as_read="equipment gain 0 W: no equipment list is in the scope", method="Assumption, to confirm", confidence="low")
+    add_src("ASM-EQUIPPROV", document="Provisional equipment gain by room use (W/m²)", issue="22 Nov 2026", page="provisional equipment table", location="W/m² by room use",
+            text_as_read="data centre 1,000; communications 200; UPS and battery 100; imaging 100; laboratory 40; sterile services 80; kitchen 200; automation 40 (W/m²)",
+            method="Stated engineering allowance, order of magnitude of the ASHRAE health-care and laboratory guidance. No equipment list is in the scope. Vendor data needed",
+            confidence="low")
     pres = Presumption(root, room_use, split_code, _expand_abbreviations)
     n_presumed = n_loads = n_loads_missing = 0
     booklet = _read(root / REG / "criteria.csv")
     crit_cache: Dict[str, Any] = {}
-    n_default = n_booklet = n_none = n_plant = 0
+    n_default = n_booklet = n_none = n_plant = n_hfds = 0
     none_names: List[str] = []
 
     def criteria_for(name: str, number: str, is_ac: bool = False):
@@ -236,6 +245,14 @@ def assemble_common_areas(root: Path = Path("."), with_others: bool = True) -> D
             if cc.get("presumed"):                  # D-026: the common areas have no booklet of their own, so every row of a booklet is a presumed row
                 n_presumed += 1
                 room["remark"] += "; " + cc["remark"].split("To confirm.")[0].rstrip(". ") + ". To confirm"
+        elif kind == "plant" and hf.find_row(root, name) is not None:
+            hrow, hkind, hwhy = hf.find_row(root, name)
+            hsid = add_src(f"HFDS-{_norm(hrow['table_id'])}-{_norm(hrow['area_name'])}"[:60], **hf.source_fields(hrow))
+            room["criteria"] = hf.to_criteria(hrow, hsid, hkind, hwhy)
+            n_hfds += 1
+            room["remark"] += f"; criteria from the HFDS ({hrow['area_name']}, table {hrow['table_id']}, page {hrow['printed_page']})"
+            if hkind == "it" and not room["ahu"]:
+                room["system_type"] = "FCU"
         elif kind == "plant":
             n_none += 1
             n_plant += 1
@@ -266,6 +283,12 @@ def assemble_common_areas(root: Path = Path("."), with_others: bool = True) -> D
                 room["criteria"]["presumed"] = True
                 room["remark"] += "; " + ptxt.rstrip(".")
                 n_presumed += 1
+            elif hf.find_row(root, name) is not None:
+                hrow, hkind, hwhy = hf.find_row(root, name)
+                hsid = add_src(f"HFDS-{_norm(hrow['table_id'])}-{_norm(hrow['area_name'])}"[:60], **hf.source_fields(hrow))
+                room["criteria"] = hf.to_criteria(hrow, hsid, hkind, hwhy)
+                n_hfds += 1
+                room["remark"] += f"; criteria from the HFDS ({hrow['area_name']}, table {hrow['table_id']}, page {hrow['printed_page']})"
             else:
                 n_none += 1
                 none_names.append(name)
@@ -343,6 +366,103 @@ def assemble_common_areas(root: Path = Path("."), with_others: bool = True) -> D
         room["_space"] = s
         rooms.append(room)
 
+    # D-044: the common areas of LB3, B3, B2, B1 and L01 (outside App D). Rooms are the plan rooms that the zoning gives to no department or to the common areas.
+    env_model = envm.Envelope(root, (cfg.get("envelope_round5") or {}).get("coefficients"))
+    n_plan_ca = 0
+    plan_rooms: List[Dict[str, Any]] = []
+    for st_key in PLAN_STOREYS:
+        pfile = root / REG / f"room_polygons_{st_key}.csv"
+        if not pfile.exists():
+            continue
+        for pp in _read(pfile):
+            za = zone_rows.get(st_key, {}).get(pp["room_id"])
+            dept_ = ((za or {}).get("department") or "").strip()
+            if za is None or (dept_ and not re.search("common", dept_, re.I)):
+                continue
+            raw = (pp.get("room_name") or pp.get("room_tag") or "").strip()
+            area_p = _f(pp.get("a_area_m2"))
+            if not raw or NOISE.match(raw) or not area_p or area_p < 1.5:
+                continue
+            exp_ = _expand_abbreviations(raw.lower()).strip() or raw
+            name = exp_[:1].upper() + exp_[1:]
+            number = pp["room_id"]
+            sid = add_src(f"PLAN-{number}"[:60], document="Architectural tender drawings, room outline of the plan", issue="plan measurement", page=f"page {pp.get('source_page', '')}, storey {st_key}",
+                          location=f"room tag {raw}, grid {pp.get('grid_location', '')}", text_as_read=f"plan room {raw}; area {pp.get('a_area_m2')} m²",
+                          method="Area measured from the room outline on the drawing", confidence=str(pp.get("method_agreement", "")))
+            room = dict(number=number, name=name, storey=st_key, ahu=None, zone_tag=None, system_type=None, terminal_tag=None, exhaust_fan=None,
+                        space_type="UNCLASSIFIED", room_condition="Comfort", dpa_area_m2=None, soa_area_m2=None, measured_area_m2=area_p, area_selector="MEASURED",
+                        ceiling_height_m=ch_default, occupancy_people=None, occupancy_per_100m2=None, iof=None, activity=None, operation_hours=None,
+                        lighting_w_m2=None, small_power_w_m2=None, gaps={}, criteria={}, envelope=[],
+                        prov={"identity": ["D", sid], "zoning": ["D", sid], "space_type": ["A", "ASM-DEFAULT"], "measured_area": ["M", sid], "area_selector": ["S", "GEN-BASIS"],
+                              **({"ceiling_height": ["A", "ASM-CEILING"]} if ch_default else {})},
+                        remark=f"common area outside App D; plan room {raw} ({area_p:.1f} m²), name expanded to '{name}'")
+            cls = (za.get("class") or "").strip()
+            zsid = add_src(f"ZONE-{st_key}-{number}"[:60], document=f"AHU zoning, storey {st_key}", issue="zoning assignment", page=st_key, location=f"plan room {number}",
+                           text_as_read=f"class {cls} ({za.get('class_kind', '')}) of plan room {number}", method="Zoning of the storey", confidence=str(za.get("confidence", "")))
+            room["prov"]["zoning"] = ["D", zsid]
+            if re.match(r"^(AHU|PAHU|FCU)-", cls):
+                room["ahu"] = cls
+                room["system_type"] = "FCU" if cls.startswith("FCU") else None
+            elif cls.upper().startswith("FCU"):
+                room["system_type"] = "FCU"
+                room["remark"] += f"; {cls}"
+            elif cls.upper() in ("MV", "NV", "NO INFORMATION"):
+                room["system_type"] = cls.upper()
+            elif cls:
+                room["system_type"] = "OTHER"
+                room["remark"] += f"; zoning class {cls}"
+            cc, kind = criteria_for(name, number, False)
+            if cc is not None:
+                room["criteria"] = dict(cc)
+                room["remark"] += "; criteria presumed from the booklet rows (assumption, to confirm)"
+            else:
+                hit_h = hf.find_row(root, name)
+                if hit_h is not None:
+                    hrow, hkind, hwhy = hit_h
+                    hsid = add_src(f"HFDS-{_norm(hrow['table_id'])}-{_norm(hrow['area_name'])}"[:60], **hf.source_fields(hrow))
+                    room["criteria"] = hf.to_criteria(hrow, hsid, hkind, hwhy)
+                    n_hfds += 1
+                    room["remark"] += f"; criteria from the HFDS ({hrow['area_name']}, table {hrow['table_id']}, page {hrow['printed_page']})"
+                    if hkind == "it" and not room["ahu"] and not room["system_type"]:
+                        room["system_type"] = "FCU"
+                else:
+                    room["gaps"]["criteria"] = "No booklet row and no HFDS row fits this room name. No criteria are set; only its thermal load can set an airflow."
+                    n_none += 1
+            use, label = room_use(name)
+            if use is not None and use in densities:
+                room["occupancy_per_100m2"] = float(densities[use])
+                room["occupancy_basis"] = "DENSITY DEFAULT"
+                room["occupancy_use"] = use.replace("_", " ")
+                room["prov"]["occupancy_density"] = ["A", "OCC-DENSITY"]
+                if densities[use]:
+                    room["activity"] = "Seated"
+                    room["prov"]["activity"] = ["A", "ASM-ACTIVITY"]
+            else:
+                room["occupancy_basis"] = "NOT SET"
+                room["gaps"]["occupancy"] = "Occupancy is not set. No RDS applies to the common areas, and the name does not give a room use for the default density. Give the number of persons."
+            lk, _lw = load_use(name)
+            if lk and lk in plug_tab and lk in light_tab:
+                room["lighting_w_m2"], room["small_power_w_m2"] = float(light_tab[lk]), float(plug_tab[lk])
+                room["prov"]["lighting"], room["prov"]["small_power"] = ["A", "ASM-LIGHT"], ["A", "ASM-PLUG"]
+                room["load_basis"], room["load_use"] = "ASHRAE", _lw
+                n_loads += 1
+            else:
+                room["gaps"]["loads"] = "Lighting and small power are not set. The name does not say what the space is used for. Give the room use or the values."
+                n_loads_missing += 1
+            eq_ = r5.equipment_provisional(name, root)
+            if eq_ is not None:
+                room["equipment_sensible_w"], room["equipment_latent_w"] = round(eq_[1] * area_p, 0), 0.0
+                room["prov"]["equipment_sensible"] = room["prov"]["equipment_latent"] = ["A", "ASM-EQUIPPROV"]
+                room["equip_basis"] = "PROVISIONAL"
+                room["remark"] += f"; provisional equipment gain {eq_[1]:g} W/m² ({eq_[0].replace('_', ' ')}), vendor data needed"
+            if env_model.available and st_key in envm.ENVELOPE_STOREYS and pp.get("polygon_building_mm_wkt"):
+                room["envelope"] = env_model.rows(st_key, number, pp["polygon_building_mm_wkt"], "ETTV-ENV")
+            room["remark"] = ". ".join(_sentence_case(x).rstrip(". ") for x in re.split(r";\s*", room["remark"]) if x.strip(". ")) + ". " + ROOM_THERMAL_NOTE
+            room["_plan_room"] = True
+            plan_rooms.append(room)
+            n_plan_ca += 1
+    rooms.extend(plan_rooms)
+    link_counts = r5.apply_unit_links(rooms, "00", root, add_src, {}) if r5.links_available(root) else {}
     ztot = zone_totals(root)
     mot_sched = {_norm(r["tag"].replace("lSONP", "ISONP")): r for r in _read(root / REG / "mot_ahu_schedule.csv") if r.get("equipment_type") in ("AHU", "PAHU")}
     # units: every AHU, PAHU and FCU of App D, with the tender airflow
@@ -403,6 +523,30 @@ def assemble_common_areas(root: Path = Path("."), with_others: bool = True) -> D
                           method="Rooms and area of the unit in the zone schedule", confidence="medium")
             a.update(zone_rooms=zt["rooms"], zone_area_m2=round(zt["area"], 1), zone_code="D", zone_source=zs_)
         ahus.append(a)
+    # D-036, D-062: an AHU plant room is served by spill air of the AHUs of its plant level. The spill needed for its HFDS condition is estimated from its lighting gain at the
+    # HFDS set point and shared pro rata to the tender supply of those units (assumption, to confirm).
+    spill_note: List[str] = []
+    for room in rooms:
+        if not any(AHU_ROOM.match(x.strip()) for x in re.split(r"\s/\s", room["name"])):
+            continue
+        c_ = room.get("criteria") or {}
+        t_set = c_.get("temp_setpoint_c") or c_.get("temp_max_c")
+        area_r = room.get("soa_area_m2") or room.get("measured_area_m2") or 0.0
+        lgt = float(light_tab.get("plant_room", 4.6))
+        sup_t = float(((base.get("constants") or {}).get("SupplyTemp") or {}).get("value") or 13.0)
+        if not t_set or not area_r or t_set <= sup_t:
+            continue
+        need = lgt * area_r * 1.10 / (1.21 * (float(t_set) - sup_t))
+        lvl = "L" + str(int(room["storey"][1:])) if re.fullmatch(r"L\d\d", room["storey"]) else None
+        pool = [(a, _f(a.get("sched_supply_lps")) or 0.0) for a in ahus if lvl and (ahu_sched.get(_norm(a["tag"])) or {}).get("plant_level [Location]", "").strip() == lvl]
+        tot = sum(w for _a, w in pool)
+        room["system_type"] = "OTHER"
+        room["gaps"]["spill"] = (f"AHU plant room served by spill air of the AHUs of its plant level (not a unit of its own). The spill needed for the HFDS condition ({t_set:g} °C) is estimated at "
+                                 f"{need:,.0f} L/s from the lighting gain and shared pro rata to the tender supply of {len(pool)} unit(s). Assumption, VERIFY.")
+        if tot > 0:
+            for a, w in pool:
+                a["spill_req_lps"] = round(a.get("spill_req_lps", 0.0) + need * w / tot, 1)
+            spill_note.append(f"{room['number']} {need:,.0f} L/s over {len(pool)} unit(s)")
     if with_others:
         from .assemble import other_unit_rooms
         oth = other_unit_rooms("00", root)
@@ -414,7 +558,8 @@ def assemble_common_areas(root: Path = Path("."), with_others: bool = True) -> D
     # exhaust fan of a space: the nearest exhaust fan marked in it
     fan_tags = {f["tag"] for f in fans}
     for room in rooms:
-        for t in unit_tags(room.pop("_space").get("equipment_tags_within_60pt", "")):
+        room.pop("_plan_room", None)
+        for t in unit_tags(room.pop("_space", {}).get("equipment_tags_within_60pt", "")):
             if t in fan_tags:
                 room["exhaust_fan"] = t
                 break
@@ -432,8 +577,22 @@ def assemble_common_areas(root: Path = Path("."), with_others: bool = True) -> D
     for a in ahus:
         if a.get("list_without_rooms"):
             flags.append(dict(type="VERIFY", ref=a["tag"], text=f"Unit {a['tag']} is marked on App D but no space of this workbook carries it. It is listed with its tender airflow and no calculation.", source=""))
-    flags.append(dict(type="CONFIRM", ref="Envelope", text="Envelope rows are not set. Every space is treated as internal, with no glazing, wall or roof gain.", source="ASM-DEFAULT"))
-    flags.append(dict(type="CONFIRM", ref="Room Information", text="Lighting and small power are ASHRAE values for the room use (red cells): no project document gives them. Equipment gain is 0 W and operation time "
+    n_env = sum(1 for r in rooms if r.get("envelope"))
+    if env_model.available:
+        esid = add_src("ETTV-ENV", document="ETTV report (20260129_AIGH_ETTV_Report.pdf)", issue="29 Jan 2026", page="pages 3, 9, 27 and 34 (facade data, wall and glazing U-values, shading coefficient, correction factor)",
+                       location="Appendix 1 sheets, one record per facade sector N to NW",
+                       text_as_read="wall U-value, glazing U-value, area-weighted shading coefficient, correction factor and window-to-wall ratio of each facade",
+                       method="Gain per m² of wall = 12 × Uw; gain per m² of glass = 3.4 × Uf + 211 × CF × SC (ETTV equivalents, an averaged basis); areas by the simple facade method",
+                       confidence="medium")
+        flags.append(dict(type="CONFIRM", ref="Envelope", text=(f"Envelope gain is assessed for {n_env} external plan room(s) of storey L01 by the simple facade method (edge length on the storey outline × storey height × "
+                          "ETTV window-to-wall ratio). App D spaces have no envelope rows: they are treated as internal. Confirm the method and the bearing of the grid."), source=esid))
+    else:
+        flags.append(dict(type="CONFIRM", ref="Envelope", text="Envelope rows are not set. Every space is treated as internal, with no glazing, wall or roof gain.", source="ASM-DEFAULT"))
+    flags.append(dict(type="ASSUMPTION", ref="Room Information", text=(f"{n_plan_ca} common-area plan room(s) of storeys LB3, B3, B2, B1 and L01 are added from the plan outlines and the zoning, outside App D. "
+                      f"{n_hfds} room(s) of this workbook take their criteria from the HFDS (table and page on each room)."), source="ASM-DEFAULT"))
+    if spill_note:
+        flags.append(dict(type="VERIFY", ref="AHU", text="Spill air to AHU plant rooms (estimated from the lighting gain at the HFDS set point, shared pro rata to tender supply): " + "; ".join(spill_note) + ".", source="ASM-DEFAULT"))
+    flags.append(dict(type="CONFIRM", ref="Room Information", text="Lighting and small power are ASHRAE values for the room use (red cells): no project document gives them. Equipment gain is 0 W (a provisional value on equipment-led rooms) and operation time "
                       "is not set: no document gives them. The ceiling height is the flagged default.", source="ASM-PLUG"))
     if n_presumed:
         flags.append(dict(type="ASSUMPTION", ref="Criteria", text=f"{n_presumed} spaces take presumed criteria: the row of the same space in the closest department (italic green). To confirm.", source="CIRC-DEFAULT"))
@@ -444,13 +603,14 @@ def assemble_common_areas(root: Path = Path("."), with_others: bool = True) -> D
     if n_plant:
         flags.append(dict(type="VERIFY", ref="Criteria", text=f"{n_plant} spaces are plant spaces (names such as AHU, LV, HV, transformer, UPS, battery, MG plant). "
                           "Plant and electrical rooms have no criteria row. Their airflow is not calculated and is not zero.", source=""))
-    storeys = sorted({r["storey"] for r in rooms})
+    storeys = sorted({r["storey"] for r in rooms}, key=lambda x: (["LB3", "B3", "B2", "B1", "L01", "L02", "L03", "L04", "L05", "L06", "L07"].index(x) if x in ["LB3", "B3", "B2", "B1", "L01", "L02", "L03", "L04", "L05", "L06", "L07"] else 99))
     data = dict(base)
     data.update(
         department=dict(number="00", name="Common Areas"),
-        project=dict(base["project"], revision=dict(rev="A", date=conf.revision_date(root), description="Issued for review", **people)),
-        scope="Thermal load, airflow, outdoor air and pressure workbook for the common areas of storeys 2 to 7. Rooms are the App D spaces; systems are the App D equipment.",
-        storeys=storeys, storey_labels={s: f"Level {int(s[1:])}" for s in storeys}, space_types=sp, sources=sources, rooms=rooms, ahus=ahus, fans=fans,
+        project=dict(base["project"], revision=dict(rev="A", date=conf.revision_date(root), description="DRAFT, acceptance open", **people)),
+        scope=("Thermal load, airflow, outdoor air and pressure workbook for the common areas. Rooms are the App D spaces of storeys 2 to 7 and the plan rooms of the common areas of "
+               "storeys LB3, B3, B2, B1 and L01; systems are the App D equipment."),
+        storeys=storeys, storey_labels={s: _storey_label(s) for s in storeys}, space_types=sp, sources=sources, rooms=rooms, ahus=ahus, fans=fans,
         flags=flags, references=[], terminals=[],
         documents=[dict(document="Appendix D, ACMV for common areas (combined plans)", role="Spaces and equipment", issue="as issued",
                         taken="Space outlines and area labels, equipment tags", source=rooms[0]["prov"]["identity"][1]),
@@ -463,7 +623,9 @@ def assemble_common_areas(root: Path = Path("."), with_others: bool = True) -> D
                          "Lighting and small power: the ASHRAE value of the room use (plug load: ASHRAE Handbook, Fundamentals; lighting: ASHRAE 90.1), because no project document gives them. Plug load / lighting in W/m² by room use: " +
                          "; ".join(f"{k.replace('_', ' ')} {plug_tab[k]:g} / {light_tab[k]:g}" for k in plug_tab if k in light_tab) + "."])
     data["constants"] = dict(base["constants"])
-    data["assemble_stats"] = dict(rooms=len(rooms), criteria_presumed=n_presumed, criteria_residue=n_none, loads_ashrae=n_loads, loads_missing=n_loads_missing, skipped_spaces=len(skipped), spaces_with_unit=n_unit, spaces_with_dpa_area=n_dpa, units=len(ahus),
+    if env_model.available:
+        data["orientations"] = env_model.orientation_table("ETTV-ENV")
+    data["assemble_stats"] = dict(plan_common_rooms=n_plan_ca, criteria_hfds=n_hfds, envelope_rooms=n_env, rooms=len(rooms), criteria_presumed=n_presumed, criteria_residue=n_none, loads_ashrae=n_loads, loads_missing=n_loads_missing, skipped_spaces=len(skipped), spaces_with_unit=n_unit, spaces_with_dpa_area=n_dpa, units=len(ahus),
                                   units_with_tender=sum(1 for a in ahus if a.get("sched_supply_lps") is not None), exhaust_fans=len(fans),
                                   fans_with_tender=sum(1 for f in fans if f.get("scheduled_lps") is not None))
     return data

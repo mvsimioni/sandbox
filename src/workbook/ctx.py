@@ -26,6 +26,19 @@ BUILTIN_SOURCES = [
      "method": "Value set by the engineer", "confidence": "high"},
 ]
 
+BUILTIN_SOURCES.append(
+    {"id": "GEN-PSY", "document": "Psychrometric relations used for the room design condition (saturation pressure, humidity ratio, enthalpy of moist air)",
+     "issue": "standard relations", "page": "psychrometrics", "location": "Magnus form of the saturation pressure; moist-air enthalpy",
+     "text_as_read": "saturation pressure 0.61094 exp(17.625 t / (243.04 + t)) kPa; humidity ratio 0.622 pv / (101.325 - pv); enthalpy 1.006 t + w (2501 + 1.86 t)",
+     "method": "Value set by the engineer", "confidence": "high"})
+
+BUILTIN_SOURCES.append(
+    {"id": "GEN-CLASS", "document": "Project rule for single-pass rooms (engineer's instruction of 23 Nov 2026)",
+     "issue": "project rule", "page": "single-pass rooms", "location": "clean or sterile supply against dirty rooms",
+     "text_as_read": "A single-pass room sets the outdoor-air fraction of the unit only where it needs 100 % outdoor air for clean or sterile supply. A dirty room that needs no sterile air "
+                     "takes recirculated supply from the unit and a dedicated exhaust with no return.",
+     "method": "Rule set by the engineer. The class of each room is an assumption, to confirm", "confidence": "medium"})
+
 # name: (label, value, unit, code, source, remark)
 DEFAULTS: Dict[str, Tuple] = {
     "SafetyFactor": ("Safety factor on room loads", 0.10, "fraction", "S", "GEN-METHOD", "template convention"),
@@ -63,7 +76,7 @@ DEFAULTS: Dict[str, Tuple] = {
     "FlowNHigh": ("Flow exponent, sensitivity high", 0.75, "–", "S", "GEN-PRESSURE", "sensitivity"),
     "DoorCd": ("Door-gap discharge coefficient", 0.6, "–", "S", "GEN-PRESSURE", "project method"),
     "RefPressure": ("Reference pressure of the airtightness limit", 50, "Pa", "S", "GEN-PRESSURE", "project method"),
-    "RatioFail": ("Ratio below which a room fails", 1.0, "–", "S", "GEN-PRESSURE", "design offset over offset needed"),
+    "RatioFail": ("Ratio below which a room fails", 1.0, "–", "S", "GEN-PRESSURE", "offset used in Airflow over offset needed"),
     "RatioVerify": ("Ratio below which a room is flagged VERIFY", 1.2, "–", "S", "GEN-PRESSURE", ""),
     "ApplyFromPa": ("Pressure at or beyond which the airtightness rule applies", 5, "Pa", "S", "GEN-PRESSURE", "±"),
     "GapSides": ("Unsealed door: gap at the sides and top", 3, "mm", "A", "GEN-PRESSURE", "first value, to confirm"),
@@ -84,6 +97,27 @@ DEFAULTS: Dict[str, Tuple] = {
                      "GEN-BASIS", "to confirm"),
     "PerimFactor": ("Perimeter factor of a room with no measured outline (perimeter = factor × square root of area)", 4, "–", "A", "GEN-PRESSURE",
                     "square room; assumed, to confirm"),
+    "ZoneCoverMax": ("Largest share of the zoned area that the counted rooms of a unit may reach before the room list is not accepted", 1.1, "fraction", "A",
+                     "GEN-BASIS", "to confirm: counted area between 0.9 and 1.1 of the zoned area"),
+    "FcuLeakageDucted": ("Duct leakage allowance on a ducted fan coil unit", 0.10, "fraction", "A", "GEN-BASIS",
+                         "no document gives the duct route of a fan coil unit; the AHU value is used, to confirm"),
+    "FcuLeakageHiWall": ("Duct leakage allowance on a hi-wall (non-ducted) fan coil unit", 0.0, "fraction", "A", "GEN-BASIS",
+                         "no ducts, so no duct leakage"),
+    "DesignTRef": ("Reference design dry-bulb temperature of a room", 24, "°C", "S", "GEN-BASIS",
+                   "used where the printed range of the room contains it; else the nearest limit of the range"),
+    "DesignRHMax": ("Upper bound of the design humidity of a room", 0.60, "fraction", "S", "GEN-BASIS",
+                    "the design humidity is the smaller of this value and the printed maximum"),
+    "PsyA": ("Saturation pressure: coefficient", 0.61094, "kPa", "S", "GEN-PSY", "psychrometric relation"),
+    "PsyB": ("Saturation pressure: exponent factor", 17.625, "–", "S", "GEN-PSY", "psychrometric relation"),
+    "PsyC": ("Saturation pressure: temperature constant", 243.04, "°C", "S", "GEN-PSY", "psychrometric relation"),
+    "PsyP": ("Atmospheric pressure", 101.325, "kPa", "S", "GEN-PSY", "standard atmosphere"),
+    "PsyEps": ("Ratio of molar masses of water and dry air", 0.622, "–", "S", "GEN-PSY", "psychrometric relation"),
+    "PsyCpA": ("Specific heat of dry air", 1.006, "kJ/(kg K)", "S", "GEN-PSY", "psychrometric relation"),
+    "PsyCpV": ("Specific heat of water vapour", 1.86, "kJ/(kg K)", "S", "GEN-PSY", "psychrometric relation"),
+    "PsyHfg": ("Latent heat of water at 0 °C", 2501, "kJ/kg", "S", "GEN-PSY", "psychrometric relation"),
+    "PsyPct": ("Per cent base (humidity printed in per cent)", 100, "%", "S", "GEN-PSY", "unit conversion"),
+    "EnvCheckShare": ("Envelope rooms: share of the air-change airflow within which the thermal case is marked for a peak solar check", 0.20, "fraction", "A",
+                      "GEN-BASIS", "to confirm"),
     "SchedTolPct": ("Tolerance on an airflow increase against a schematic", 0.05, "fraction", "S", "GEN-BASIS", "project design basis"),
     "SchedTolLps": ("Tolerance on an airflow increase against a schematic, absolute", 10, "L/s", "S", "GEN-BASIS", "project design basis"),
     "StartPressure": ("Iteration starting pressure of a free space", 0, "Pa", "S", "GEN-PRESSURE", "numerical start only"),
@@ -100,12 +134,13 @@ GROUPS = [
     ("Load method", ["SafetyFactor", "SupplyTemp", "InfiltrationACH", "RoofSolarGain", "OutdoorDB", "OutdoorWB", "OutdoorH",
                      "AirSensibleFactor", "AirDensity", "AirLatentFactor", "RoundTo", "AreaDecimals", "ConvM3hPerLps", "PercentBase",
                      "WperkW", "LperM3"]),
-    ("AHU totalisation", ["DuctLeakage", "TenderLeakage", "FanPressure", "FanEfficiency", "OAShare", "OADrop", "PAHUOffT", "PAHUOffH"]),
+    ("AHU totalisation", ["DuctLeakage", "FcuLeakageDucted", "FcuLeakageHiWall", "TenderLeakage", "FanPressure", "FanEfficiency", "OAShare", "OADrop", "PAHUOffT", "PAHUOffH"]),
     ("Pressure method", ["AirtightLimit", "TighterLimit", "FlowN", "FlowNLow", "FlowNHigh", "DoorCd", "RefPressure",
                          "RatioFail", "RatioVerify", "ApplyFromPa", "SecPerHour", "MMperM", "CM2perM2", "PerimFactor", "GapSides",
                          "GapBottom", "GapHinged", "GapSliding", "GapBedWidth", "GapShaft", "NewtonEps", "OffsetEps",
                          "StartPressure", "PressureBracket", "TolPressure"]),
-    ("Check tolerances", ["AreaTolPct", "AreaTolM2", "BalTolPct", "BalTolLps", "SchedTolPct", "SchedTolLps", "ZoneCoverMin"]),
+    ("Check tolerances", ["AreaTolPct", "AreaTolM2", "BalTolPct", "BalTolLps", "SchedTolPct", "SchedTolLps", "ZoneCoverMin", "ZoneCoverMax", "EnvCheckShare"]),
+    ("Room design condition", ["DesignTRef", "DesignRHMax", "PsyA", "PsyB", "PsyC", "PsyP", "PsyEps", "PsyCpA", "PsyCpV", "PsyHfg", "PsyPct"]),
 ]
 
 
@@ -152,6 +187,11 @@ class Ctx:
             if name not in consts:
                 consts[name] = dict(label=label, value=None, unit=unit, code="A", source="GEN-METHOD",
                                     remark="blank: not given by any document, set before treated outdoor air is used")
+        from .singlepass import classify_single_pass
+        for r in data["rooms"]:
+            crit = r.get("criteria") or {}
+            if crit and str(crit.get("single_pass") or "").upper() == "Y" and not crit.get("sp_class"):
+                crit["sp_class"] = classify_single_pass(str(r.get("name") or ""), crit)
         validate(data)
         self.constants = consts
         self.sources = data["sources"]

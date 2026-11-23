@@ -117,10 +117,12 @@ def group_cols(ws, lay: Layout, first_key: str, last_key: str, collapsed: bool =
         dim.hidden = collapsed
 
 
-THERMAL_NOTE_SHORT = "Calculated airflow and coil duty include people, lighting and small power. Equipment gain is not included and envelope gain is not assessed."
-THERMAL_NOTE = "The calculated airflow does not include equipment or envelope gains. The reduction is an upper limit."      # only on a text that states a reduction
-ROOM_THERMAL_NOTE = ("Thermal load: people, lighting and small power. Equipment gain is 0 W and envelope gain is not assessed. "
-                     "The thermal-load airflow is a lower limit.")
+THERMAL_NOTE_SHORT = ("Calculated airflow and coil duty include people, lighting and small power, a provisional equipment gain where the room is equipment-led, "
+                      "and the envelope gain by the simple facade method where a room is external.")
+THERMAL_NOTE = ("The calculated airflow includes equipment gain only where a provisional value is set, and envelope gain only by the simple facade method. "
+                "The reduction is an upper limit.")      # only on a text that states a reduction
+ROOM_THERMAL_NOTE = ("Thermal load: people, lighting and small power; a provisional equipment gain where the room is equipment-led (otherwise 0 W); "
+                     "envelope gain by the simple facade method where the room is external. The thermal-load airflow is a lower limit.")
 COMPLETE = "Complete"          # a completeness text starts with this word when every zoned room of the unit is counted (D-027)
 
 

@@ -69,6 +69,10 @@ def cr_spec() -> Spec:
             ("pa_td", "Tender drawings pressure", "Pa", 9), ("pa_wd", "Working drawings pressure", "Pa", 9),
             ("pa", "Pressure target used", "Pa", 9), ("pdiff", "Sources differ", "", 8),
             ("cls", "Air class", "", 7), ("filter", "Filter", "", 9), ("single", "Single pass", "", 7),
+            ("spc", "Single-pass class (clean or dirty)", "", 10), ("spc_c", "Code", "", 5), ("spc_s", "Source ID", "", 11), ("tset", "Temperature set point", "°C", 8),
+            ("td", "Design room temperature", "°C", 9), ("rhd", "Design humidity", "fraction", 8),
+            ("pv", "Vapour pressure at design condition", "kPa", 9), ("hd", "Design room enthalpy", "kJ/kg", 9),
+            ("trange", "Design temperature inside the range", "", 10),
             ("after", "After-hours", "", 10), ("press", "P / N / –", "", 7), ("clin", "Clinical criteria (not FCU)", "", 9),
             ("remark", "Remark", "", 50)]
 
@@ -151,7 +155,9 @@ def af_spec() -> Spec:
                ("single", "Single pass", "", 7), ("exhaust", "Exhaust", "L/s", 10), ("ret", "Return", "L/s", 10),
                ("oa_air", "Outdoor air, air-change basis", "L/s", 10), ("oa", "Outdoor air", "L/s", 10),
                ("frac", "Outdoor-air fraction", "–", 9), ("minflow", "Minimum airflow (VAV)", "L/s", 10),
-               ("ok", "Supply meets both cases", "", 9), ("fix", "Fixed by specification (MOT)", "0 / 1", 8),
+               ("ok", "Supply meets both cases", "", 9), ("spc", "Single-pass class", "", 9),
+               ("th_lo", "Thermal airflow at the lower limit of the range (information)", "L/s", 12), ("lo_chk", "Lower-limit check", "", 9),
+               ("env_chk", "Envelope room: peak solar check", "", 11), ("fix", "Fixed by specification (MOT)", "0 / 1", 8),
                ("oa_spec", "Outdoor air, specified", "L/s", 9), ("spec_off", "Offset, as specified", "L/s", 9),
                ("off_chk", "Specified offset against offset needed", "", 12), ("terminal", "Terminal tag", "", 14), ("exfan", "Exhaust fan tag", "", 14),
                ("clin", "Clinical criteria", "", 8), ("systype", "System type (input)", "", 9)]
@@ -171,7 +177,7 @@ def ps_keys() -> Tuple[List[str], int]:
     """Node table keys: printed block then helpers; returns (keys, n_printed)."""
     printed = ["node", "kind", "name", "suite", "set", "set_c", "set_s", "perim", "perim_c", "perim_s", "area", "h", "ovr",
                "ovr_c", "ovr_s", "surf", "limit", "n", "supply", "exhaust", "pfin", "env_in", "env_out", "gap_in",
-               "gap_out", "fix_in", "fix_out", "air_in", "air_out", "kindoff", "needed", "design", "tighter", "ratio",
+               "gap_out", "fix_in", "fix_out", "air_in", "air_out", "kindoff", "needed", "design", "tighter", "ratio", "used", "ratio_used",
                "status", "spec_off", "spec_chk", "off_lps", "design_lps", "needed_n50", "needed_n75", "ratio_n50", "ratio_n75",
                "flag_s", "upa", "resid", "note"]
     helpers = [f"p{k}" for k in range(NPASS + 1)] + ["lk", "negf", "bsum"] + [f"u{k}" for k in range(NBIS + 1)]
@@ -226,7 +232,9 @@ AHU_KEYS = ["ahu", "type", "n", "area", "area_sup", "vol", "noh", "sa_room", "le
             "sens", "lat", "rt", "rh", "oa_sens", "oa_lat", "fan", "coil_s", "coil_l", "coil", "wm2",
             "oa_sens_ms", "oa_lat_ms", "coil_s_ms", "coil_l_ms", "coil_ms", "req_t", "sched", "sched_oa",
             "sched_c", "sched_s", "tsrc", "zr", "za", "zc", "zs", "oth", "othc", "oths", "cov", "red", "redp", "rem", "nfix", "area_ok", "leadtxt", "nocrit", "area_nocrit",
-            "fsp", "spr", "spl", "spy", "spnote", "oaflg", "nok"]
+            "fsp", "spr", "spl", "spy", "spnote", "oaflg", "nok",
+            "ducted", "oa_frac", "oa_bal", "offnet", "oa_short", "dn", "dsup", "dexh", "balnote", "second", "second_s", "norr_why",
+            "dirsup", "dirn", "spillreq", "ucvadd"]
 FCU_KEYS = ["k", "no", "name", "ahu", "why", "area", "sens_kw", "lat_kw", "supply", "oa", "oasrc", "oaby", "oacond", "oa_t", "oa_h",
             "oa_sens", "oa_lat", "coil_s", "coil_l", "coil", "cap_sched", "cap_drawn", "cap", "flag",
             "tender", "tsrc", "calc", "red", "redp", "rem"]
@@ -236,7 +244,7 @@ VAV_KEYS = ["tag", "type", "rooms", "n", "max", "min", "turn", "code", "src", "r
 VEN_KEYS = ["tag", "room", "role", "d1", "d2", "off", "design", "tight", "ratio", "status", "code", "src", "remark"]
 FB_KEYS = ["no", "name", "ahu", "supply", "oa", "exhaust", "ret", "extract", "leak_in", "leak_out", "inn", "out", "net",
            "close", "status", "ach"]
-FB2_KEYS = ["ahu", "supply", "oa", "exhaust", "ret", "relief", "net_ach", "area", "vol", "sum_net", "close", "status", "note"]
+FB2_KEYS = ["ahu", "supply", "oa", "exhaust", "ret", "offnet", "relief", "net_ach", "area", "vol", "sum_net", "close", "status", "note"]
 CP_KEYS = ["no", "name", "ahu", "sch_s", "calc_s", "d_s", "dp_s", "sch_r", "calc_r", "d_r", "sch_e", "calc_e", "d_e",
            "pa_calc", "pa_sch", "flag", "code", "src", "tsrc", "remark"]
 CP2_KEYS = ["ahu", "sched", "calc", "d_sched", "dp_sched", "tsrc", "sch", "d", "dp", "flag", "code", "src", "remark"]

@@ -20,11 +20,15 @@ import json
 import math
 import re
 import threading
+from functools import lru_cache
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import conf
+from . import round5 as r5
+from . import hfds as hf
+from . import envelope as envm
 from .fans import department_fans
 from .linking import link_rds, link_rls, load_rls, plan_links, plan_system, rls_source_fields, split_code
 from .reva import build_reva_input
@@ -68,8 +72,8 @@ USE_RULES: List[Tuple[str, str, str]] = [
     (r"x-?ray|\bmri\b|ultrasound|\bct\b|fluoro|angio|mammo|cath lab|nuclear|\bpet\b|dexa|\bbmd\b|imaging|radiograph", "medical_procedure",
      "imaging rooms (nearest listed use: procedure room)"),
     (r"simulation|training|\btrg\b|classroom|seminar", "classroom_training", "training rooms"),
-    (r"picking|repackag|automation|asrs|ipas|gown|ante ?room|extemporaneous|compounding|sterile prep|pharmacy|controlled drug|drug room|"
-     r"preparation|\bprep\b|clean room", "pharmacy_prep", "pharmacy preparation, picking and automation rooms (pharmacy preparation area)"),
+    (r"picking|repackag|automation|asrs|ipas|extemporaneous|compounding|sterile prep|pharmacy|controlled drug|drug room|clean room|"
+     r"(?=.*(?:pharm|cytotox|\btpn\b|aseptic|hazardous))(?:gown|ante ?room|preparation|\bprep\b)", "pharmacy_prep", "pharmacy preparation, picking and automation rooms (pharmacy preparation area)"),
     (r"laborator|\blab\b|bench|haematology|hameotology|chemistry|histopatholog|specimen|blood bank|grossing|tissue processor|bone saw|mycology|\bpcr\b|processing room", "laboratory", "laboratories and laboratory benches"),
     (r"decontamination|washing|wash/dry|laundry|inspection|packing|steril|reprocess|endoscope|assembly|workstation zone",
      "process_area", "process rooms such as decontamination, washing, inspection and packing (light industrial, nearest listed use)"),
@@ -629,8 +633,40 @@ def _outdoor_air_rates(crit: Dict[str, Any], row: Dict[str, str]) -> None:
     if ach and crit.get("min_oa_ach") is None:
         crit["min_oa_ach"] = float(ach.group(1))
         rates.append(f"{ach.group(1)} air changes")
+    if not rates and re.search(r"SS\s*553", txt, re.I):
+        # D-064 (6): a row that prints 'SS 553' for outdoor air takes the per-person and per-area rate of the booklet office rows (assumption, code A), not 0
+        pp_, pa_ = _office_oa_rates()
+        if pp_ or pa_:
+            if pp_:
+                crit["oa_lps_per_person"] = pp_
+            if pa_:
+                crit["oa_lps_per_m2"] = pa_
+            crit["code"] = "A"
+            crit["remark"] = ((crit.get("remark") or "").rstrip(". ") + f". The row prints SS 553 for outdoor air. The rate of the booklet office rows is used ({pp_:g} L/s per person or "
+                              f"{pa_:g} L/s per m², whichever is higher). Assumption, to confirm.")
     if rates:
         crit["remark"] = (crit.get("remark") or "").rstrip(". ") + ". Outdoor air as printed: " + (" or ".join(rates)) + (", whichever is higher" if len(rates) > 1 else "") + "."
+
+
+@lru_cache(maxsize=1)
+def _office_oa_rates() -> Tuple[Optional[float], Optional[float]]:
+    """Most frequent per-person and per-area outdoor-air rate of the office rows of the booklets (for the rows that print only 'SS 553')."""
+    from collections import Counter
+    pp_c, pa_c = Counter(), Counter()
+    for row in _read(Path(".") / REG / "criteria.csv"):
+        if "office" not in (row.get("room_type_as_printed") or "").lower():
+            continue
+        try:
+            txt = str((json.loads(row.get("raw_cells") or "{}")).get("min_oa") or "")
+        except ValueError:
+            continue
+        m1 = re.search(r"([\d.]+)\s*l/s\s*/\s*(?:person|pax|p\b)", txt, re.I)
+        m2 = re.search(r"([\d.]+)\s*l/s\s*/\s*m(?:2|²)", txt, re.I)
+        if m1:
+            pp_c[float(m1.group(1))] += 1
+        if m2:
+            pa_c[float(m2.group(1))] += 1
+    return (pp_c.most_common(1)[0][0] if pp_c else None, pa_c.most_common(1)[0][0] if pa_c else None)
 
 
 EXHAUST_ONLY = re.compile(r"toilet|\bwc\b|shower|ensuite|\bbath", re.I)
@@ -886,6 +922,11 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
     fcu_sched = {_norm(r["tag_normalised"]): r for r in _read(root / REG / "equipment_schedule_air_handling.csv") if r.get("type") == "FCU"}
     from . import criteria_map as cm
     mot = cm.MotTheatres(root) if key.lstrip("0") == "22" else None
+    hepa = r5.MotHepa(root) if key.lstrip("0") in ("22", "28") else None
+    env_model = envm.Envelope(root, (conf.config(root).get("envelope_round5") or {}).get("coefficients"))
+    mot_units: set = set()                       # unit tags of MOT rooms: no reduction is stated (D-057)
+    hepa_specs: Dict[str, Dict[str, Any]] = {}   # unit tag -> theatre specs on it
+    env_rooms = env_missing = 0
     dc_table = cm.datacentre_table(root) if key.lstrip("0") == "42" else {}
     unmapped_names: Dict[str, List[str]] = defaultdict(list)
     mot_sched = {_norm(r["tag"].replace("lSONP", "ISONP")): r for r in _read(root / REG / "mot_ahu_schedule.csv") if r.get("equipment_type") in ("AHU", "PAHU")}
@@ -926,6 +967,10 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
             method="Value taken from the project design basis. No project document gives a lighting load", confidence="medium")
     add_src("ASM-EQUIP", document="Workbook defaults", issue="", page="", location="equipment gain",
             text_as_read="equipment gain 0 W: no equipment list is in the scope", method="Assumption, to confirm", confidence="low")
+    add_src("ASM-EQUIPPROV", document="Provisional equipment gain by room use (W/m²)", issue="22 Nov 2026", page="provisional equipment table", location="W/m² by room use",
+            text_as_read="data centre 1,000; communications 200; UPS and battery 100; imaging 100; laboratory 40; sterile services 80; kitchen 200; automation 40 (W/m²)",
+            method="Stated engineering allowance, order of magnitude of the ASHRAE health-care and laboratory guidance. No equipment list is in the scope. Vendor data needed",
+            confidence="low")
     soa_by_code: Dict[str, Dict[str, str]] = {}
     for r in soa_all:
         soa_by_code.setdefault(r["room_code"].strip(), r)
@@ -1023,6 +1068,7 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
     n_loads = n_loads_missing = 0
     n_presumed = 0
     n_own_mapped = 0
+    n_hfds, n_hfds_diff = [0], [0]
     perim_of: Dict[str, Tuple[float, str]] = {}
     presumed_how: Dict[str, int] = defaultdict(int)
     from .presume import Presumption
@@ -1084,6 +1130,13 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
                 per_ = _f(poly.get("a_perimeter_m"))
                 if per_:
                     perim_of[number] = (per_, psid)
+                if env_model.available and p["storey"] in envm.ENVELOPE_STOREYS and poly.get("polygon_building_mm_wkt"):
+                    # D-042, D-049, D-066, D-071: envelope rows by the ETTV component method, simple facade method
+                    erows = env_model.rows(p["storey"], number, poly["polygon_building_mm_wkt"], "ETTV-ENV")
+                    if erows:
+                        room["envelope"] = erows
+                        env_rooms += 1
+                        remark.append("external room: envelope rows by the simple facade method (ETTV ratio x facade length x storey height), to confirm")
                 remark.append(f"plan room {poly.get('room_tag', '')} {p['area']:.1f} m², grid {p['grid']}")
                 if base_area and abs(base_area - p["area"]) > max(tol_m2, tol_pct * base_area):
                     gaps["area_diff"] = (f"Plan room {poly.get('room_tag', '')} (grid {p['grid']}) measures {p['area']:.1f} m². "
@@ -1141,6 +1194,12 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
                     zl_rule_count[0] += 1
                 if zl["basis"] == "name and count":
                     zl_count_count[0] += 1
+                    if env_model.available and d["storey"] in envm.ENVELOPE_STOREYS and zl.get("n_dpa"):
+                        erows = env_model.typical_rows(d["storey"], number, [x["poly"].get("polygon_building_mm_wkt") for x in plans], int(zl["n_dpa"]), "ETTV-ENV")
+                        if erows:
+                            room["envelope"] = erows
+                            env_rooms += 1
+                            remark.append("external typical room: envelope rows from the plan rooms of the same name (simple facade method), to confirm")
                 if zl["tag"]:
                     room["ahu"] = zl["tag"]
                     room["zone_tag"] = _first(plans[0]["zone"], ZONE_COLUMNS) or None
@@ -1160,6 +1219,23 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
             elif rj is None:
                 notes_plan.append("No plan room matches this room by name, department and storey.")
             gaps["plan"] = " ".join(notes_plan)
+        _soa_a, _dpa_a, _meas_a = room.get("soa_area_m2"), d["dpa_area"], room.get("measured_area_m2")
+        if _soa_a and _dpa_a and abs(_dpa_a - _soa_a) > max(tol_m2, tol_pct * _soa_a):
+            # D-067: DPA and SOA differ beyond the tolerance. A third source (plan outline of a one-to-one linked room) decides; with none, the SOA as drawn; code A, VERIFY.
+            third = None
+            if _meas_a:
+                near = [(abs(_meas_a - v), nm) for v, nm in ((_dpa_a, "DPA"), (_soa_a, "SOA")) if abs(_meas_a - v) <= max(tol_m2, tol_pct * v)]
+                third = min(near)[1] if near else None
+            pick = third or "SOA"
+            room["area_selector"] = pick
+            room["prov"]["area_selector"] = ["A", "GEN-BASIS"]
+            ratio_ = max(_dpa_a, _soa_a) / max(min(_dpa_a, _soa_a), 1e-9)
+            why_ = (f"the plan outline ({_meas_a:.1f} m²) supports the {third}" if third else "no third source supports either value, so the SOA area as drawn is used")
+            gaps["area_diff"] = (f"The DPA designed area is {_dpa_a:.1f} m² and the SOA area is {_soa_a:.1f} m² (ratio {ratio_:.1f}). The {pick} area is used: {why_}. VERIFY. "
+                                 "Confirm which area is right.")
+            flags.append(dict(type="VERIFY", ref=number, text=f"Room {number} {d['name']}: DPA {_dpa_a:.1f} m² and SOA {_soa_a:.1f} m² differ beyond the tolerance"
+                              + (" (ratio above 2: not settled by the rule, FAIL until the area is confirmed)" if ratio_ > 2 and not third else "") + f". Used: {pick}.", source=""))
+            remark.append(f"area {pick} used where DPA and SOA differ (assumption, VERIFY)")
         hl = rls_link["heights"].get(number)
         hc = next((c for c in rls_link["conflicts"] if c["number"] == number), None)
         if hl is not None:
@@ -1170,7 +1246,8 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
                            method="Value read from the ceiling height note of the room layout sheet", confidence="high")
             room["ceiling_height_m"] = hl["height_m"]
             room["prov"]["ceiling_height"] = ["D", hsid]
-            remark.append(f"ceiling height {hl['height_m']:.2f} m from the room layout sheet ({hl['basis']})")
+            remark.append(f"ceiling height {hl['height_m']:.2f} m from the room layout sheet ({hl['basis']})"
+                          + (f"; the sheet prints {', '.join(f'{v * 1000:.0f}' for v in hl['values'])} mm and the highest is used" if len(hl.get("values") or []) > 1 else ""))
             n_rls += 1
         elif ch_default:
             room["ceiling_height_m"] = ch_default
@@ -1205,6 +1282,22 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
                                         remark=(f"Specified by the MOT NSC ({spec['what']}, unit {{UNIT}}), mode '{spec['mode']}': {spec['text']}. The specified airflows are not resized." + comp))
                 crit_stats["MOT NSC specified"].append(number)
                 crit_done = True
+                if hepa is not None and d["name"].startswith("Operating"):
+                    # D-039, D-057: supply of a laminar theatre = HEPA face area x design face velocity; capability at the upper velocity; no reduction on the unit
+                    hs = hepa.for_tags(list(spec.get("sch_tags") or []) + [mot.theatre_ahu.get(number) or ""])
+                    if hs is not None:
+                        hsid = add_src(f"HEPA-{_norm(hs['terminal'])}"[:60], document="MOT NSC HEPA terminal schedule (SCH035) and Tech Specs for ACMV Services, clause 1.17.4", issue="Corr 3",
+                                       page="schedule row of the terminal", location=hs["terminal"], text_as_read=hepa.check_text(hs),
+                                       method="Face area from the printed module size times the Max Face Velocity of the schedule", confidence="high")
+                        c_ = room["criteria"]
+                        c_["supply_specified_lps"] = hs["design"]
+                        if (c_.get("oa_specified_lps") or 0) > hs["design"]:
+                            c_["oa_specified_lps"] = hs["design"]
+                        c_["remark"] += " " + hepa.check_text(hs) + f" The room supply follows the HEPA terminal face area and velocity (Source ID {hsid}); the schematic airflow is a comparison."
+                        c_["source"] = msid
+                        room["prov"]["hepa"] = ["S", hsid]
+                        room["_hepa"] = hs
+                        remark.append(f"supply {hs['design']:,.0f} L/s from the HEPA terminal {hs['terminal']} (face area x {hepa.v_design:g} m/s)")
                 if not room["ahu"]:                     # the unit of a theatre is the one that the schedule of modes names; the preparation room is on the unit of its theatre
                     utag = mot.theatre_ahu.get(number) if d["name"].startswith("Operating") else (spec.get("unit_tag") or (spec.get("sch_tags") or [None])[0])
                     if utag and re.match(r"^AHU-B-\d\d-\d\d", utag):
@@ -1330,6 +1423,35 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
                 unmapped_names[d["name"]].append(number)
                 gaps["criteria"] = (f"No criteria row: {why_p}. The room has no criteria row in its own department" + (f" ({how})" if how else "") +
                                     ". Confirm the room type.")
+        # D-036, D-037, D-064: rooms with no booklet row (and plant, comms, riser, IT, UPS rooms on a presumed row) take the HFDS row; a mapped or presumed row is compared with it
+        hit_h = hf.find_row(root, d["name"])
+        if hit_h is not None:
+            hrow, hkind, hwhy = hit_h
+            c_cur = room["criteria"]
+            hsid_ = add_src(f"HFDS-{_norm(hrow['table_id'])}-{_norm(hrow['area_name'])}"[:60], **hf.source_fields(hrow))
+            if not c_cur or (hkind in ("it", "plant", "riser") and c_cur.get("code") == "A"):
+                room["criteria"] = hf.to_criteria(hrow, hsid_, hkind, hwhy)
+                crit_stats[f"HFDS {hrow['area_name']} (no booklet row)"].append(number)
+                if number in unmapped_crit:
+                    unmapped_crit.remove(number)
+                    if number in unmapped_names.get(d["name"], []):
+                        unmapped_names[d["name"]].remove(number)
+                        if not unmapped_names[d["name"]]:
+                            del unmapped_names[d["name"]]
+                gaps.pop("criteria", None)
+                remark.append(f"criteria from the HFDS ({hrow['area_name']}, table {hrow['table_id']}, page {hrow['printed_page']})")
+                n_hfds[0] += 1
+                if hkind == "it" and not room["ahu"] and not room.get("system_type"):
+                    room["system_type"] = "FCU"
+                    room["prov"]["zoning"] = ["A", hsid_]
+            elif c_cur.get("code") == "A":
+                diffs = hf.compare(c_cur, hrow)
+                tag_ = (f"HFDS cross-check ({hrow['area_name']}, table {hrow['table_id']}, page {hrow['printed_page']}): "
+                        + ("agrees." if not diffs else "differs: " + "; ".join(diffs) + ". The row of the booklet governs. VERIFY."))
+                c_cur["remark"] = (c_cur.get("remark") or "") + " " + tag_
+                if diffs:
+                    flags.append(dict(type="VERIFY", ref=number, text=f"Room {number} {d['name']}: {tag_}", source=hsid_))
+                    n_hfds_diff[0] += 1
         rl = rds_link["links"].get(number)
         rds = rl["resolved"]["row"] if rl else None
         rds_conflict = rl["resolved"]["conflict"] if rl else []
@@ -1417,7 +1539,17 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
             n_loads_missing += 1
         room["remark"] = ". ".join(_sentence_case(x.replace("; ", ". ")).rstrip(". ") for x in remark if x.strip(". ")) + "."
         room["remark"] += " " + ROOM_THERMAL_NOTE
-        if EQUIPMENT_LED.search(d["name"]):
+        eq_prov = r5.equipment_provisional(d["name"], root)
+        if eq_prov is not None:
+            eq_use, eq_w = eq_prov
+            eq_area = d["dpa_area"] or soa_area_of(number) or _f((room.get("measured_area_m2"))) or 0.0
+            room["equipment_sensible_w"], room["equipment_latent_w"] = round(eq_w * eq_area, 0), 0.0
+            room["prov"]["equipment_sensible"] = room["prov"]["equipment_latent"] = ["A", "ASM-EQUIPPROV"]
+            room["equip_basis"], room["equip_w_m2"], room["equip_use"] = "PROVISIONAL", eq_w, eq_use
+            room["remark"] += (f" Equipment gain is a provisional {eq_w:g} W/m² ({eq_use.replace('_', ' ')}) on {eq_area:.1f} m², no vendor data: stated allowance, to confirm.")
+            gaps["equipment"] = (f"Equipment gain is a provisional {eq_w:g} W/m² for this equipment-led room ({eq_use.replace('_', ' ')}). No equipment list or vendor data is in the scope. "
+                                 "VERIFY with vendor data.")
+        elif EQUIPMENT_LED.search(d["name"]):
             gaps["equipment"] = "Equipment gain is 0 W: no equipment list is in the scope. VERIFY: the room is led by equipment, so the thermal load is not representative."
             room["equipment_sensible_w"], room["equipment_latent_w"] = 0.0, 0.0
             room["prov"]["equipment_sensible"] = room["prov"]["equipment_latent"] = ["A", "ASM-EQUIP"]
@@ -1438,7 +1570,13 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
             sch_num[mm.group(1)].append(sr)
     sch_linked, sch_conflict, sch_nomatch = 0, [], 0
     stop = {"room", "bed", "bay", "the", "and", "of", "for", "no", "area"}
-    for room in rooms:
+    # D-051: the unit of each room comes from the link table when it exists (the only interface between zoning and the workbooks); the linking above stays as the fallback
+    links_on = r5.links_available(root)
+    link_counts = r5.apply_unit_links(rooms, key, root, add_src, ahu_kinds) if links_on else {}
+    if links_on:
+        flags.append(dict(type="VERIFY", ref="Room Information", text="The unit of each room is taken from the link table of the project: " +
+                          (", ".join(f"{n} by {b}" for b, n in sorted(link_counts.items(), key=lambda kv: -kv[1])) or "no room of this department is in the table") + ".", source=""))
+    for room in ([] if links_on else rooms):
         if room["ahu"]:
             continue
         mm = re.search(r"(\d\d\.\d\d\.\d\d)", room["number"])
@@ -1570,9 +1708,31 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
             room["gaps"]["perimeter"] = ("The perimeter for the internal surface is 4 × the square root of the area, assumed: the room is not linked to a measured plan room. "
                                          "The offset follows the area and the ceiling height. Confirm the room outline.")
             n_perim_assumed += 1
+    # D-065: a room with a pressure direction and no value on any drawing is not calculated. The room type is listed once on Flags: directional airflow only, no offset.
+    # Exhaust-driven rooms (toilets, change rooms, cleaners' rooms, dirty utilities) need no pressure row.
+    exhaust_driven = re.compile(r"toilet|\bwc\b|change|cleaner|dirty|soiled|sluice|shower|ensuite|disposal|decontam", re.I)
+    dir_only: Dict[str, List[str]] = defaultdict(list)
+    for room in rooms:
+        c_ = room["criteria"] or {}
+        if c_.get("pressure_regime") in ("POSITIVE", "NEGATIVE") and all(c_.get(k) is None for k in ("pressure_pa_tender", "pressure_pa_working", "pressure_pa_booklet")) \
+                and not exhaust_driven.search(room["name"]):
+            dir_only[room["name"]].append(room["number"])
+    for nm_, nums_ in sorted(dir_only.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        flags.append(dict(type="VERIFY", ref=nm_, text=f"Directional airflow only, no offset calculated: {len(nums_)} room(s) named '{nm_}' have a pressure direction and no pressure value on any "
+                          f"drawing or in the HFDS. The offset air of these rooms is not in the AHU balance. First rooms: {', '.join(nums_[:4])}.", source=""))
     ahus: List[Dict[str, Any]] = []
     for tag in dict.fromkeys(r["ahu"] for r in rooms if r["ahu"]):
-        t = _tender_for_tag(tag, ahu_sched, fcu_sched, sched_equip, sched_totals, add_src, mot_sched, root=root)
+        if tag.startswith("AHU group:"):
+            # a group of units (the room is printed on several units of one pod): one unit row, tender capacity = the sum of the units of the group
+            members_ = [m_.strip() for m_ in tag.split(":", 1)[1].split(";") if m_.strip()]
+            vals_ = [_tender_for_tag(m_, ahu_sched, fcu_sched, sched_equip, sched_totals, add_src, mot_sched, root=root) for m_ in members_]
+            if vals_ and all(v_.get("sched_supply_lps") is not None for v_ in vals_):
+                t = dict(sched_supply_lps=sum(v_["sched_supply_lps"] for v_ in vals_), sched_code="D", sched_source=vals_[0]["sched_source"],
+                         tender_source_text=f"sum of the units of the group ({', '.join(members_)}), Equipment Schedule Corr 5; the common standby unit is not taken out", type="AHU")
+            else:
+                t = dict(tender_source_text=f"not every unit of the group ({', '.join(members_)}) has a tender airflow", type="AHU")
+        else:
+            t = _tender_for_tag(tag, ahu_sched, fcu_sched, sched_equip, sched_totals, add_src, mot_sched, root=root)
         a = dict(tag=tag, type=t.pop("type", ahu_kinds.get(tag, "AHU")))
         a.update(t)
         if unit_note(tag):
@@ -1582,10 +1742,59 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
         sc = _tender_for_tag(tag, None, None, None, None, add_src, schematic_only=True, root=root)
         if sc.get("sched_supply_lps") is not None:
             a.update(schematic_supply_lps=sc["sched_supply_lps"], schematic_source=sc["sched_source"], schematic_code="D")
+        # D-060: ducted or hi-wall fan coil unit (Equipment Schedule, column Type)
+        for cand_ in _tag_candidates(tag):
+            fr_ = fcu_sched.get(_norm(cand_))
+            if fr_ is not None and (fr_.get("Type") or "").strip():
+                a["ducted"] = "N" if "wall" in fr_["Type"].lower() else "Y"
+                break
+        # D-054: the second room list = the room table of the tender air-side schematic of the unit
+        sl_ = r5.second_room_list(_tag_candidates(tag), sched_rooms)
+        if sl_ is not None:
+            a["second_rooms"] = sl_[0]
+            a["second_source"] = add_src(f"SECOND-{_norm(tag)}"[:60], document="Tender air-side schematics, room tables", issue="tender issue", page=f"sheets {sl_[1]}",
+                                         location=f"unit {tag}", text_as_read=f"{sl_[0]} rooms (sum of the typical counts of the room boxes that carry the unit)",
+                                         method="Count of the room boxes of the tender air-side schematic with the unit tag", confidence="medium")
+        # D-055 / D-057: tender base test and MOT units
+        mot_here = [r for r in rooms if r["ahu"] == tag and (r.get("_hepa") or str((r["prov"].get("zoning") or ["", ""])[1]).startswith("MOT-"))]
+        is_mot_unit = bool(mot_here) or _norm(tag) in mot_sched
+        sched_v = a.get("sched_supply_lps") if not str(a.get("sched_source", "")).startswith("TSCH") else None
+        reason_, note_ = r5.tender_base_rule(a, sched_v, a.get("schematic_supply_lps"), root, is_mot_unit)
+        if reason_:
+            a["no_reduction_reason"] = reason_
+        if note_ or any(r.get("_hepa") for r in mot_here) or (hepa is not None and tag in hepa.future):
+            leak_ = float(((base.get("constants") or {}).get("DuctLeakage") or {}).get("value", 0.10))
+            txt_ = []
+            for r_ in mot_here:
+                hs_ = r_.get("_hepa")
+                if hs_:
+                    duty_ = hs_["capability"] * (1 + leak_)
+                    sch_ = a.get("sched_supply_lps")
+                    txt_.append(f"Theatre {r_['number']}: design supply {hs_['design']:,.0f} L/s, capability {hs_['capability']:,.0f} L/s at {hepa.v_cap:g} m/s; unit duty "
+                                f"{duty_:,.0f} L/s with {leak_ * 100:.0f} % duct leakage" + (f" against {sch_:,.0f} L/s on the schedule" + (". VERIFY" if duty_ > sch_ + 0.5 else "") if sch_ else "") + ".")
+            if hepa is not None and tag in hepa.future:
+                fut_ = hepa.future[tag]
+                sch_ = a.get("sched_supply_lps")
+                day1_ = sum(r_["_hepa"]["design"] for r_ in mot_here if r_.get("_hepa"))
+                a["ucv_add_lps"] = round(max(fut_ - day1_, 0.0), 1)   # D-058: the future duty governs the unit; the extra supply is added on the AHU tab
+                txt_.append(f"Two duties (D-058). Day-1 duty: theatre supply {day1_:,.0f} L/s at {hepa.v_design:g} m/s. Future ultra-clean duty: {fut_:,.0f} L/s to the room "
+                            f"(IP-BH-16057 note; Tech Spec clause 1.17.11) × (1 + {leak_ * 100:.0f} % leakage). The future duty governs the unit, the coil and the duct capability check, "
+                            f"and is the calculated supply of this unit. It is not resized"
+                            + (f" and no reduction against the {sch_:,.0f} L/s on the schedule is stated" if sch_ else "")
+                            + ". The check of 5,320 × 1.2 = 6,384 L/s is an inference of the design team.")
+            if note_:
+                txt_.append(note_ + ".")
+            a["note"] = ((a.get("note") + " ") if a.get("note") else "") + " ".join(txt_)
         ahus.append(a)
         if a.get("sched_supply_lps") is None and any(str((r["prov"].get("zoning") or ["", ""])[1]).startswith("MOT-") for r in rooms if r["ahu"] == tag):
             flags.append(dict(type="VERIFY", ref=tag, text=f"Unit {tag} is named by the MOT NSC schedule of modes (Appendix J), for the rooms that carry it here. The MOT NSC "
                               "Overall AC Equipment Schedule does not list this tag, and the zone schedule does not show it. No tender airflow is available. Confirm the tag.", source=""))
+    for r_ in rooms:
+        r_.pop("_hepa", None)
+    if str(dept).lstrip("0") == "22":
+        flags.append(dict(type="VERIFY", ref="AHU-B-07-05MOTHYB-02", text="Tag variant, listed and not used (D-059). The MOT NSC schedule of modes (Appendix J, theatre MSOT 05.02.12) prints "
+                          "AHU-B-07-05MOTHYB-02. The cross-reference workbook (row 26) gives AHU-B-07-05MOTHYB-01 for this theatre and for its preparation room MSOT 05.01.12. "
+                          "The cross-reference cell 'AHU-B-07-05MOT-01 / MOTHYB-01' (row 14) is a variant: theatre MSOT 03.02.04 and its preparation room MSOT 03.01.04 are on AHU-B-07-05MOT-01.", source=""))
     ztot = zone_totals(root)
     for a in ahus:
         z = ztot.get(zone_key(a["tag"]))
@@ -1632,9 +1841,10 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
         if code in dpa_units:
             flags.append(dict(type="CONFIRM", ref=code, text=f"DPA unit {code} ({dpa_units[code][0]['fpu_department_name']}, {len(dpa_units[code])} rooms) is not in the IP block "
                               "of the stacking diagram. It is not in this workbook.", source=""))
-    flags.append(dict(type="CONFIRM", ref="Envelope", text="Envelope rows are not set. Every room is treated as internal, with no glazing, wall or roof gain.", source="ASM-DEFAULT"))
+    if not env_model.available:
+        flags.append(dict(type="CONFIRM", ref="Envelope", text="Envelope rows are not set. Every room is treated as internal, with no glazing, wall or roof gain.", source="ASM-DEFAULT"))
     flags.append(dict(type="CONFIRM", ref="Room Information", text="Lighting and small power are ASHRAE values for the room use (red cells): no project document gives them. "
-                      "Equipment gain is 0 W and operation time is not set: no document gives them. Confirm the values.", source="ASM-PLUG"))
+                      "Equipment gain is 0 W (a provisional value on equipment-led rooms) and operation time is not set: no document gives them. Confirm the values.", source="ASM-PLUG"))
     if not all(people.values()):
         flags.append(dict(type="CONFIRM", ref="README", text="Author, checker and approver of the revision block are not given. They are left blank.", source="ASM-DEFAULT"))
     storeys = sorted({r["storey"] for r in rooms}, key=lambda s: SCOPE_STOREYS.index(s) if s in SCOPE_STOREYS else 99)
@@ -1670,12 +1880,24 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
     data = dict(base)
     data.update(
         department=dict(number=key, name=dept_name),
-        project=dict(base["project"], revision=dict(rev="A", date=conf.revision_date(root), description="Issued for review", **people)),
+        project=dict(base["project"], revision=dict(rev="A", date=conf.revision_date(root), description="DRAFT, acceptance open", **people)),
         scope=(f"Thermal load, airflow, outdoor air and pressure workbook for {key} {dept_name}, IP block (DPA units {', '.join(ip_map)}). "
                "Rooms are the DPA rooms. Rooms and plan rooms that do not match are listed on Flags."),
         storeys=storeys, storey_labels={s: _storey_label(s) for s in storeys}, space_types=sp, sources=sources, rooms=rooms, ahus=ahus,
         flags=flags, references=[], fans=dept_fans, terminals=[], documents=[x for x in docs if x["source"]],
         key_flags=[f["text"] for f in flags[-3:]], criteria_origin=["Room criteria: the criteria tables of the DD Booklet for this department."] + crit_lines + use_lines + load_lines)
+    if env_model.available:
+        esid = add_src("ETTV-ENV", document="ETTV report (20260129_AIGH_ETTV_Report.pdf)", issue="29 Jan 2026", page="pages 3, 9, 27 and 34 (facade data, wall and glazing U-values, shading coefficient, correction factor)",
+                       location="Appendix 1 sheets, one record per facade sector N to NW",
+                       text_as_read="wall U-value, glazing U-value, area-weighted shading coefficient, correction factor and window-to-wall ratio of each facade",
+                       method="Gain per m² of wall = 12 × Uw; gain per m² of glass = 3.4 × Uf + 211 × CF × SC (ETTV equivalents, an averaged basis); areas by the simple facade method",
+                       confidence="medium")
+        data["sources"] = sources
+        data["orientations"] = env_model.orientation_table(esid)
+        flags.append(dict(type="CONFIRM", ref="Envelope", text=(f"Envelope gain is assessed for {env_rooms} external room(s) by the simple facade method: the length of the room edges on the storey outline "
+                          "× storey height × the window-to-wall ratio of the ETTV report for the facade, with the U-value and shading coefficient of the report. The areas of the openings are not "
+                          "read one by one from the building elevations. The grid bearing is taken as 359.77 degrees (page-up grid axis against grid north) and is not yet confirmed. Confirm the method, "
+                          "the bearing and the areas."), source=esid))
     data["constants"] = dict(base["constants"])
     data["assemble_stats"] = dict(
         rooms=len(rooms), plan_rooms_of_department=len(plan), matched_to_plan=len(pairs), in_open_plan_region=len(region_of), unmatched_dpa_rooms=len(un_dpa) - len(region_of) - len(zlinks), unmatched_plan_rooms=len(un_plan),

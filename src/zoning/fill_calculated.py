@@ -219,6 +219,8 @@ def main(argv=None) -> int:
                 c.value = README_NEW_ENTER
             elif c.value == README_OLD_RED:
                 c.value = README_NEW_RED
+    from ..workbook.clean import clean_workbook
+    clean_workbook(wb)
     wb.save(ns.schedule)
     # recalculate, so that the stored values of the formulas are present for viewers that do not calculate
     import shutil

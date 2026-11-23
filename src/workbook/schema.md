@@ -94,3 +94,18 @@ the outdoor-air rule 5 % and 5 percentage points, check tolerances) has a defaul
 * AHU tab: `n` (Rooms) and `area` (Area) count every room of the unit; `area_sup` is the area of the rooms with a supply above 0, `vol` the volume of those rooms, `noh` the number of rooms with no ceiling height. A unit with no room at all has the Remarks "No room on Room Information is served by this unit". A unit with rooms and a supply of 0 shows the reduction against tender and names the missing ceiling height first.
 * Master summary: Department Rows carry `rooms_no_height` (summary JSON key, read from the AHU tab column `noh`), and AHU Master shows it with the same Remarks sentence.
 * Room use for the default occupancy: `process_area` (7 p/100 m²) is a use key in `occupancy.density_default.per_100m2`.
+
+
+## Round 5 additions
+
+* `criteria`: `sp_class` (CLEAN or DIRTY, for a single-pass room; the generator sets it by `src/workbook/singlepass.py` when absent, code A), `temp_setpoint_c` (printed set point; wins over the range). The design room condition is calculated per room on Criteria from `temp_setpoint_c`, `temp_min_c`, `temp_max_c` and `rh_max_pct` (24 degC limited to the range; humidity the smaller of 60 % and the printed maximum). A room with no printed temperature keeps the condition of its space type.
+* `ahus[]`: `ducted` (Y or N, fan coil units), `spill_req_lps` (spill air to plant rooms served by the unit), `second_rooms` and `second_source` (second room list: room table of the air-side schematic), `no_reduction_reason` (text; no reduction is stated while it is set: tender base test, MOT unit), `note` (fixed text printed in the Remarks).
+* Room: `equip_basis` = `PROVISIONAL` shows the equipment cells in the load style (red) with the note in Remarks; `_hepa` is used by the assembly only.
+* Airflow rules (both engines): no supply floor from exhaust without a pressure offset; a clean single-pass room is 100 % outdoor air, a dirty one carries its own minimum and has a dedicated exhaust; outdoor air per person or per area is a supply floor; AHU outdoor air = larger of (highest room fraction x supply) and (exhaust + net offset air + spill air); recirculated = supply - outdoor air; spill = outdoor air - exhaust - net envelope leakage; duct leakage 10 % on an AHU and a ducted fan coil unit, 0 % on a hi-wall one.
+* `python -m src.workbook.assemble` reads `out/registers/room_unit_links.csv` when it exists (columns dept, dpa_room_id, unit_class, unit_kind, basis, step, source_ref, confidence, code) and the earlier linking stays as the fallback until then.
+
+## Fix pass (D-071 expedite)
+- AHU tab: new column `ucvadd` (Extra supply for the future ultra-clean duty, L/s) after `spillreq`. AHU supply = (room supply + spill + ucvadd) x (1 + leakage). Input key `ucv_add_lps` of an AHU; the recompute engine reads the same key.
+- Pressure tab: new columns `used` (supply minus extract carried in Airflow) and `ratio_used`. Status FAIL when ratio_used is below RatioFail; the VERIFY band stays on the design ratio.
+- Checks tab ends with two lines, never merged: `Calculation` (PASS, VERIFY or FAIL) and `Inputs complete` (COMPLETE or NOT COMPLETE). Revision label: `DRAFT, acceptance open`.
+- Every workbook is cleaned of internal names by `clean.py` before it is saved.

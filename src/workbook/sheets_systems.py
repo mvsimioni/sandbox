@@ -58,13 +58,41 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
         put(ws, g("nocrit"), f'=SUMPRODUCT(--({AF.rng("ahu")}={key}){mask},--({ctx.lay["CR"].rng("crit")}=""))', "Calc", "d0")
         put(ws, g("area_nocrit"), f'=SUMPRODUCT(--({AF.rng("ahu")}={key}){mask},--({ctx.lay["CR"].rng("crit")}=""),{AF.rng("area")})', "Calc", "d1")
         put(ws, g("sa_room"), f"=SUMIFS({AF.rng('supply')},{crit}{inc})", "Calc", "d1")
-        put(ws, g("leak"), "=DuctLeakage", "Link", "pct1")
-        put(ws, g("sa_ahu"), f"={g('sa_room')}*(1+{g('leak')})", "Result", "d1")
+        if not after:
+            _hl(ws, g("ducted"), a.get("ducted"), "Text", left=True)
+        else:
+            _hl(ws, g("ducted"), f'=IF({ctx.lay["AH"].local("ducted", t)}="","",{ctx.lay["AH"].local("ducted", t)})', "Link", left=True)
+        # duct leakage: 10 % on an AHU or a ducted fan coil unit, 0 % on a hi-wall fan coil unit
+        put(ws, g("leak"), f'=IF({g("type")}="FCU",IF({g("ducted")}="N",FcuLeakageHiWall,FcuLeakageDucted),DuctLeakage)', "Link", "pct1")
+        if not after:
+            put(ws, g("spillreq"), a.get("spill_req_lps"), "Assumption" if a.get("spill_req_lps") else "Input", "d1")
+        else:
+            put(ws, g("spillreq"), f'=IF({ctx.lay["AH"].local("spillreq", t)}="",0,{ctx.lay["AH"].local("spillreq", t)})', "Link", "d1")
+        # D-058: the future ultra-clean duty of a theatre governs the unit; the extra supply (future duty minus day-1 supply of the theatre) is added here
+        if not after:
+            put(ws, g("ucvadd"), a.get("ucv_add_lps"), "Assumption" if a.get("ucv_add_lps") else "Input", "d1")
+        else:
+            put(ws, g("ucvadd"), f'=IF({ctx.lay["AH"].local("ucvadd", t)}="",0,{ctx.lay["AH"].local("ucvadd", t)})', "Link", "d1")
+        put(ws, g("sa_ahu"), f"=({g('sa_room')}+{g('spillreq')}+{g('ucvadd')})*(1+{g('leak')})", "Result", "d1")
         put(ws, g("oa_sum"), f"=SUMIFS({AF.rng('oa')},{crit}{inc})", "Calc", "d1")
         put(ws, g("frac"), f"=_xlfn.MAXIFS({AF.rng('frac')},{crit}{inc})", "Calc", "pct1")
         _hl(ws, g("crit"), f'=IF({g("frac")}>0,INDEX({AF.rng("name")},MATCH({key},{AF.rng(cm)},0)),"–")'
                                   f'&IF({nocrit_count(ctx, key)}>0," [incomplete: "&{nocrit_count(ctx, key)}&" rooms lack criteria]","")', "Calc", left=True)
-        put(ws, g("oa_rule"), f"={g('frac')}*{g('sa_ahu')}", "Calc", "d1")
+        # AHU outdoor air: the larger of (a) the highest room fraction x AHU supply (clean single-pass and other rooms; dirty single-pass rooms carry only their own
+        # minimum) and (b) the air that leaves the zone: exhaust with no return, net offset air leaving through the envelope, spill air to plant rooms.
+        put(ws, g("oa_frac"), f"={g('frac')}*{g('sa_ahu')}", "Calc", "d1")
+        put(ws, g("offnet"), f'=SUMIFS({AF.rng("off")},{crit}{inc},{AF.rng("kind")},"SUPPLY")-SUMIFS({AF.rng("off")},{crit}{inc},{AF.rng("kind")},"EXHAUST")', "Calc", "d1")
+        put(ws, g("oa_bal"), f"={g('exh')}+MAX({g('offnet')},0)+{g('spillreq')}", "Calc", "d1")
+        put(ws, g("oa_short"), f"=MAX(MAX({g('oa_frac')},{g('oa_bal')})-{g('sa_ahu')},0)", "Calc", "d1")
+        put(ws, g("oa_rule"), f"=MIN({g('sa_ahu')},MAX({g('oa_frac')},{g('oa_bal')}))", "Calc", "d1")
+        put(ws, g("dn"), f'=COUNTIFS({crit}{inc},{AF.rng("spc")},"DIRTY"{sup})', "Calc", "d0")
+        put(ws, g("dsup"), f'=SUMIFS({AF.rng("supply")},{crit}{inc},{AF.rng("spc")},"DIRTY")', "Calc", "d1")
+        put(ws, g("dexh"), f'=SUMIFS({AF.rng("exhaust")},{crit}{inc},{AF.rng("spc")},"DIRTY")', "Calc", "d1")
+        CRl = ctx.lay["CR"]
+        put(ws, g("dirn"), (f'=SUMPRODUCT(--({AF.rng("ahu")}={key}){mask},--({AF.rng("supply")}>0),--(({CRl.rng("regime")}="POSITIVE")+({CRl.rng("regime")}="NEGATIVE")>0),'
+                            f'--({CRl.rng("pa")}=""),--({AF.rng("spc")}<>"DIRTY"))'), "Calc", "d0")
+        put(ws, g("dirsup"), (f'=SUMPRODUCT(--({AF.rng("ahu")}={key}){mask},--({AF.rng("supply")}>0),--(({CRl.rng("regime")}="POSITIVE")+({CRl.rng("regime")}="NEGATIVE")>0),'
+                              f'--({CRl.rng("pa")}=""),--({AF.rng("spc")}<>"DIRTY"),{AF.rng("supply")})'), "Calc", "d1")
         put(ws, g("vou"), f"={g('oa_sum')}", "Calc", "d1")
         put(ws, g("vps"), f"={g('sa_room')}", "Calc", "d1")
         put(ws, g("xs"), f"=IF({g('vps')}>0,{g('vou')}/{g('vps')},0)", "Calc", "pct1")
@@ -84,6 +112,12 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
         put(ws, g("spnote"), (f'=IF({g("spr")}="","","The fraction "&TEXT({g("frac")},"0.0#")&" comes from "&{g("spr")}&" (single pass, "'
                               f'&TEXT(IF({g("sa_room")}>0,{g("spl")}/{g("sa_room")},0),"0.0 %")&" of the supply). The other rooms on this unit have a fraction of "'
                               f'&TEXT({g("spy")},"0.0#")&" or less.")'), "Calc")
+        put(ws, g("balnote"), (f'=IF({g("spnote")}="","",{g("spnote")}&" ")'
+                               f'&IF({g("dn")}>0,{g("dn")}&IF({g("dn")}=1," single-pass room is"," single-pass rooms are")&" dirty (supply "&TEXT({g("dsup")},"#,##0")&" L/s, exhaust "&TEXT({g("dexh")},"#,##0")&" L/s). '
+                               f'"&IF({g("dn")}=1,"It takes","Each takes")&" recirculated supply from this unit and a dedicated exhaust with no return. It does not set the outdoor-air fraction. ","")'
+                               f'&IF({g("oa_bal")}>{g("oa_frac")},"The air that leaves the rooms sets the outdoor air ("&TEXT({g("oa_bal")},"#,##0")&" L/s): exhaust, offset air and spill air. ","")'
+                               f'&IF({g("oa_short")}>0,"The air that leaves the rooms is "&TEXT({g("oa_short")},"#,##0")&" L/s more than the AHU supply. The make-up air must come from another source. ","")'
+                               f'&IF({g("dirn")}>0,{g("dirn")}&IF({g("dirn")}=1," room has"," rooms have")&" a pressure direction and no pressure value (supply "&TEXT({g("dirsup")},"#,##0")&" L/s): directional airflow only, no offset is calculated, so the offset air is not in this balance. ","")'), "Calc")
         if not after:
             prev = f"COUNT({L.col('oaflg')}${L.first}:{L.col('oaflg')}{L.row(t - 1)})+1" if t else "1"
         else:
@@ -91,7 +125,7 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
         put(ws, g("oaflg"), (f'=IF(AND(ISNUMBER({g("sched_oa")}),{g("oa_rule")}>{g("sched_oa")}),{prev},"")' if not after else '=""'), "Calc", "d0")
         put(ws, g("ret"), f"={g('sa_ahu')}-{g('oa_rule')}", "Calc", "d1")
         put(ws, g("exh"), f"=SUMIFS({AF.rng('exhaust')},{crit}{inc})", "Calc", "d1")
-        put(ws, g("relief"), f"={g('sa_ahu')}-{g('ret')}-{g('exh')}", "Calc", "d1")
+        put(ws, g("relief"), f"={g('oa_rule')}-{g('exh')}-{g('offnet')}", "Calc", "d1")
         put(ws, g("sens"), f"=SUMIFS({AF.rng('sens')},{crit}{inc})/WperkW", "Calc", "d2")
         put(ws, g("lat"), f"=SUMIFS({AF.rng('lat')},{crit}{inc})/WperkW", "Calc", "d2")
         ref = f"MATCH({key},{AF.rng('ref1' if after else 'ref0')},0)"
@@ -117,6 +151,10 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
                  label="scheduled OA", room=a["tag"])
             _prov_cells(ctx, ws, g("sched_c"), g("sched_s"), sc, ss, has)
             put(ws, g("tsrc"), a.get("tender_source_text"), "Text")
+            _val(ctx, ws, g("second"), a.get("second_rooms"), "D", fmt="d0", cref=None, sref=g("second_s"), src=a.get("second_source", ""),
+                 label="rooms of the second room list", room=a["tag"])
+            put(ws, g("second_s"), a.get("second_source") if not blank(a.get("second_rooms")) else None, "Tag")
+            put(ws, g("norr_why"), a.get("no_reduction_reason"), "Text")
             zc, zsid = a.get("zone_code", "D"), a.get("zone_source", "")
             zhas = not blank(a.get("zone_rooms"))
             _val(ctx, ws, g("zr"), a.get("zone_rooms"), zc, fmt="d0", cref=g("zc"), sref=g("zs"), src=zsid, label="rooms of the unit in the zone schedule", room=a["tag"])
@@ -130,6 +168,9 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
             put(ws, g("sched"), f'=IF({A.local("sched", t)}="","",{A.local("sched", t)})', "Link", "d0")
             put(ws, g("sched_oa"), f'=IF({A.local("sched_oa", t)}="","",{A.local("sched_oa", t)})', "Link", "d0")
             put(ws, g("tsrc"), f'=IF({A.local("tsrc", t)}="","",{A.local("tsrc", t)})', "Link")
+            put(ws, g("second"), f'=IF({A.local("second", t)}="","",{A.local("second", t)})', "Link", "d0")
+            put(ws, g("second_s"), f'=IF({A.local("second_s", t)}="","",{A.local("second_s", t)})', "Link")
+            put(ws, g("norr_why"), f'=IF({A.local("norr_why", t)}="","",{A.local("norr_why", t)})', "Link")
             put(ws, g("zr"), f'=IF({A.local("zr", t)}="","",{A.local("zr", t)})', "Link", "d0")
             put(ws, g("za"), f'=IF({A.local("za", t)}="","",{A.local("za", t)})', "Link", "d1")
             put(ws, g("oth"), f'=IF({A.local("oth", t)}="","",{A.local("oth", t)})', "Link", "d0")
@@ -138,7 +179,8 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
         if not after:
             # the room list of the unit is complete when the rooms counted here reach ZoneCoverMin of the zoned area (or, where the zone has no
             # measured area, when every zoned room is counted). Until then no reduction is stated.
-            put(ws, g("cov"), coverage_formula(g("zr"), g("za"), g("nok"), g("area_ok"), "ZoneCoverMin", g("nocrit"), g("oth")), "Calc").alignment = Alignment(horizontal="left")
+            put(ws, g("cov"), coverage_formula(g("zr"), g("za"), g("nok"), g("area_ok"), "ZoneCoverMin", g("nocrit"), g("oth"), zmax="ZoneCoverMax",
+                                                    sl=g("second"), n=g("n"), norr=g("norr_why")), "Calc").alignment = Alignment(horizontal="left")
         else:
             put(ws, g("cov"), f'={ctx.lay["AH"].local("cov", t)}', "Link").alignment = Alignment(horizontal="left")
         oa_above = f'AND(ISNUMBER({g("sched_oa")}),{g("oa_rule")}>{g("sched_oa")})'
@@ -147,7 +189,7 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
         put(ws, g("leadtxt"), "=" + height_lead(ctx, ahu=g("ahu"), n=g("n"), noh=g("noh")), "Calc")
         shared = (f'IF(IF(ISNUMBER({g("oth")}),{g("oth")},0)>0,"This unit is shared with other departments ("&{g("oth")}&IF({g("oth")}=1," room"," rooms")&"). '
                   f'Its result against tender is on the AHU master summary.","")')
-        xx = unit_extra(g("spnote"), a.get("note"))
+        xx = unit_extra(g("balnote"), a.get("note"))
         inner = tender_remark(g("sched"), g("sa_ahu"), g("red"), g("redp"), f'IF({g("tsrc")}="","tender airflow",{g("tsrc")})',
                               zero="No room of this unit has a supply airflow.",
                               lead=g("leadtxt"), partial=g("cov"), note=g("tsrc"),
@@ -170,26 +212,45 @@ def small_zone(zr: str, za: str) -> tuple:
             f'"Interim, open for Marcus (OI-R206-1): the zone schedule gives this unit "&{zr}&IF({zr}=1," room"," rooms")&" ("&TEXT({za},"#,##0")&" m²). The reduction may come from an incomplete room list. It is not a confirmed result."')
 
 
-def coverage_formula(zr: str, za: str, nok: str, area_ok: str, z: str, nc: str = None, oth: str = None) -> str:
-    """Excel text: the completeness of the room list of a unit (D-027). It starts with 'Complete' when every zoned room of the unit is counted and with
+def coverage_formula(zr: str, za: str, nok: str, area_ok: str, z: str, nc: str = None, oth: str = None, zmax: str = None,
+                     sl: str = None, n: str = None, norr: str = None) -> str:
+    """Excel text: the completeness of the room list of a unit (D-027, D-054). It starts with 'Complete' when every zoned room of the unit is counted and with
     'Not complete' otherwise, and it gives the reason. A unit is complete when
     1. the zone schedule gives the unit at least one room (zr),
     2. the rooms counted with a criteria row and a supply airflow (nok) are at least as many as the zoned rooms,
     3. no counted room lacks a criteria row (nc),
-    4. the zone schedule gives the unit an area, and the area of the counted rooms is at least the share Z of it, and
-    5. no other department has a room on the unit (oth): a unit that several departments share is judged on the AHU master summary, which adds up all of them.
+    4. the zone schedule gives the unit an area, and the area of the counted rooms is between the share Z and the share ZMAX of it,
+    5. no other department has a room on the unit (oth): a unit that several departments share is judged on the AHU master summary, which adds up all of them,
+    6. a second room list agrees with the count (sl: the room table of the air-side schematic, the MOT NSC schedule or Appendix D), and
+    7. the tender base of the unit passes the schedule test (norr is empty).
     A reduction against tender is stated only for a complete unit."""
     nct = f'IF({nc}>0,"; "&{nc}&IF({nc}=1," room has"," rooms have")&" no criteria row","")' if nc else '""'
     zt = f'IF(AND(ISNUMBER({za}),{za}>0),"","; the zone schedule gives the unit no area")'
     at = (f'IF(AND(ISNUMBER({za}),{za}>0,{area_ok}<{z}*{za}),"; the rooms counted cover "&TEXT({area_ok}/{za},"0 %")&" of the zoned area of "&TEXT({za},"#,##0.0")&" m², '
           f'less than the "&TEXT({z},"0 %")&" needed","")')
+    if zmax:
+        at += (f'&IF(AND(ISNUMBER({za}),{za}>0,{area_ok}>{zmax}*{za}),"; the rooms counted cover "&TEXT({area_ok}/{za},"0 %")&" of the zoned area of "&TEXT({za},"#,##0.0")&" m², '
+               f'more than the "&TEXT({zmax},"0 %")&" allowed","")')
     ot = f'IF(IF(ISNUMBER({oth}),{oth},0)>0,"; "&{oth}&IF({oth}=1," room of another department is"," rooms of other departments are")&" on this unit: the result of the unit is on the AHU master summary","")' if oth else '""'
     ok = f'AND({nok}>={zr},{nc}=0,ISNUMBER({za}),{za}>0,{area_ok}>={z}*{za}' if nc else f'AND({nok}>={zr},ISNUMBER({za}),{za}>0,{area_ok}>={z}*{za}'
-    ok += (f',IF(ISNUMBER({oth}),{oth},0)=0)' if oth else ')')
+    if zmax:
+        ok += f',{area_ok}<={zmax}*{za}'
+    ok += (f',IF(ISNUMBER({oth}),{oth},0)=0' if oth else '')
+    st = ""
+    if sl and n:
+        ok += f',ISNUMBER({sl}),{n}={sl}'
+        st = (f'IF(ISNUMBER({sl}),IF({n}={sl},"","; the second room list gives "&{sl}&" rooms against "&{n}&" counted"),'
+              f'"; no second room list (room table of the air-side schematic, MOT NSC schedule or Appendix D) is available for this unit")')
+    nr = ""
+    if norr:
+        ok += f',{norr}=""'
+        nr = f'IF({norr}="","","; "&{norr})'
+    ok += ")"
     cnt = (f'IF({nok}>={zr},IF({zr}=1,"the zoned room is counted","all "&{zr}&" zoned rooms are counted")&IF({nok}>{zr}," ("&{nok}&" rooms counted)",""),'
            f'{nok}&" of "&{zr}&" zoned rooms counted")')
+    tail = "&".join(x for x in (nct, zt, at, ot, st, nr) if x)
     return (f'=IF(OR({zr}="",{zr}=0),"Not complete: the unit is not in the zone schedule",'
-            f'IF({ok},"Complete: ","Not complete: ")&{cnt}&IF({ok},"",{nct}&{zt}&{at}&{ot}))')
+            f'IF({ok},"Complete: ","Not complete: ")&{cnt}&IF({ok},"",{tail}))')
 
 
 def height_lead(ctx: Ctx, *, ahu: str = None, room: str = None, fan_tag: str = None, n: str = None, noh: str = None) -> str:
@@ -232,19 +293,21 @@ def write_ahu(ctx: Ctx) -> None:
     title_block(ws, "AHU", "Airflow totalisation and coil duty per AHU. Supply = room supply + duct leakage (named cell). Outdoor air "
                 "= the outdoor-air fraction of the highest-standard room × AHU supply (rule). The plain sum and the multiple-space "
                 "value of the example are shown beside it. Rooms and Area count every room on the unit. Table B repeats the AHU without "
-                "the rooms the outdoor-air rule separates. The column 'Outdoor air, mass-balance basis' is information only (OI-R110-1, open for Marcus): it shows the outdoor air when "
-                "the single-pass rooms are left out of the fraction. It feeds neither the coil duty nor the Remarks.", ctx)
+                "the rooms the outdoor-air rule separates. Outdoor air is the larger of the fraction basis and the balance basis (the exhaust with no return, "
+                "the net offset air that leaves through the envelope and the spill air). Only clean or sterile single-pass rooms (100 % outdoor air) set the fraction. "
+                "A dirty single-pass room takes recirculated supply and a dedicated exhaust, and is listed in the Remarks. The column 'Outdoor air, mass-balance basis' "
+                "is information only. Spill or relief = outdoor air − exhaust − net envelope leakage.", ctx)
     heads = [H("ahu", "AHU or system", "", 24), H("type", "Type", "", 9), H("n", "Rooms on this unit", "no.", 8), H("area", "Area of these rooms", "m" + U, 9),
              H("area_sup", "Area of rooms with supply", "m" + U, 9), H("vol", "Volume of rooms with supply", "m³", 9),
              H("noh", "Rooms with no ceiling height", "no.", 9), H("sa_room", "Room supply", "L/s", 10), H("leak", "Duct leakage", "%", 8),
              H("sa_ahu", "AHU supply airflow", "L/s", 10), H("oa_sum", "Sum of room outdoor air", "L/s", 10),
              H("crit", "Highest-standard room (sets the fraction)", "", 46), H("frac", "Highest room outdoor-air fraction", "–", 9),
-             H("oa_rule", "AHU outdoor air = fraction × supply", "L/s", 11), H("vou", "Vou (sum of Voc)", "L/s", 9),
+             H("oa_rule", "AHU outdoor air = larger of fraction × supply and the air that leaves the rooms", "L/s", 13), H("vou", "Vou (sum of Voc)", "L/s", 9),
              H("vps", "Vps (sum of Vsc)", "L/s", 9), H("xs", "Xs = Vou / Vps", "–", 8), H("zd", "Zd, highest Voc / Vsc", "–", 8),
              H("ev", "Ev = 1 + Xs − Zd", "–", 8), H("vot", "Vot = Vou / Ev", "L/s", 9),
              H("oa_ms", "Outdoor air as the example: max (sum, Vot)", "L/s", 11),
-             H("oa_mb", "Outdoor air, mass-balance basis (information only)", "L/s", 12), H("ret", "Return = AHU supply − outdoor air", "L/s", 10),
-             H("exh", "Exhaust", "L/s", 9), H("relief", "Spill or relief", "L/s", 9), H("sens", "Room sensible", "kW", 9),
+             H("oa_mb", "Outdoor air, mass-balance basis (information only)", "L/s", 12), H("ret", "Recirculated air = AHU supply − outdoor air", "L/s", 11),
+             H("exh", "Exhaust", "L/s", 9), H("relief", "Spill or relief = outdoor air − exhaust − net envelope leakage", "L/s", 13), H("sens", "Room sensible", "kW", 9),
              H("lat", "Room latent", "kW", 9), H("rt", "Reference room temperature (first room served)", "°C", 10), H("rh", "Reference room enthalpy (first room served)", "kJ/kg", 10),
              H("oa_sens", "Outdoor air sensible", "kW", 9), H("oa_lat", "Outdoor air latent", "kW", 9), H("fan", "Fan heat", "kW", 8),
              H("coil_s", "Coil sensible", "kW", 9), H("coil_l", "Coil latent", "kW", 9), H("coil", "Coil duty (outdoor-air rule)", "kW", 10),
@@ -264,7 +327,16 @@ def write_ahu(ctx: Ctx) -> None:
              H("fsp", "Highest fraction of the rooms that are not single pass", "–", 12), H("spr", "Single-pass room that sets the fraction", "", 24),
              H("spl", "Supply of that room", "L/s", 10), H("spy", "Highest fraction of the other rooms", "–", 12), H("spnote", "Single-pass note (helper)", "", 20),
              H("oaflg", "Order of the units with outdoor air above tender (helper)", "no.", 12),
-             H("nok", "Rooms with a criteria row and a supply airflow", "no.", 12)]
+             H("nok", "Rooms with a criteria row and a supply airflow", "no.", 12),
+             H("ducted", "Fan coil unit ducted (Y or N)", "", 9), H("oa_frac", "Outdoor air, fraction basis = highest fraction × AHU supply", "L/s", 12),
+             H("oa_bal", "Outdoor air, balance basis = exhaust + net offset air + spill air", "L/s", 12),
+             H("offnet", "Net envelope leakage out of the rooms (offset air)", "L/s", 12), H("oa_short", "Make-up air above the AHU supply", "L/s", 11),
+             H("dn", "Dirty single-pass rooms", "no.", 9), H("dsup", "Supply of dirty single-pass rooms", "L/s", 10), H("dexh", "Exhaust of dirty single-pass rooms", "L/s", 10),
+             H("balnote", "Balance note (helper)", "", 20), H("second", "Rooms of the second room list", "no.", 10), H("second_s", "Source ID", "", 11),
+             H("norr_why", "Reason that no reduction is stated (tender base)", "", 30),
+             H("dirsup", "Supply of rooms with a pressure direction and no value", "L/s", 12), H("dirn", "Rooms with a pressure direction and no value", "no.", 12),
+             H("spillreq", "Spill air to plant rooms served by this unit", "L/s", 11),
+             H("ucvadd", "Extra supply for the future ultra-clean duty (D-058)", "L/s", 11)]
     bands = {"ahu": "A. AS ZONED: AIRFLOW", "frac": "OUTDOOR AIR", "vou": "MULTIPLE SPACE (example)", "ret": "RETURN, EXHAUST, RELIEF",
              "sens": "COIL DUTY", "oa_sens_ms": "COIL DUTY ON THE EXAMPLE'S OUTDOOR-AIR BASIS", "req_t": "CHECKS", "sched": "TENDER AIRFLOW AND REDUCTION",
              "zr": "ROOM LIST OF THE UNIT"}
@@ -288,9 +360,9 @@ def write_ahu(ctx: Ctx) -> None:
         put(ws, f"A{tr}", "TOTAL", "ResultTag")
         for k in ("n", "noh", "area", "area_sup", "vol", "sa_room", "sa_ahu", "oa_sum", "oa_rule", "oa_ms", "ret", "exh", "relief", "sens", "lat",
                   "oa_sens", "oa_lat", "fan", "coil_s", "coil_l", "coil", "coil_ms", "coil_s_ms", "coil_l_ms",
-                  "oa_sens_ms", "oa_lat_ms", "oa_mb"):
+                  "oa_sens_ms", "oa_lat_ms", "oa_mb", "oa_frac", "oa_bal", "offnet", "oa_short", "dsup", "dexh", "dn", "dirsup", "dirn", "spillreq", "ucvadd"):
             put(ws, f"{LL.col(k)}{tr}", f"=SUM({LL.col(k)}{LL.first}:{LL.col(k)}{LL.last})", "Total",
-                "d0" if k in ("n", "noh") else ("d1" if k in ("area", "area_sup", "vol", "sa_room", "sa_ahu", "oa_sum", "oa_rule", "oa_ms", "oa_mb", "ret", "exh", "relief") else "d2"))
+                "d0" if k in ("n", "noh", "dn", "dirn") else ("d1" if k in ("area", "area_sup", "vol", "sa_room", "sa_ahu", "oa_sum", "oa_rule", "oa_ms", "oa_mb", "ret", "exh", "relief") else "d2"))
     ctx.ahu_total_row = L.last + 1
     ctx.ahu2_total_row = L2.last + 1
     if ctx.ahus:
@@ -308,7 +380,7 @@ def write_ahu(ctx: Ctx) -> None:
         cf_formula(ws, f"{L2.col('red')}{L2.first}:{L2.col('red')}{L2.last}", f'AND({L2.col("red")}{L2.first}<>"",{L2.col("red")}{L2.first}<0)', bold=False, fill="FFFFF2CC")
     group_cols(ws, L, "vou", "vot")
     group_cols(ws, L, "oa_sens_ms", "coil_ms")
-    group_cols(ws, L, "nfix", "nok", collapsed=True)
+    group_cols(ws, L, "nfix", "ucvadd", collapsed=True)
     _setup(ws, ctx, L, L.idx["rem"], ctx.ahu2_total_row, "4:6", f"{L.col('crit')}{L.first}", "FF00B050")
     ws.freeze_panes = f"B{L.first}"
 
@@ -395,7 +467,7 @@ def write_fcu(ctx: Ctx) -> None:
                               f'INDEX({AH.rng("sched")},{mt}),""),""),""))'), "Link", "d0")
         _hl(ws, g("tsrc"), (f'=IF({g("tender")}="","",INDEX({AH.rng("tsrc")},{mt}))'), "Link", left=True)
         put(ws, g("calc"), (f'=IF({g("no")}="","",IF({sysrow},IF(ISNUMBER({mt}),INDEX({AH.rng("sa_ahu")},{mt}),{g("supply")}),'
-                            f'{g("supply")}*(1+DuctLeakage)))'), "Link", "d0")
+                            f'{g("supply")}*(1+FcuLeakageDucted)))'), "Link", "d0")
         part = f'IF(ISNUMBER({mt}),INDEX({AH.rng("cov")},{mt}),"Not complete: the unit is not on the AHU tab")'
         put(ws, g("red"), f'=IF(OR({g("tender")}="",{g("calc")}=0,{incomplete(part)},{g("calc")}>={g("tender")}),"",{g("tender")}-{g("calc")})', "Calc", "d0")
         put(ws, g("redp"), f'=IF(OR({g("tender")}="",{g("red")}=""),"",IF({g("tender")}=0,"",{g("red")}/{g("tender")}))', "Calc", "pct1")
@@ -541,7 +613,9 @@ def write_flow_balance(ctx: Ctx) -> None:
     ws = ctx.wb["Flow Balance"]
     L, L2, AF, PS, AH = ctx.lay["FB"], ctx.lay["FB2"], ctx.lay["AF"], ctx.lay["PS"], ctx.lay["AH"]
     title_block(ws, "Flow Balance", "Air in against air out per room, system and AHU. For rooms on Pressure the leakage paths close the "
-                "balance; an exhaust-only room is fed by transfer air and shows TRANSFER AIR.", ctx)
+                "balance; an exhaust-only room is fed by transfer air and shows TRANSFER AIR. The AHU table shows the balance of each unit: "
+                "supply = outdoor air + recirculated air; outdoor air = the larger of the fraction basis and the air that leaves the rooms; "
+                "spill or relief = outdoor air − exhaust − net envelope leakage.", ctx)
     heads = [H("no", "Room number", "", 14), H("name", "Room name", "", 28), H("ahu", "AHU or system", "", 24), H("supply", "Supply", "L/s", 9),
              H("oa", "Outdoor air", "L/s", 9), H("exhaust", "Exhaust", "L/s", 9), H("ret", "Return", "L/s", 9),
              H("extract", "Total extract", "L/s", 9), H("leak_in", "Leakage in", "L/s", 9), H("leak_out", "Leakage out", "L/s", 9),
@@ -565,14 +639,17 @@ def write_flow_balance(ctx: Ctx) -> None:
         put(ws, g("out"), f"={g('extract')}+{g('leak_out')}", "Calc", "d1")
         put(ws, g("net"), f"={g('inn')}-{g('out')}", "Calc", "d1")
         put(ws, g("close"), f"=MAX(BalTolLps,BalTolPct*{g('inn')})", "Calc", "d1")
-        put(ws, g("status"), f'=IF(ABS({g("net")})<={g("close")},"PASS",IF({g("supply")}=0,"TRANSFER AIR",IF({AF.addr("fix", i)}=1,"SPECIFIED","FAIL")))', "Check")
+        # a room with no pressure offset whose exhaust is more than its supply is made up by transfer air (no supply floor from exhaust)
+        ta = f'IF(OR({g("supply")}=0,{g("net")}<0),"TRANSFER AIR",' if node is None else f'IF({g("supply")}=0,"TRANSFER AIR",'
+        put(ws, g("status"), f'=IF(ABS({g("net")})<={g("close")},"PASS",{ta}IF({AF.addr("fix", i)}=1,"SPECIFIED","FAIL")))', "Check")
         put(ws, g("ach"), f"=IF({AF.addr('vol', i)}>0,ConvM3hPerLps*{g('net')}/{AF.addr('vol', i)},0)", "Calc", "d2")
     band_rows(ws, f"A{L.first}:{L.col('ach')}{L.last}")
     cf_text(ws, f"{L.col('status')}{L.first}:{L.col('status')}{L.last}", f"{L.col('status')}{L.first}", "FAIL")
     # AHU summary
     put(ws, f"A{L2.first - 4}", "By AHU (Rev A 'Flow Balance' definitions)", "Section")
     heads2 = [H("ahu", "AHU or system", "", 24), H("supply", "Room supply", "L/s", 9), H("oa", "AHU outdoor air", "L/s", 9),
-              H("exhaust", "Exhaust", "L/s", 9), H("ret", "Return", "L/s", 9), H("relief", "Net positive air to relieve", "L/s", 10),
+              H("exhaust", "Exhaust (no return)", "L/s", 9), H("ret", "Recirculated air", "L/s", 10),
+              H("offnet", "Net envelope leakage out (offset air)", "L/s", 11), H("relief", "Spill or relief = outdoor air − exhaust − net leakage", "L/s", 13),
               H("net_ach", "As air changes", "ACH", 8), H("area", "Area", "m" + U, 8), H("vol", "Volume", "m³", 9),
               H("sum_net", "Sum of room nets", "L/s", 9), H("close", "Tolerance", "L/s", 9), H("status", "Closure", "", 14), H("note", "Note", "", 46)]
     for k, h, u, w in heads2:
@@ -582,14 +659,14 @@ def write_flow_balance(ctx: Ctx) -> None:
     for t, a in enumerate(ctx.ahus):
         g = lambda k: L2.local(k, t)
         _hl(ws, g("ahu"), f"={AH.addr('ahu', t)}", "LinkTag", left=True)
-        for k, src in (("supply", "sa_room"), ("oa", "oa_rule"), ("exhaust", "exh"), ("ret", "ret"), ("relief", "relief"),
+        for k, src in (("supply", "sa_room"), ("oa", "oa_rule"), ("exhaust", "exh"), ("ret", "ret"), ("offnet", "offnet"), ("relief", "relief"),
                        ("area", "area"), ("vol", "vol")):
             put(ws, g(k), f"={AH.addr(src, t)}", "Link", "d1")
         put(ws, g("net_ach"), f"=IF({g('vol')}>0,ConvM3hPerLps*{g('relief')}/{g('vol')},0)", "Calc", "d2")
         put(ws, g("sum_net"), f"=SUMIFS({L.rng('net')},{L.rng('ahu')},{g('ahu')})", "Calc", "d1")
         eng = "+".join(f"SUMIFS({ctx.eng_layouts[st].rng('fin')},{ctx.eng_layouts[st].rng('ahu')},{g('ahu')})" for st in ctx.storeys)
         put(ws, g("close"), f"=MAX(BalTolLps,BalTolPct*{g('supply')})", "Calc", "d1")
-        put(ws, g("status"), f'=IF(AND(ABS({g("relief")}-{g("oa")}+{g("exhaust")})<={g("close")},{g("ret")}>=0,{g("oa")}<={AH.addr("sa_ahu", t)}+{g("close")},'
+        put(ws, g("status"), f'=IF(AND(ABS({g("relief")}-{g("oa")}+{g("exhaust")}+{g("offnet")})<={g("close")},{g("ret")}>=0,{g("oa")}<={AH.addr("sa_ahu", t)}+{g("close")},'
                              f'ABS({g("supply")}-({eng}))<={g("close")}),"PASS","FAIL")', "Check")
         put(ws, g("note"), (f'=IF({g("relief")}<-{g("close")},"Negative relief: "&TEXT(-{g("relief")},"0")&" L/s of make-up air is drawn as transfer air from '
                             f'adjacent spaces; the corridor or adjacent system must supply it.",IF({g("relief")}>{g("close")},"Positive relief: "&TEXT({g("relief")},"0")&" L/s to spill or transfer out.",""))'), "Note")

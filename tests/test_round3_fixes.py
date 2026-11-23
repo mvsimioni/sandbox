@@ -156,7 +156,8 @@ def test_d00_plant_outlines_and_units():
     d = assemble_common_areas(ROOT)
     by = {r["number"]: r for r in d["rooms"]}
     for n in ("CA-L03-023", "CA-L03-027", "CA-L04-020"):
-        assert not by[n]["criteria"] and "Plant space" in by[n]["gaps"]["criteria"], n          # no circulation default for a plant outline
+        # no circulation default for a plant outline; D-036: the HFDS plant-room, LAN or transformer row, with its table and page
+        assert by[n]["criteria"] and str(by[n]["criteria"]["criteria_row"]).startswith("HFDS") and by[n]["criteria"]["code"] == "D", n
     assert by["CA-L03-023"]["ahu"] == "AHU-B-03-ELECRM-01A/B"                                  # L03-R011 lies in the outline (CF-0034 carried)
     assert by["CA-L04-020"]["ahu"] is None                                                       # L04-R267 is 'no information' (CF-0044 carried)
     assert by["CA-L07-000"]["criteria"]                                                          # a riser outline keeps the default

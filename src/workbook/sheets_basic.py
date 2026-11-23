@@ -36,7 +36,8 @@ PRESSURE_METHOD = (
     "The reference space is the corridor outside the room at 0 Pa. Air flows from the higher to the lower pressure. "
     "Offset needed for a negative room (extra exhaust) = envelope leakage in at the set pressure. Offset needed for a positive room (extra supply) = envelope leakage out at the set pressure. "
     "Design offset = 2.5 × internal surface (the limit at the reference pressure). "
-    "Ratio = design offset ÷ offset needed. A ratio below 1.0 is a fail. A ratio from 1.0 to 1.2 is VERIFY. "
+    "Ratio used ÷ needed = the offset that the Airflow tab carries (supply minus extract) ÷ the offset needed at the set pressure. A ratio below 1.0 is a fail. "
+    "Ratio design ÷ needed = design offset ÷ offset needed. A design ratio from 1.0 to 1.2 is VERIFY. "
     "The perimeter comes from the measured plan room where the room is linked to one. Otherwise the perimeter is 4 × √area, assumed (code A) and flagged. "
     "A cited document gives each stated value. The engineer sets the other values (code S).")
 
@@ -215,7 +216,7 @@ def write_basis(ctx: Ctx) -> None:
              "It is rounded up to a whole person (red text, code A).",
              "Lighting and small power (plug load) come from a project document where one gives them. No project document does, so the ASHRAE value for the room use applies "
              "(plug load: ASHRAE Handbook, Fundamentals, plug-load densities; lighting: ASHRAE 90.1 space-by-space lighting power density). The cells are red text (code A) and the Remarks column "
-             "gives the value and the room use. Equipment gain is 0 W: no equipment list is in the scope, and the rooms led by equipment have a VERIFY flag. Envelope gain is not assessed. It is not zero.",
+             "gives the value and the room use. Equipment gain is a provisional value in W/m² for the rooms led by equipment (red cells, VERIFY flag, vendor data needed) and 0 W for other rooms. Envelope gain is assessed by the simple facade method only for the rooms that have a plan room link (see Envelope. Coverage); the other rooms are treated as internal and get no envelope gain.",
              "A room takes the row of its own department booklet where that booklet prints the same space (the same name, or the same name with a level or department prefix or a number in brackets; "
              "the Remarks say which). A room with no such row takes the row of the same space in the closest other department (same room type code, then same name, then same use class and the same words in the room name before its qualifier, so that one shared word is not enough; a row at negative pressure or on single pass is taken only for a room whose name says that it is a toilet, a dirty space or an isolation space; "
              "clinical rooms prefer clinical departments). The cells of such a presumed row are italic green (code A). The booklet and the page of the row stay as the source, and the Remarks column says 'Presumed criteria'. "
@@ -252,6 +253,34 @@ def write_basis(ctx: Ctx) -> None:
         ctx.define(nm, ctx.names[key])
 
 
+CALC_RULES = [
+    "Calculation rules. Supply of a room: the largest of the thermal-load airflow, the air-change airflow (the outdoor air per person or per area is a floor on the supply) and, only where "
+    "the room has a pressure offset, the exhaust and offset air. A room with no pressure offset has no supply floor from exhaust: the exhaust is made up by transfer air.",
+    "Single-pass rooms. A room that needs 100 % outdoor air for clean or sterile supply (isolation, protective, theatre, clean rooms) sets the outdoor-air fraction of its unit. "
+    "A dirty room (dirty utility, disposal, soiled, decontamination, toilets) takes recirculated supply from the unit and a dedicated exhaust with no return, and does not set the fraction. "
+    "The class of each room is an assumption, to confirm. The dirty rooms of each unit are listed on the AHU tab.",
+    "AHU balance. Supply = room supply × (1 + duct leakage). Outdoor air = the larger of (the highest room fraction × supply) and (the air that leaves the rooms: exhaust with no return, "
+    "net offset air through the envelope, spill air to plant rooms). Recirculated air = supply − outdoor air. Spill or relief = outdoor air − exhaust − net envelope leakage.",
+    "Duct leakage is 10 % on an AHU and on a ducted fan coil unit, and 0 % on a hi-wall fan coil unit (assumption, to confirm).",
+    "Design room condition. The printed set point where the row has one. Otherwise 24 °C limited to the printed temperature range: 24 °C inside the range, the nearest limit outside it. "
+    "Design humidity is the smaller of 60 % and the printed maximum. Rooms with no printed temperature keep the condition of their space type. The thermal airflow at the lower limit of "
+    "the range is shown for information only.",
+    "Ceiling height. Where a room layout sheet prints two or more heights, the highest is used.",
+    "Operating theatres with a laminar-flow ceiling module: room supply = HEPA face area × 0.35 m/s (the Max Face Velocity of the HEPA schedule). The unit is checked at 0.40 m/s plus duct leakage. "
+    "Cath lab and angiography rooms keep the airflow printed by the MOT NSC. No reduction against tender is stated for an MOT unit; MOT equipment is not resized.",
+    "Envelope. ETTV component method, simple facade method. Gain per m² of wall = 12 × U. Gain per m² of glass = 3.4 × U + 211 × CF × SC. These are the ETTV equivalents, an averaged basis. "
+    "Areas = length of the room edges on the storey outline × storey height, split by the window-to-wall ratio of the ETTV report for each facade. "
+    "The areas are not read from the building elevations opening by opening. A room is external only where an edge of its outline lies on the storey outline. Flagged for human check. "
+    "COVERAGE: envelope rows exist only for a room that has a one-to-one plan polygon (or a typical-room link by name and count) on a storey with a facade. Every other room, a perimeter ward or office with no such link included, gets no envelope gain in this issue: the gain is not assessed for it. The README shows the live count. "
+    "Where the thermal case governs a room with an envelope, or is within 20 % of the air-change case, the room is marked VERIFY for a peak solar check.",
+    "Equipment gain. Provisional W/m² by room use for equipment-led rooms (red cells and Remarks), until vendor data is available. Lighting and small power are ASHRAE values (red cells).",
+    "Criteria with no booklet row take the HFDS Mechanical reverse-brief row (table and page are on the room). A mapped or presumed booklet row is compared with the HFDS row of the same room type. "
+    "A difference raises VERIFY, with both values, and the booklet row governs.",
+    "A reduction against tender is stated only where the room list of the unit is complete (counted area 0.9 to 1.1 of the zoned area), the room table of the air-side schematic agrees by count, "
+    "and the tender base passes the schedule test (schedule and schematic within 10 %, no placeholder value).",
+]
+
+
 def write_basis_tail(ctx: Ctx) -> None:
     """Key flags and the assumptions register, after every other tab has registered its assumptions."""
     ws = ctx.wb["Basis of Design"]
@@ -265,9 +294,7 @@ def write_basis_tail(ctx: Ctx) -> None:
         put(ws, f"B{r}", typ, "Tag")
         put(ws, f"C{r}", f'=COUNTIFS({FL.rng("type")},"{typ}",{FL.rng("status")},"OPEN")', "Link", "d0")
         r += 1
-    for k in list(ctx.data.get("key_flags", [])) + ["Envelope gain is not assessed (no Envelope rows). It is not zero.",
-                                                     "Thermal load case: people, lighting and small power. Lighting and small power are ASHRAE values where no project document gives one (red cells). "
-                                                     "Equipment gain is 0 W and is not included. The thermal-load airflow is a lower limit."]:
+    for k in list(ctx.data.get("key_flags", [])) + CALC_RULES:
         put(ws, f"B{r}", k, "TextWrap")
         ws.merge_cells(f"B{r}:G{r}")
         ws.row_dimensions[r].height = 15 * (1 + len(k) // 150)
@@ -668,6 +695,10 @@ def write_checks(ctx: Ctx) -> None:
         ("Rooms with no area", f'=SUMPRODUCT(({RI.rng("no")}<>"")*((({RI.rng("area")}="")+({RI.rng("area")}=0))>0))', 0, '=IF(C{r}=0,"PASS","FAIL")', "listed on Flags"),
         ("Rooms with no ceiling height", f'=SUMPRODUCT(({RI.rng("no")}<>"")*({RI.rng("h")}=""))', 0, '=IF(C{r}=0,"PASS","FAIL")',
          "a blank height is a fault: the default height is a flagged assumption"),
+        ("Scrub-up, anteroom, airlock, plant and equipment rooms with no criteria row (a calculation fault)",
+         f'=SUMPRODUCT(({CR.rng("no")}<>"")*({CR.rng("crit")}="")*((ISNUMBER(SEARCH("scrub",{RI.rng("name")}))+ISNUMBER(SEARCH("anteroom",{RI.rng("name")}))+ISNUMBER(SEARCH("ante room",{RI.rng("name")}))'
+         f'+ISNUMBER(SEARCH("airlock",{RI.rng("name")}))+ISNUMBER(SEARCH("sound lock",{RI.rng("name")}))+ISNUMBER(SEARCH("plant",{RI.rng("name")}))+ISNUMBER(SEARCH("equipment room",{RI.rng("name")})))>0))', 0,
+         '=IF(C{r}=0,"PASS","FAIL")', "the room would take 0 L/s: the criteria row comes from the booklet, another department or the HFDS"),
         ("Rooms with no criteria row", f'=SUMPRODUCT(({CR.rng("no")}<>"")*({CR.rng("crit")}=""))', 0, '=IF(C{r}=0,"PASS","FAIL")',
          "a room that takes the default for circulation counts as a room with a criteria row; listed on Flags"),
         ("Rooms with no occupancy value (no RDS value and no room use for the default)", f'=COUNTIF({RI.rng("obasis")},"NOT SET")', 0, '=IF(C{r}=0,"PASS","VERIFY")', "listed on Flags"),
@@ -689,6 +720,16 @@ def write_checks(ctx: Ctx) -> None:
          "the room use is not mapped; listed on Flags"),
         ("Rooms linked to a room box of the tender air-side schematics", f'=COUNT({ctx.lay["CP"].rng("sch_s")})', "information", '="INFO"',
          "of the rooms on Room Information; the room boxes that match no room are on Flags"),
+        ("Rooms whose design temperature is outside the printed criteria range", f'=COUNTIF({CR.rng("trange")},"FAIL")', 0, '=IF(C{r}=0,"PASS","FAIL")',
+         "design temperature: the printed set point; else 24 °C limited to the printed range"),
+        ("Rooms where the thermal airflow at the lower limit of the range is above the final supply", f'=COUNTIF({AF.rng("lo_chk")},"VERIFY")', 0, '=IF(C{r}=0,"PASS","VERIFY")',
+         "information only, it does not change the supply (procedure, resuscitation, ICU and imaging rooms)"),
+        ("Envelope rooms where the thermal case governs or is close to the air-change case (peak solar check)", f'=COUNTIF({AF.rng("env_chk")},"VERIFY")', 0, '=IF(C{r}=0,"PASS","VERIFY")',
+         "marked for the peak solar check of the engineer"),
+        ("Dirty single-pass rooms (recirculated supply, dedicated exhaust, no return)", f'=COUNTIF({AF.rng("spc")},"DIRTY")', "information", '="INFO"',
+         "class by room use, assumption to confirm; listed on the AHU tab by unit"),
+        ("AHUs whose make-up air is above the AHU supply", (f'=COUNTIF({AH.rng("oa_short")},">0")' if ctx.ahus else "=0"), 0, '=IF(C{r}=0,"PASS","VERIFY")',
+         "the air that leaves the rooms is more than the AHU supply"),
         ("Open flags", f'=COUNTIF({FL.rng("status")},"OPEN")', "information", '="INFO"', "see Flags"),
     ]
     L.n = len(checks)
@@ -727,14 +768,25 @@ def write_checks(ctx: Ctx) -> None:
     cf_text(ws, f"E{L.first}:E{last}", f"E{L.first}", "FAIL")
     cf_text(ws, f"E{L.first}:E{last}", f"E{L.first}", "VERIFY", fill="FFFFF2CC")
     r = last + 2
-    put(ws, f"B{r}", "Overall", "ResultText")
-    put(ws, f"E{r}", f'=IF(COUNTIF(E{L.first}:E{last},"FAIL")>0,"FAIL",IF(COUNTIF(E{L.first}:E{last},"VERIFY")>0,"VERIFY","PASS"))', "ResultCheck")
+    # D-056: two status lines, never merged. 'Calculation' must be PASS for any issue. 'Inputs complete' counts the acceptance items that are open.
+    kcol = f"$G${L.first}:$G${last}"
+    ecol = f"$E${L.first}:$E${last}"
+    put(ws, f"B{r}", "Calculation", "ResultText")
+    put(ws, f"E{r}", f'=IF(COUNTIFS({kcol},"CALCULATION",{ecol},"FAIL")>0,"FAIL",IF(COUNTIFS({kcol},"CALCULATION",{ecol},"VERIFY")>0,"VERIFY","PASS"))', "ResultCheck")
     for col in "ACD":
         put(ws, f"{col}{r}", None, "ResultText")
-    put(ws, f"F{r}", "FAIL if any check fails; VERIFY if none fails and some need review", "ResultText")
+    put(ws, f"F{r}", "Calculation checks only. FAIL if one fails; VERIFY if none fails and some need review. Must be PASS for any issue, a draft included", "ResultText")
     cf_text(ws, f"E{r}", f"E{r}", "FAIL")
     cf_text(ws, f"E{r}", f"E{r}", "VERIFY", fill="FFFFF2CC")
     ctx.checks_status = f"'Checks'!$E${r}"
+    r2 = r + 1
+    put(ws, f"B{r2}", "Inputs complete", "ResultText")
+    put(ws, f"E{r2}", f'=IF(SUMPRODUCT(--({kcol}="ACCEPTANCE"),--({ecol}<>"PASS"))=0,"COMPLETE","NOT COMPLETE")', "ResultCheck")
+    for col in "ACD":
+        put(ws, f"{col}{r2}", None, "ResultText")
+    put(ws, f"F{r2}", "Acceptance items (rooms with unit, criteria, area, height; area controls). Reads NOT COMPLETE while one is open. The workbook is a DRAFT, acceptance open", "ResultText")
+    cf_text(ws, f"E{r2}", f"E{r2}", "NOT COMPLETE", fill="FFFFF2CC")
+    r = r2
     ctx.checks_range = f"'Checks'!$E${L.first}:$E${last}"
     ctx.checks_layout = L
     ctx.checks_rows = (L.first, last)
@@ -775,13 +827,15 @@ def write_readme(ctx: Ctx) -> None:
     n_crit = f'SUMPRODUCT(--({CR_.rng("no")}<>""),--({CR_.rng("crit")}<>""))'
     acc_open = f'(SUMPRODUCT(--({kind_rng}="ACCEPTANCE"),--({ctx.checks_range}<>"PASS")))'
     pct = lambda a, b: f'TEXT(IF({b}=0,0,{a}/{b}),"0.0 %")'
-    for label, f in (("Calculation checks", f'=COUNTIFS({kind_rng},"CALCULATION",{ctx.checks_range},"FAIL")&" FAIL, "&COUNTIFS({kind_rng},"CALCULATION",{ctx.checks_range},"VERIFY")&" TO VERIFY"'),
-                     ("Acceptance", f'=IF({acc_open}=0,"MET","NOT MET: "&{acc_open}&IF({acc_open}=1," item"," items")&" open")'),
+    for label, f in (("Coverage of the AHU totals", f'=IF({tot_sup}=0,"No room supply",IF({on_unit}/{tot_sup}<0.99,"PARTIAL. Only "&{pct(on_unit, tot_sup)}&" of the room supply of this department is on a unit that the zoning gives. '
+                                                         f'Read every AHU total as partial; the rooms with no unit are listed on Flags.","COMPLETE: all room supply is on a unit"))'),
+                     ("Calculation checks", f'=COUNTIFS({kind_rng},"CALCULATION",{ctx.checks_range},"FAIL")&" FAIL, "&COUNTIFS({kind_rng},"CALCULATION",{ctx.checks_range},"VERIFY")&" TO VERIFY"'),
+                     ("Inputs complete", f'=IF({acc_open}=0,"COMPLETE","NOT COMPLETE: "&{acc_open}&IF({acc_open}=1," item"," items")&" open")'),
                      ("Rooms with an AHU or a system class", f'={n_unit}&" of "&{n_rooms}&" ("&{pct(n_unit, n_rooms)}&")"'),
                      ("Room supply on an AHU", f'=TEXT({on_unit},"#,##0")&" of "&TEXT({tot_sup},"#,##0")&" L/s ("&{pct(on_unit, tot_sup)}&")"'),
                      ("Rooms with a criteria row", f'={n_crit}&" of "&{n_rooms}&" ("&{pct(n_crit, n_rooms)}&")"'),
                      ("Rooms with a pressure target and no Pressure row", f'={ck("press")}'),
-                     ("Thermal load case", '="PEOPLE, LIGHTING AND SMALL POWER (ASHRAE values where no project value). Equipment gain is not included. Envelope gain is not assessed."'),
+                     ("Thermal load case", f'="PEOPLE, LIGHTING AND SMALL POWER (ASHRAE values where no project value). A provisional equipment gain is included for equipment-led rooms. Envelope gain by the simple facade method for "&IFERROR(SUMPRODUCT(({ctx.lay["EN"].rng("room")}<>"")/COUNTIF({ctx.lay["EN"].rng("room")},{ctx.lay["EN"].rng("room")}&"")),0)&" of "&{n_rooms}&" rooms only (rooms with a plan room link on a storey with a facade). The other rooms get no envelope gain: not assessed."'),
                      ("Open flags", f'=COUNTIF({FL.rng("status")},"OPEN")'),
                      ("Rooms", f"=COUNTA({ctx.lay['RI'].rng('no')})")):
         put(ws, f"B{r}", label, "Text")

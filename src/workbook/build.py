@@ -164,6 +164,8 @@ def build_workbook(data: Union[Dict[str, Any], Path, str], out: Optional[Path] =
     wb.properties.title = f"{ctx.project}: {data['department'].get('name', '')} thermal load calculation"
     if out is not None:
         Path(out).parent.mkdir(parents=True, exist_ok=True)
+        from .clean import clean_workbook
+        clean_workbook(wb)
         wb.save(out)
     ctx.out = out
     return ctx

@@ -209,8 +209,22 @@ def _col(row: Dict[str, str], cols: Sequence[str]) -> str:
     return ""
 
 
+def rls_printed_values_m(row: Dict[str, str]) -> List[float]:
+    """Every ceiling height printed on the sheet, in metres, from the 'CH=' notes (D-035: where a sheet prints two or more, the highest is used)."""
+    txt = (row.get("heights_mm_as_printed") or "")
+    vals = []
+    for m in re.finditer(r"(\d{3,5}(?:\.\d+)?)", txt):
+        v = float(m.group(1))
+        vals.append(round(v / 1000.0 if v > 20 else v, 4))
+    return sorted(set(vals))
+
+
 def rls_height_m(row: Dict[str, str]) -> Optional[float]:
-    """Ceiling height of an RLS register row in metres. A value above 20 is read as millimetres (a ceiling is between 1 and 20 m). None when the row gives none."""
+    """Ceiling height of an RLS register row in metres. A value above 20 is read as millimetres (a ceiling is between 1 and 20 m). None when the row gives none.
+    D-035: where the sheet prints more than one height, the highest of them."""
+    printed = rls_printed_values_m(row)
+    if printed:
+        return printed[-1]
     for cols in (_M_COLS, _MM_COLS):
         t = _col(row, cols)
         if not t:
@@ -325,14 +339,11 @@ def link_rls(dpa_rooms: Sequence[Dict[str, Any]], rls_rows: Sequence[Dict[str, s
             continue
         rr = [x[0] for x in rows]
         vals = sorted({rls_height_m(x) for x in rr})
-        flagged = [x for x in rr if (x.get("conflict_flag") or "").strip()]
-        if len(vals) > 1 or flagged:
-            conflicts.append(dict(number=d["number"], code=code.strip(), values=vals,
-                                  flags=sorted({(x.get("conflict_flag") or "").strip().replace("_", " ") for x in flagged})))
-            continue
+        every = sorted({v for x in rr for v in (rls_printed_values_m(x) or [rls_height_m(x)]) if v is not None})
         used.update(id(x) for x in rr)
-        heights[d["number"]] = dict(height_m=vals[0], basis=basis, code=_col(rr[0], _CODE_COLS), row=rr[0], n_rows=len(rr),
-                                    variant_from=rows[0][1][3])
+        # D-035: the highest height printed (no conflict is listed any more where a sheet prints two or more)
+        heights[d["number"]] = dict(height_m=vals[-1], basis=basis, code=_col(rr[0], _CODE_COLS), row=rr[0], n_rows=len(rr),
+                                    variant_from=rows[0][1][3], values=every)
     grouped: Dict[Tuple[str, str, str], List[Dict[str, str]]] = defaultdict(list)
     for r, k in pool:
         if id(r) not in used:

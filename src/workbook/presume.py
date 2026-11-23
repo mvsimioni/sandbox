@@ -108,7 +108,7 @@ def printed_regime(text: Optional[str]) -> Optional[str]:
 
 # A row at negative pressure or on single pass is a row for a toilet, a dirty or an isolation space. A room takes such a row from its use class only where its own
 # name says that it is a toilet, a dirty space or an isolation space (the words below, as whole words).
-HAZARD_CUE = re.compile(r"\b(?:toilets?|ensuites?|wc|lavatory|lavatories|sanitary|dirty|isolation|iso)\b", re.I)
+HAZARD_CUE = re.compile(r"\b(?:toilets?|ensuites?|wc|lavatory|lavatories|sanitary|dirty|isolation|iso|cleaners?)\b", re.I)
 
 
 def hazardous(row: Dict[str, str]) -> bool:
@@ -265,6 +265,25 @@ class Presumption:
                 same_level = bool(lvl and prefix == lvl)
                 no_prefix = not prefix
                 cands.append(((0 if same_level else 1 if no_prefix else 2, _page(r)), r, prefix, a))
+        relaxed = False
+        if not cands:
+            # Item 5 of the fix pass (D-026, D-064 order): the own booklet prints the space with a qualifier in brackets ('Anteroom (Bronchoscopy)') or with a short
+            # abbreviation before the name ('AV Control Room'). The own row is taken before any row of another department. Second choice only: no exact row exists.
+            wants = {want}
+            mqual = re.match(r"^.+?\s+[-–]\s+(.+)$", name or "")
+            if mqual:       # 'Bay - Mobile Equipment' is the row alternative 'Mobile Equipment' of a composite bay row of the own booklet
+                qk = tuple(w for w in _own_key(mqual.group(1).split(",")[0], set()) if w != "bay")
+                if qk:
+                    wants.add(qk)
+            for r in self.by_dept.get(own, []):
+                for a in _alternatives(r):
+                    k = _own_key(re.sub(r"\([^)]*\)", " ", a), dwords)
+                    kb = tuple(w for w in k if w != "bay")
+                    if k in wants or kb in wants or (len(k) == len(want) + 1 and k[1:] == want and len(k[0]) <= 3):
+                        pm = _LEVEL.match(a.strip())
+                        prefix = pm.group(0).strip().upper() if pm else ""
+                        cands.append(((1 if not prefix else 2, _page(r)), r, prefix, a))
+            relaxed = bool(cands)
         if not cands:
             return None
         cands.sort(key=lambda c: c[0])
@@ -275,7 +294,9 @@ class Presumption:
             lead = "the room is the whole workspace of this department and the booklet prints no row for it by name; the booklet of this department prints the office row"
             tail = f" for level {prefix[1:]}" if rank == 0 else (" for another level (" + prefix + ")" if rank == 2 else "")
             return dict(row=row, how="same space in the booklet of this department", reason=lead + tail)
-        if rank == 0:
+        if relaxed:
+            why = f"the booklet of this department prints the same space with a qualifier ('{row['room_type_as_printed'].strip()}')"
+        elif rank == 0:
             why = f"the booklet of this department prints the same space for level {prefix[1:]}"
         elif rank == 1:
             why = "the booklet of this department prints the same space"
@@ -301,7 +322,12 @@ class Presumption:
     def find(self, own_dept: str, name: str, code: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], str]:
         """({row, department, how, department_label}, reason). Reason is given when no row is found."""
         own = _dk(own_dept)
-        forms = list(dict.fromkeys([name, site_free(name), self.expand((name or "").lower())]))
+        extra = []
+        mq = re.match(r"^(.+?)\s+[-–]\s+(.+)$", name or "")
+        if mq:
+            # 'Patient Bay - Recovery, Endo' is the space 'Recovery Bay': the first word of the qualifier and the last word of the base (item 4 of the fix pass)
+            extra.append(f"{mq.group(2).split(',')[0].strip()} {mq.group(1).split()[-1]}")
+        forms = list(dict.fromkeys([name, site_free(name)] + extra + [self.expand((name or "").lower())]))
         use, _label = self.room_use(name)
         clinical = use in CLINICAL_USES
         plant = use == "plant_room"
@@ -315,11 +341,13 @@ class Presumption:
                     return dict(row=hit[1], department=hit[0], how="same room type code"), ""
             elif step == "same_name":
                 for form in forms:
-                    cands = [(d, r) for d, r, _how in self.by_name.get(_norm(form), [])]
-                    hit = self._best(own, cands, clinical)
-                    if hit:
-                        how = next(h for d, r, h in self.by_name[_norm(form)] if d == hit[0] and r is hit[1])
-                        return dict(row=hit[1], department=hit[0], how=how), ""
+                    # D-064 (2): an exact room-type name row in another booklet is taken before a composite-name row (a toilet takes 'Toilet' before 'Change Room/Toilet')
+                    allc = self.by_name.get(_norm(form), [])
+                    for pool_ in ([(d, r) for d, r, h in allc if h == "same name"], [(d, r) for d, r, _h in allc]):
+                        hit = self._best(own, pool_, clinical)
+                        if hit:
+                            how = next(h for d, r, h in allc if d == hit[0] and r is hit[1])
+                            return dict(row=hit[1], department=hit[0], how=how), ""
             elif step == "same_use_class":
                 if plant:
                     why.append("a plant room takes no row from its use class (the criteria of plant rooms are open for Marcus)")

@@ -25,6 +25,7 @@ PS_HEAD = {
     "fix_out": ("Fixed transfer out", "m³/h", 9), "air_in": ("Air in", "m³/h", 9), "air_out": ("Air out", "m³/h", 9),
     "kindoff": ("Offset kind", "", 10), "needed": ("Offset needed", "m³/h", 9), "design": ("Design offset", "m³/h", 9),
     "tighter": ("Offset of a tighter room", "m³/h", 9), "ratio": ("Ratio design / needed", "–", 8), "status": ("Status", "", 9),
+    "used": ("Offset used in Airflow", "m³/h", 9), "ratio_used": ("Ratio used / needed", "–", 8),
     "spec_off": ("Offset as specified (MOT, not resized)", "m³/h", 11), "spec_chk": ("Specified offset against needed", "", 11),
     "off_lps": ("Offset needed", "L/s", 9), "design_lps": ("Design offset", "L/s", 9),
     "needed_n50": ("Offset needed, n = 0.50", "m³/h", 9), "needed_n75": ("Offset needed, n = 0.75", "m³/h", 9),
@@ -158,7 +159,11 @@ def write_pressure(ctx: Ctx) -> None:
         put(ws, g("design"), f"={g('limit')}*{g('surf')}", "Calc", "d1")
         put(ws, g("tighter"), f"=TighterLimit*{g('surf')}", "Calc", "d1")
         put(ws, g("ratio"), f'=IF({g("needed")}>OffsetEps,{g("design")}/{g("needed")},"n/a")', "Calc", "d2")
-        put(ws, g("status"), f'=IF(ISNUMBER({g("ratio")}),IF({g("ratio")}<RatioFail,"FAIL",IF(OR({g("ratio")}<RatioVerify,{raw}<-OffsetEps),'
+        # D-028, D-032: the offset that Airflow carries (supply minus extract) is compared with the offset needed at the set pressure. A room whose Airflow offset is
+        # below the need fails. The margin of the design offset (2.5 x surface) over the need keeps the VERIFY band (ratio 1.0 to 1.2).
+        put(ws, g("used"), f"=ABS({g('supply')}-{g('exhaust')})", "Calc", "d1")
+        put(ws, g("ratio_used"), f'=IF({g("needed")}>OffsetEps,ROUND({g("used")}/{g("needed")},3),"n/a")', "Calc", "d3")
+        put(ws, g("status"), f'=IF(ISNUMBER({g("ratio_used")}),IF({g("ratio_used")}<RatioFail,"FAIL",IF(OR({g("ratio")}<RatioVerify,{raw}<-OffsetEps),'
                              f'"VERIFY","PASS")),"PASS")', "Check")
         fx = ctx.lay["AF"].addr("fix", gi)
         put(ws, g("spec_off"), f'=IF({fx}=1,IF({g("kindoff")}="EXHAUST",{g("exhaust")}-{g("supply")},{g("supply")}-{g("exhaust")}),"")', "Calc", "d1")

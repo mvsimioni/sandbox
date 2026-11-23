@@ -71,7 +71,7 @@ def test_loads_are_ashrae_values_in_red_with_a_remarks_note():
             n_red += 1
     assert n_red > 0
     # equipment 0 with a VERIFY flag on an equipment-led room
-    fl = [r for r in wb["Flags"].iter_rows(min_row=7, values_only=True) if r[0] and str(r[3]).startswith("Room ") and "Equipment gain is 0 W" in str(r[3])]
+    fl = [r for r in wb["Flags"].iter_rows(min_row=7, values_only=True) if r[0] and str(r[3]).startswith("Room ") and ("Equipment gain is 0 W" in str(r[3]) or "provisional" in str(r[3]))]
     assert fl and all(r[1] == "VERIFY" for r in fl)
 
 
@@ -457,5 +457,6 @@ def test_completeness_text_gives_a_reason_and_is_grammatical():
 def test_comparison_does_not_tag_an_open_rule_as_a_cause():
     import src.recompute.compare_workbooks as cw
     assert not hasattr(cw, "CAUSE_OFFSET") and not hasattr(cw, "CAUSE_EXH")
+    # D-030 and D-032 are decided: there is one reading of each rule in both engines (the interim switch is gone)
     from src.recompute.thermal import WORKBOOK_RULES
-    assert WORKBOOK_RULES["offset_oa"] == "required_exhaust" and WORKBOOK_RULES["supply_floor"] == "pressure_only"
+    assert WORKBOOK_RULES == {}

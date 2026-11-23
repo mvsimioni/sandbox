@@ -58,6 +58,18 @@ DEFAULTS: Dict[str, float] = {
     "waterspecificheat": 4200.0,   # J/(kg.K), template Equipment calcs
     "area_agree_pct": 3.0,         # config tolerances.area_vs_soa
     "area_agree_m2": 0.5,
+    "fculeakageducted": 0.10,      # D-060: ducted fan coil unit
+    "fculeakagehiwall": 0.0,       # D-060: hi-wall (non-ducted) fan coil unit
+    "designtref": 24.0,            # D-053: reference design dry-bulb
+    "designrhmax": 0.60,           # D-053: upper bound of the design humidity
+    "psya": 0.61094,               # saturation pressure kPa = A exp(B t / (C + t)) (Magnus form)
+    "psyb": 17.625,
+    "psyc": 243.04,
+    "psyp": 101.325,               # kPa
+    "psyeps": 0.622,
+    "psycpa": 1.006,               # kJ/(kg K)
+    "psycpv": 1.86,
+    "psyhfg": 2501.0,              # kJ/kg
 }
 REQUIRED = ("SupplyTemp", "OutdoorDB", "OutdoorWB", "OutdoorH", "FanPressure", "FanEfficiency", "RoofSolarGain")
 EXHAUST_ONLY = re.compile(r"EXHAUST", re.I)
@@ -122,14 +134,68 @@ def read_constants(data: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+
+# ---- design condition (D-053) --------------------------------------------------------------- #
+def design_condition(crit: Dict[str, Any], c: Dict[str, Any]) -> Optional[Tuple[float, float, float]]:
+    """(dry-bulb degC, humidity fraction, enthalpy kJ/kg) from the printed criteria range, or None where the row prints no temperature.
+    Dry-bulb: the printed set point where there is one; else the reference value 24 degC limited to the printed range
+    (24 inside the range, the upper limit where the range is below 24, the lower limit where it is above).
+    Humidity: the smaller of 60 % and the printed maximum."""
+    tset, tmin, tmax = _num(crit.get("temp_setpoint_c")), _num(crit.get("temp_min_c")), _num(crit.get("temp_max_c"))
+    if tset is None and tmin is None and tmax is None:
+        return None
+    if tset is not None:
+        t = tset
+    else:
+        lo = tmax if tmin is None else tmin
+        hi = tmin if tmax is None else tmax
+        t = min(max(c["designtref"], lo), hi)
+    rh_max = _num(crit.get("rh_max_pct"))
+    rh = c["designrhmax"] if rh_max is None else min(c["designrhmax"], rh_max / 100.0)
+    pv = rh * c["psya"] * math.exp(c["psyb"] * t / (c["psyc"] + t))
+    w = c["psyeps"] * pv / (c["psyp"] - pv)
+    h = c["psycpa"] * t + w * (c["psyhfg"] + c["psycpv"] * t)
+    return t, rh, h
+
+
+# ---- single-pass class (D-031) -------------------------------------------------------------- #
+_CLEAN_WORDS = re.compile(r"isolation|protective|theatre|operating|clean|steril|aseptic|compounding|cleanroom|hepa|laminar|cath|angio|ucv", re.I)
+_DIRTY_WORDS = re.compile(r"dirty|soiled|disposal|decontam|toilet|\bwc\b|ensuite|shower|bathroom|cleaner|sluice|waste|pan room|washroom|latrine|janitor|bedpan|linen", re.I)
+
+
+def classify_single_pass(name: str, crit: Dict[str, Any]) -> str:
+    """CLEAN, DIRTY or '' (not a single-pass room). A stated class (``sp_class``) wins.
+    CLEAN: needs 100 % outdoor air for clean or sterile supply (specified 100 % outdoor air, air class 1, HEPA, theatre, isolation words).
+    DIRTY: single pass for exhaust reasons only (negative or neutral, no sterile need, dirty-room words): recirculated supply, dedicated exhaust."""
+    if str(crit.get("single_pass") or "").upper() != "Y":
+        return ""
+    given = str(crit.get("sp_class") or "").upper()
+    if given in ("CLEAN", "DIRTY"):
+        return given
+    sup, oa = _num(crit.get("supply_specified_lps")), _num(crit.get("oa_specified_lps"))
+    if str(crit.get("code") or "").upper() == "S" and sup and oa is not None and oa >= 0.99 * sup:
+        return "CLEAN"
+    if str(crit.get("air_class") or "").strip() == "1" or "HEPA" in str(crit.get("filter") or "").upper():
+        return "CLEAN"
+    if _DIRTY_WORDS.search(name or ""):
+        return "DIRTY"
+    if _CLEAN_WORDS.search(name or ""):
+        return "CLEAN"
+    regime = str(crit.get("pressure_regime") or "").upper()
+    return "DIRTY" if regime in ("", "NEGATIVE", "NEUTRAL") else "CLEAN"
+
+
 # ---- room geometry and loads ---------------------------------------------------------------- #
 def select_area(room: Dict[str, Any], c: Dict[str, Any]) -> Tuple[float, str]:
     """Area used (rounded to 0.1 m2) and the basis; brief 8.3 and Section 11 item 18."""
-    soa, meas = _num(room.get("soa_area_m2")), _num(room.get("measured_area_m2"))
+    soa_true, meas = _num(room.get("soa_area_m2")), _num(room.get("measured_area_m2"))
+    soa = soa_true
     dpa = _num(room.get("dpa_area_m2"))
     sel = str(room.get("area_selector") or "AUTO").upper()
     if sel == "DPA" and dpa is not None:
         return _round_half_up(dpa, 1), "DPA"
+    if sel == "SOA" and soa_true is not None:
+        return _round_half_up(soa_true, 1), "SOA"           # D-067: the SOA as drawn, where the rule selects it
     if dpa is not None and dpa > 0:
         soa = dpa                                    # the design area: DPA designed area, else SOA
     if soa is None and meas is None:
@@ -144,8 +210,9 @@ def select_area(room: Dict[str, Any], c: Dict[str, Any]) -> Tuple[float, str]:
         return _round_half_up(meas, 1), "MEASURED"
     if sel == "LARGER":
         return _round_half_up(max(soa, meas), 1), "LARGER"
-    diff = abs(soa - meas)
-    if diff <= c["area_agree_m2"] or (soa and diff / soa * 100.0 <= c["area_agree_pct"]):
+    base_r = _round_half_up(soa, 1)                 # the design area is taken to 0.1 m2 before the test, as on Room Information
+    diff = abs(base_r - meas)
+    if diff <= c["area_agree_m2"] or (base_r and diff / base_r * 100.0 <= c["area_agree_pct"]):
         return _round_half_up(soa, 1), "SOA"
     return _round_half_up(meas, 1), "MEASURED"
 
@@ -167,6 +234,10 @@ def room_loads(room: Dict[str, Any], c: Dict[str, Any], tables: Dict[str, Any]) 
     if st is None:
         raise RecomputeError(f"room {room.get('number')}: space type {st_name!r} not in space_types")
     room_t, room_h = float(st["room_t_c"]), float(st["room_h_kjkg"])
+    dc = design_condition(crit, c)                      # D-053: per-room design condition from the criteria range
+    design_rh = None
+    if dc is not None:
+        room_t, design_rh, room_h = dc
     defaults = tables["defaults"].get(st_name, {})
 
     people = _num(room.get("occupancy_people"))
@@ -238,6 +309,9 @@ def room_loads(room: Dict[str, Any], c: Dict[str, Any], tables: Dict[str, Any]) 
     if dt <= 0:
         raise RecomputeError(f"room {room.get('number')}: room temperature {room_t} not above supply {c['supplytemp']}")
     thermal = sensible / (c["airsensible"] * dt)
+    # D-053: information only, thermal airflow at the lower limit of the printed range
+    t_low = _num(crit.get("temp_min_c"))
+    thermal_lo = sensible / (c["airsensible"] * (t_low - float(c["supplytemp"]))) if (t_low is not None and t_low > float(c["supplytemp"]) and dc is not None) else None
 
     return {
         "area_m2": area, "area_basis": area_basis, "height_m": height, "volume_m3": vol,
@@ -251,22 +325,20 @@ def room_loads(room: Dict[str, Any], c: Dict[str, Any], tables: Dict[str, Any]) 
         "supply_temp_c": float(c["supplytemp"]), "pressure_regime": regime,
         "fixed_by_specification": str(crit.get("code") or "").upper() == "S",
         "single_pass": str(crit.get("single_pass") or "").upper() == "Y",
+        "sp_class": classify_single_pass(str(room.get("name") or ""), crit),
+        "design_rh": design_rh, "thermal_lo_lps": thermal_lo,
+        "design_range": (_num(crit.get("temp_min_c")), _num(crit.get("temp_max_c"))),
         "specified_supply_lps": _num(crit.get("supply_specified_lps")),
         "specified_oa_lps": _num(crit.get("oa_specified_lps")),
     }
 
 
 def _pressure_target(room: Dict[str, Any]) -> Optional[float]:
-    """Tender value, then working drawing, then booklet (brief 8.3 / schema); signed by the regime."""
+    """Tender value, then working drawing, then booklet (brief 8.3 / schema), as printed (signed); the workbook reads the same cell."""
     crit = room.get("criteria") or {}
     for key in ("pressure_pa_tender", "pressure_pa_working", "pressure_pa_booklet"):
         v = _num(crit.get(key))
         if v is not None:
-            regime = str(crit.get("pressure_regime") or "").upper()
-            if regime == "NEGATIVE" and v > 0:
-                v = -v
-            if regime == "POSITIVE" and v < 0:
-                v = -v
             return v
     return None
 
@@ -369,25 +441,28 @@ def solve_pressure(rooms: List[Dict[str, Any]], results: Dict[str, Dict[str, Any
 
 
 # ---- airflow rule --------------------------------------------------------------------------- #
-# The two rules that the workbook and this recomputation read differently (open for Marcus: OI-13-1 and OI-R401-1). ``recompute(..., rules=WORKBOOK_RULES)`` reads them as
-# the workbook does (the interim state of the deliverables); the default reads them as the recomputation always did (the other option of each item).
-WORKBOOK_RULES = {"supply_floor": "pressure_only", "offset_oa": "required_exhaust"}
+# D-030: no supply floor from exhaust where the room has no pressure offset (the exhaust is made up by transfer air).
+# D-031: only a clean single-pass room (100 % outdoor air) takes all its supply as outdoor air; a dirty single-pass room is
+#        supplied from recirculated air and has a dedicated exhaust (no return); it carries only its own minimum outdoor air.
+# D-032: the exhaust and the offset air of every room are made up at the AHU (see ahu_totals), not in the room.
+# D-033: outdoor air per person or per area is a floor on the room supply (oa_req inside min_supply).
+WORKBOOK_RULES: Dict[str, str] = {}      # kept for callers: there is one reading now
 
 
 def _apply_airflow(res: Dict[str, Any], c: Dict[str, Any], pres: Optional[Dict[str, Any]], rules: Optional[Dict[str, str]] = None) -> None:
-    """Final supply, exhaust and OA of one supply room, with the governing case (brief 8.3)."""
+    """Final supply, extract, exhaust, return and outdoor air of one supply room, with the governing case (brief 8.3)."""
     thermal, minimum = res["thermal_airflow_lps"], res["min_supply_lps"]
     exh_req = res["exhaust_required_lps"]
     offset = 0.0
     kind = ""
     if pres and pres["mode"] == "controlled" and pres["status"] not in ("UNSOLVED",):
         offset, kind = pres["offset_needed_lps"], pres["offset_kind"]
-    if kind == "exhaust":        # negative room: exhaust = supply + offset
+    if kind == "exhaust":        # negative room: extract = supply + offset
         floor = max(exh_req - offset, 0.0)
-    elif kind == "supply":       # positive room: exhaust = supply - offset
+    elif kind == "supply":       # positive room: extract = supply - offset
         floor = exh_req + offset
     else:
-        floor = 0.0 if (rules or {}).get("supply_floor") == "pressure_only" else exh_req       # OI-13-1: no supply floor from the exhaust where there is no offset
+        floor = 0.0              # D-030
     if res["fixed_by_specification"] and res["specified_supply_lps"] is not None:
         supply_raw = res["specified_supply_lps"]
         governing = "specified"
@@ -402,39 +477,30 @@ def _apply_airflow(res: Dict[str, Any], c: Dict[str, Any], pres: Optional[Dict[s
     step = c["supplyrounding"]
     supply = supply_raw if governing == "specified" else _roundup(supply_raw, step)
     if res["fixed_by_specification"] and res["exhaust_specified"] and exh_req > 0:
-        exhaust = exh_req         # specified airflows are not resized; the offset needed is reported beside them
+        extract = exh_req         # specified airflows are not resized; the offset needed is reported beside them
     elif kind == "exhaust":
-        exhaust = max(supply + offset, exh_req)
+        extract = supply + offset
     elif kind == "supply":
-        exhaust = max(supply - offset, 0.0)
-    elif (rules or {}).get("supply_floor") == "pressure_only":
-        exhaust = max(supply, exh_req)          # no offset: the extract is the supply, or the required exhaust where that is larger (transfer air makes up the rest)
+        extract = supply - offset
+    else:
+        extract = max(supply, exh_req)
+    if res["single_pass"]:
+        exhaust = extract         # no return from a single-pass room (clean or dirty)
+    elif kind == "exhaust":
+        exhaust = max(exh_req, offset)
     else:
         exhaust = exh_req
     oa = res["oa_required_lps"]
-    if (rules or {}).get("offset_oa") == "required_exhaust":
-        # OI-R401-1, the workbook reading: the exhaust that needs outdoor air is the required exhaust (and, for a negative room, the offset air); the rest of the extract returns to the AHU
-        if res["single_pass"]:
-            ex_oa = exhaust
-        elif kind == "exhaust":
-            ex_oa = max(exh_req, offset)
-        else:
-            ex_oa = exh_req
-        oa = max(oa, ex_oa + (offset if kind == "supply" else 0.0))
-    elif res["single_pass"]:
-        oa = max(oa, supply)
-    elif exhaust > 0:
-        oa = max(oa, min(exhaust, supply))
-    if kind == "supply" and not res["single_pass"] and (rules or {}).get("offset_oa") != "required_exhaust":
-        # positive room: the exhaust and the air pushed out through leakage are both made up from outdoor air
-        oa = max(oa, min(exhaust + offset, supply))
-    if res["fixed_by_specification"] and res["specified_oa_lps"] is not None:
+    if res["fixed_by_specification"] and res["specified_oa_lps"] is not None and res["specified_oa_lps"] > 0:
         oa = res["specified_oa_lps"]
-    oa = min(oa, supply) if supply > 0 else oa
+    elif res["single_pass"] and res["sp_class"] == "CLEAN":
+        oa = supply               # D-031: clean or sterile supply is 100 % outdoor air
+    oa = min(oa, supply) if supply > 0 else 0.0
     res.update({
-        "supply_lps_unrounded": supply_raw, "supply_lps": supply, "exhaust_lps": exhaust,
+        "supply_lps_unrounded": supply_raw, "supply_lps": supply, "extract_lps": extract, "exhaust_lps": exhaust,
+        "return_lps": extract - exhaust,
         "offset_lps": offset, "offset_kind": kind, "oa_lps": oa,
-        "offset_specified_lps": ((exhaust - supply) if kind == "exhaust" else (supply - exhaust))
+        "offset_specified_lps": ((extract - supply) if kind == "exhaust" else (supply - extract))
         if (res["fixed_by_specification"] and kind) else None,
         "oa_fraction": oa / supply if supply > 0 else 0.0,
         "governing_case": governing,
@@ -445,11 +511,20 @@ def _apply_airflow(res: Dict[str, Any], c: Dict[str, Any], pres: Optional[Dict[s
 
 
 # ---- AHU totalisation ----------------------------------------------------------------------- #
-def ahu_totals(tag: str, rooms: List[Dict[str, Any]], c: Dict[str, Any]) -> Dict[str, Any]:
+def unit_leakage(unit: Optional[Dict[str, Any]], c: Dict[str, Any]) -> float:
+    """Duct leakage of the unit (D-060): 10 % on an AHU or a ducted fan coil unit, 0 % on a hi-wall fan coil unit."""
+    if unit and str(unit.get("type") or "").upper() in ("FCU", "DXFCU"):
+        return c["fculeakagehiwall"] if str(unit.get("ducted") or "").upper() == "N" else c["fculeakageducted"]
+    return c["ductleakage"]
+
+
+def ahu_totals(tag: str, rooms: List[Dict[str, Any]], c: Dict[str, Any], unit: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     supply_rooms = [r for r in rooms if r["supply_lps"] > 0]
-    leak = c["ductleakage"]
+    leak = unit_leakage(unit, c)
     supply = sum(r["supply_lps"] for r in supply_rooms)
-    supply_leak = supply * (1.0 + leak)
+    spill_req = float((unit or {}).get("spill_req_lps") or 0.0)         # D-036, D-062: spill air to the plant rooms that the unit serves
+    ucv_add = float((unit or {}).get("ucv_add_lps") or 0.0)           # D-058: future ultra-clean duty minus the day-1 supply of the theatre
+    supply_leak = (supply + spill_req + ucv_add) * (1.0 + leak)
     sum_oa = sum(r["oa_lps"] for r in supply_rooms)
     exhaust = sum(r["exhaust_lps"] for r in rooms)
     sens = sum(r["sensible_w"] for r in supply_rooms) / 1000.0
@@ -459,13 +534,18 @@ def ahu_totals(tag: str, rooms: List[Dict[str, Any]], c: Dict[str, Any]) -> Dict
     crit = max(supply_rooms, key=lambda r: r["oa_fraction"], default=None)
     frac = crit["oa_fraction"] if crit else 0.0
     oa_highest = frac * supply_leak
+    # D-032: the air that leaves the zone (exhaust with no return, net positive offset air) is made up from outdoor air
+    off_net = sum(r.get("offset_lps", 0.0) * (1.0 if r.get("offset_kind") == "supply" else -1.0 if r.get("offset_kind") == "exhaust" else 0.0) for r in rooms)
+    oa_balance = exhaust + max(off_net, 0.0) + spill_req
+    oa_need = max(oa_highest, oa_balance)
+    oa_short = max(oa_need - supply_leak, 0.0)
+    oa_final = min(oa_need, supply_leak)
+    dirty = [r for r in supply_rooms if r.get("sp_class") == "DIRTY"]
     # multiple-space (Rev A AHU Summary S8..AA8): Vot = Z x Vst, Z = X/(1+X-Y)
     x = sum_oa / supply if supply else 0.0
     y = frac
     vot = x / (1.0 + x - y) * supply if supply else 0.0
     oa_rev_a = max(sum_oa, vot)
-    # reference condition for the coil, as the example (AHU Summary B13/B14 take the first space type):
-    # the first supply room of the AHU in room-list order
     ref = supply_rooms[0] if supply_rooms else None
     room_t, room_h = (ref["room_t_c"], ref["room_h_kjkg"]) if ref else (0.0, 0.0)
     out_t, out_h = float(c["outdoordb"]), float(c["outdoorh"])
@@ -485,7 +565,7 @@ def ahu_totals(tag: str, rooms: List[Dict[str, Any]], c: Dict[str, Any]) -> Dict
                 "chw_lps": 1000.0 * total / (c["waterspecificheat"] * dtw) if dtw > 0 else None}
 
     by_method = {
-        "HIGHEST_FRACTION": {"oa_lps": oa_highest, **coil(oa_highest)},
+        "HIGHEST_FRACTION": {"oa_lps": oa_final, **coil(oa_final)},
         "MULTI_SPACE": {"oa_lps": oa_rev_a, **coil(oa_rev_a)},
     }
     chosen = by_method[c["oamethod"]]
@@ -498,8 +578,12 @@ def ahu_totals(tag: str, rooms: List[Dict[str, Any]], c: Dict[str, Any]) -> Dict
         "oa_method": c["oamethod"], "oa_lps": oa, "oa_fraction": oa / base if base else 0.0,
         "highest_standard_room": crit["number"] if crit else None, "highest_oa_fraction": frac,
         "oa_sum_rooms_lps": sum_oa, "oa_multispace_vot_lps": vot, "oa_rev_a_lps": oa_rev_a,
-        "oa_highest_fraction_lps": oa_highest,
-        "return_lps": return_air, "exhaust_lps": exhaust, "positive_air_lps": base - return_air - exhaust,
+        "oa_highest_fraction_lps": oa_highest, "oa_balance_lps": oa_balance, "spill_req_lps": spill_req, "oa_short_lps": oa_short,
+        "offset_net_lps": off_net,
+        "return_lps": return_air, "recirculated_lps": return_air, "exhaust_lps": exhaust,
+        "positive_air_lps": base - return_air - exhaust, "spill_lps": oa - exhaust - off_net,
+        "dirty_single_pass_rooms": [r["number"] for r in dirty], "dirty_single_pass_supply_lps": sum(r["supply_lps"] for r in dirty),
+        "dirty_single_pass_exhaust_lps": sum(r["exhaust_lps"] for r in dirty),
         "room_sensible_kw": sens, "room_latent_kw": lat, "room_total_kw": sens + lat,
         "fan_heat_kw": fan_kw, "fan_temp_rise_k": fan_kw * 1000.0 / (c["airsensible"] * supply_leak) if supply_leak else 0.0,
         "reference_room": ref["number"] if ref else None, "reference_t_c": room_t, "reference_h_kjkg": room_h,
@@ -574,6 +658,13 @@ def recompute(data: Dict[str, Any], oa_method: Optional[str] = None, rules: Opti
         res["pressure"] = pres.get(no)
         if pres.get(no) and pres[no]["status"] in ("FAIL", "VERIFY", "UNSOLVED"):
             flags.append({"type": "VERIFY", "ref": no, "text": f"pressure ratio {pres[no]['ratio']}: {pres[no]['status']}"})
+        if res.get("thermal_lo_lps") is not None and res["thermal_lo_lps"] > res["supply_lps"] + 1e-9:
+            flags.append({"type": "VERIFY", "ref": no, "text": "thermal airflow at the lower limit of the temperature range is above the final supply"})
+        lo, hi = res["design_range"]
+        if lo is not None or hi is not None:
+            lo_, hi_ = (hi if lo is None else lo), (lo if hi is None else hi)
+            if not (lo_ - 1e-9 <= res["room_t_c"] <= hi_ + 1e-9) and not res["fixed_by_specification"]:
+                flags.append({"type": "FAIL", "ref": no, "text": "design temperature is outside the criteria range"})
         if res["required_supply_temp_c"] is not None and res["required_supply_temp_c"] < c["supplytemp"] - 1e-9:
             flags.append({"type": "VERIFY", "ref": no, "text": "required supply temperature below design supply temperature"})
     by_ahu: Dict[str, List[Dict[str, Any]]] = {}
@@ -582,7 +673,8 @@ def recompute(data: Dict[str, Any], oa_method: Optional[str] = None, rules: Opti
             by_ahu.setdefault(str(res["ahu"]), []).append(res)
         else:
             flags.append({"type": "VERIFY", "ref": res["number"], "text": "room has no AHU"})
-    ahus = {tag: ahu_totals(tag, rooms, c) for tag, rooms in by_ahu.items()}
+    unit_by_tag = {str(u.get('tag')): u for u in (data.get('ahus') or [])}
+    ahus = {tag: ahu_totals(tag, rooms, c, unit_by_tag.get(tag)) for tag, rooms in by_ahu.items()}
     return {"department": data.get("department"), "oa_method": c["oamethod"],
             "rooms": list(results.values()) + list(exhaust_only.values()),
             "ahus": list(ahus.values()), "pressure_unresolved": unresolved, "flags": flags,

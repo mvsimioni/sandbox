@@ -869,6 +869,26 @@ PHASE_CHECKS: Dict[int, List[Check]] = {
 """Registry of checks per phase; phases absent here are not implemented."""
 
 
+def _register_late_phases() -> None:
+    """Phase 2 and phase 3 (D-056, D-069): thin wrappers in src/phase_checks.py."""
+    from . import phase_checks as pc
+    PHASE_CHECKS[2] = [
+        Check("P2-01", "Status lines: Calculation, Inputs complete, DRAFT label", pc.check_p2_status),
+        Check("P2-02", "Deliverable language scan: 0 hits", pc.check_p2_language),
+        Check("P2-03", "MOT unit control total (links, D22; no variant tag)", pc.check_p2_unit_control),
+    ]
+    PHASE_CHECKS[3] = [
+        Check("P3-01", "Decision trace: no FAIL, no NO TEST", pc.check_p3_trace),
+        Check("P3-02", "Link coverage reported", pc.check_p3_link_coverage),
+        Check("P3-03", "Seeded unit-tag errors are caught", pc.check_p3_seeded),
+        Check("P3-04", "Structural text lint (reduced)", pc.check_p3_lint),
+        Check("P3-05", "Outputs not older than inputs", pc.check_p3_fresh),
+    ]
+
+
+_register_late_phases()
+
+
 # --------------------------------------------------------------------------- #
 # Runner and report
 # --------------------------------------------------------------------------- #

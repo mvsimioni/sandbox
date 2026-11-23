@@ -207,7 +207,9 @@ def test_pressure_geometry_route_and_airflow_offset(reva_data):
     data["rooms"] = [room]
     out = th.recompute(data)["rooms"][0]
     assert out["pressure"]["surface_m2"] == pytest.approx(2 * 19.2 + 17.6 * 3.0)
-    assert out["exhaust_lps"] == pytest.approx(out["supply_lps"] + out["pressure"]["offset_needed_lps"])
+    # D-031/D-032: the total extract is supply + offset; the exhaust that leaves the zone is the larger of the required exhaust and the offset air, the rest returns
+    assert out["extract_lps"] == pytest.approx(out["supply_lps"] + out["pressure"]["offset_needed_lps"])
+    assert out["exhaust_lps"] == pytest.approx(max(out["exhaust_required_lps"], out["pressure"]["offset_needed_lps"]))
     assert out["offset_kind"] == "exhaust"
 
 
@@ -218,7 +220,7 @@ def test_positive_room_supply_exceeds_exhaust(reva_data):
                            doors=[{"id": "d1", "to": "CORRIDOR", "seal": "hinged"}])]
     out = th.recompute(data)["rooms"][0]
     assert out["offset_kind"] == "supply"
-    assert out["exhaust_lps"] == pytest.approx(max(out["supply_lps"] - out["offset_lps"], 0.0))
+    assert out["extract_lps"] == pytest.approx(out["supply_lps"] - out["offset_lps"])     # D-032: extract = supply - offset; exhaust = the required exhaust
     assert out["offset_lps"] > 0
 
 
@@ -243,7 +245,9 @@ def test_free_ensuite_takes_pressure_from_balance(reva_data):
     out = {r["number"]: r for r in th.recompute(data)["rooms"]}
     assert out["WC"]["pressure"]["mode"] == "free"
     assert out["WC"]["pressure"]["status"] == "FREE"
-    assert -15.0 < out["WC"]["pressure"]["pressure_pa"] < 0.0
+    # D-030 (no supply floor from exhaust): the WC has no supply, so its 20 L/s exhaust is made up by transfer air through the door
+    # and the WC sits below the isolation room (before D-030 the supply floor put it between -15 and 0 Pa).
+    assert out["WC"]["pressure"]["pressure_pa"] < -15.0
 
 
 def test_pressure_module_selftest_still_passes():

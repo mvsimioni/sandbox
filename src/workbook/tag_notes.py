@@ -27,7 +27,7 @@ def ucv_unit_note(tag: str) -> str:
         return ""
     return ("MOT NSC note on air-side schematic IP-BH-16057 (Corr 2, rev 0A) for the CT and UCV theatre (MSOT 05.02.10): an approximate supply airflow of 5,320 L/s shall be "
             "provided and achieved to the room to accommodate the future UCV, and the ductwork sizing shall account for the pressure loss. The schematic room table gives 3,600 L/s "
-            "(normal mode and single pass). This workbook uses the specified room table. Which airflow applies is open for Marcus (OI-R305-1).")
+            "(normal mode and single pass). The unit carries two duties: the day-1 duty (room table) and the future duty of 5,320 L/s to the room. The future duty governs the unit.")
 
 
 HYB_UNIT = re.compile(r"^AHU-B-07-05MOTHYB-02$")
@@ -38,7 +38,7 @@ def hyb_unit_note(tag: str) -> str:
     if not HYB_UNIT.match((tag or "").strip()):
         return ""
     return ("Conflict between documents: the MOT NSC schedule of modes (Appendix J, theatre MSOT 05.02.12) names this unit. The MOT NSC Overall AC Equipment Schedule lists only "
-            "AHU-B-07-05MOTHYB-01, and the zone schedule does not show this unit. No tender airflow is used. Which tag is correct is open for Marcus (OI-R114-1).")
+            "AHU-B-07-05MOTHYB-01, and the zone schedule does not show this unit. No tender airflow is used. The tag is a variant of AHU-B-07-05MOTHYB-01: it is listed and it is not used (D-059).")
 
 
 def unit_note(tag: str) -> str:

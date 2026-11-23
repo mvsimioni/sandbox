@@ -284,3 +284,29 @@ common_areas_lb3_to_l01: build                             # D-044
 zoning_d048: {root: dd_booklet_room_list, locate_via: [soa_rooms, dpa_rooms, room_polygons], zone_polygon: union_of_located_rooms, picture_registration: cross_check_only}
 # D-049: envelope = ETTV construction data per facade + openings per room from the building elevations (grid + level); WWR check per facade/storey, >10 % listed
 envelope_d049: {performance: ettv, openings: building_elevations, mapping: grid_model, wwr_check_tolerance_pct: 10, fallback: ettv_wwr_flagged}
+
+# D-043 / D-071 (round 5, job B): provisional equipment sensible gain by room use, W/m2. Red text (Assumption-Load), note in Remarks, flagged for vendor data.
+# The values are stated engineering allowances (order of magnitude of the ASHRAE health-care and laboratory guidance; no single printed ASHRAE value). Code A, to confirm.
+equipment_provisional_w_m2_table:
+  data_centre: {w_m2: 1000, pattern: "data cent|data hall|server|\\bcrac\\b|computer room|machine room"}
+  comms_lan: {w_m2: 200, pattern: "comms|\\blan\\b|telecom|network"}
+  ups_battery: {w_m2: 100, pattern: "\\bups\\b|batter"}
+  imaging: {w_m2: 100, pattern: "\\bmri\\b|\\bct\\b|x-?ray|imaging|angio|cath lab|mammogra|ultrasound|nuclear|pet\\b|fluoro"}
+  laboratory: {w_m2: 40, pattern: "laborator|\\blab\\b|pathology|haematology|microbiology|molecular"}
+  cssd: {w_m2: 80, pattern: "decontam|washer|steriliz|sterilis|autoclave|cssd|packing|reprocess"}
+  kitchen: {w_m2: 200, pattern: "kitchen|food prep|bakery|pastry|cook chill|cooking|dish ?wash|pot wash"}
+  automation: {w_m2: 40, pattern: "\\basrs\\b|automation|robot"}
+# D-066 / D-071: envelope by the ETTV component method with the simple facade method (room facade length x storey height x ETTV WWR per facade).
+envelope_round5:
+  method: ettv_components_simple_facade
+  storey_height_source: elevation_levels_consolidated
+  coefficients: {wall_w_m2_k: 12, glass_conduction_w_m2_k: 3.4, solar_w_m2: 211}
+  note: "opening-by-opening areas from the elevations are not used (D-071); WWR per facade from the ETTV report; flagged for human check"
+mot_round5:   # D-039, D-057, D-058
+  design_face_velocity_m_s: 0.35
+  capability_face_velocity_m_s: 0.40
+  future_ucv_room_supply_lps: {AHU-B-07-05MOTCT-01: 5320}
+reduction_round5:   # D-054, D-055
+  zone_cover: {min: 0.9, max: 1.1}
+  tender_diff_pct: {accept_up_to: 2, verify_up_to: 10}
+  placeholder_supply_lps: 9000

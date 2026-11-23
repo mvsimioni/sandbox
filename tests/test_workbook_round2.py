@@ -89,7 +89,7 @@ def test_master_counts_each_ahu_once(tmp_path):
     for num, name, supply, tender in (("30", "Pharmacy", 1000.0, 5000.0), ("41", "CSSD", 500.0, 5000.0)):
         (ind / f"d{num}.json").write_text(json.dumps(dict(department=dict(number=num, name=name), ahus=[
             dict(tag="AHU-SHARED-01", type="AHU", rooms=3, area_m2=100.0, room_supply_lps=supply, outdoor_air_lps=100.0, tender_lps=tender, tender_oa_lps=2000.0,
-                 zone_rooms=6, zone_area_m2=200.0, area_ok_m2=100.0, rooms_ok=3,
+                 zone_rooms=6, zone_area_m2=200.0, area_ok_m2=100.0, rooms_ok=3, second_rooms=6,
                  tender_source="Equipment Schedule Corr 5, page 7, AHU-SHARED-01", tender_source_id="EQS5-SHARED"),
             dict(tag=f"AHU-ONLY-{num}", type="AHU", rooms=1, area_m2=10.0, room_supply_lps=50.0, outdoor_air_lps=5.0, tender_lps=None)])))
     res = build_master(ind, tmp_path / "AHU_master_summary.xlsx", ROOT)
@@ -113,9 +113,9 @@ def test_master_marks_outdoor_air_above_tender_and_states_no_reduction(tmp_path)
     ind.mkdir()
     (ind / "d30.json").write_text(json.dumps(dict(department=dict(number="30", name="Pharmacy"), ahus=[
         dict(tag="AHU-A-01", type="AHU", rooms=3, area_m2=100.0, room_supply_lps=1000.0, outdoor_air_lps=400.0, frac=1.0, tender_lps=5000.0, tender_oa_lps=457.0,
-             zone_rooms=3, zone_area_m2=100.0, area_ok_m2=100.0, rooms_ok=3, tender_source="Equipment Schedule Corr 5, page 7, AHU-A-01", tender_source_id="EQS5-A"),
+             zone_rooms=3, zone_area_m2=100.0, area_ok_m2=100.0, rooms_ok=3, second_rooms=3, tender_source="Equipment Schedule Corr 5, page 7, AHU-A-01", tender_source_id="EQS5-A"),
         dict(tag="AHU-B-01", type="AHU", rooms=3, area_m2=100.0, room_supply_lps=1000.0, outdoor_air_lps=400.0, frac=0.2, tender_lps=5000.0, tender_oa_lps=457.0,
-             zone_rooms=3, zone_area_m2=100.0, area_ok_m2=100.0, rooms_ok=3, tender_source="Equipment Schedule Corr 5, page 7, AHU-B-01", tender_source_id="EQS5-B")])))
+             zone_rooms=3, zone_area_m2=100.0, area_ok_m2=100.0, rooms_ok=3, second_rooms=3, tender_source="Equipment Schedule Corr 5, page 7, AHU-B-01", tender_source_id="EQS5-B")])))
     build_master(ind, tmp_path / "m.xlsx", ROOT)
     rc = recalc(tmp_path / "m.xlsx", tmp_path / "rc")
     rows = _master_rows(rc)
@@ -150,15 +150,18 @@ def test_common_areas_assembly_uses_default_criteria_and_lists_units(tmp_path):
     # D-011: the default only for circulation, corridor and lobby spaces; a booklet row for a space whose room type a booklet prints; none otherwise
     circ = [r for r in d["rooms"] if r["criteria"] and r["criteria"]["criteria_row"] == "Circulation default (assumed)"]
     assert circ and all(r["criteria"]["source"] == "CIRC-DEFAULT" and r["criteria"]["min_total_ach"] == 6 and r["criteria"]["min_oa_ach"] == 2 for r in circ)
-    assert all(r["criteria"]["code"] == "A" for r in d["rooms"] if r["criteria"])
+    # D-036: a row from the HFDS is a document value (code D) with the HFDS table and page; every other row of the common areas is presumed (code A)
+    assert all(r["criteria"]["code"] == ("D" if str(r["criteria"]["criteria_row"]).startswith("HFDS") else "A") for r in d["rooms"] if r["criteria"])
     toilets = [r for r in d["rooms"] if r["name"] == "Toilet"]
     assert toilets and all(r["criteria"] and r["criteria"]["criteria_row"] == "Toilet" and r["criteria"].get("exhaust_ach") for r in toilets)
-    assert not any(r["criteria"] for r in d["rooms"] if r["name"] in ("ELEC", "Batt"))             # plant spaces: no default (R1-08)
-    assert all("Plant space" in r["gaps"]["criteria"] for r in d["rooms"] if r["name"] in ("ELEC", "Batt"))
+    # plant spaces take no circulation default (R1-08); D-036: they take the HFDS plant-room or LAN row, with the table and page cited
+    plant = [r for r in d["rooms"] if r["name"] in ("ELEC", "Batt")]
+    assert plant and all(r["criteria"] and r["criteria"]["criteria_row"].startswith("HFDS") and "page" in r["criteria"]["page"] for r in plant)
     assert sum(1 for r in d["rooms"] if r["criteria"]) < len(d["rooms"])
     assert any(f["type"] == "ASSUMPTION" and "default criteria apply to the" in f["text"] for f in d["flags"])
     assert any(f["type"] == "OUTDOOR AIR" for f in d["fans"])
-    assert all(r["storey"] in ("L02", "L03", "L04", "L05", "L06", "L07") for r in d["rooms"])
+    assert all(r["storey"] in ("LB3", "B3", "B2", "B1", "L01", "L02", "L03", "L04", "L05", "L06", "L07") for r in d["rooms"])      # D-044: plan rooms of LB3 to L01 added
+    assert s["plan_common_rooms"] > 100 and s["criteria_hfds"] > 50
     assert space_name("B | B | FFL: +23.000 | SFL: +22.900 | Corr") == "Corr"
     assert unit_tags("FCU-B-02-02COR-18 [ann 39, 0.0 pt]; OAF-B-02-02COR-03 [ann 79, 5 pt]") == ["FCU-B-02-02COR-18", "OAF-B-02-02COR-03"]
     d["rooms"] = d["rooms"][:6]

@@ -55,7 +55,8 @@ def test_rls_height_link_by_code_and_conflict():
             dict(room_code="OFF-X", ceiling_height_mm="2400"), dict(room_code="OFF-X", ceiling_height_mm="3000")]
     r = link_rls(dpa, rows)
     assert r["heights"]["R1"]["height_m"] == 2.7 and r["heights"]["R1"]["basis"] == "code and variant"
-    assert r["conflicts"][0]["number"] == "R2" and r["conflicts"][0]["values"] == [2.4, 3.0]
+    # D-035: where the sources give two heights for the room, the highest is used; it is no longer a conflict
+    assert r["heights"]["R2"]["height_m"] == 3.0 and not r["conflicts"]
     assert {u["number"] for u in r["unlinked_dpa"]} == {"R3", "R4"}
 
 
@@ -141,7 +142,7 @@ def test_rls_register_short_code_with_variant_column_and_conflict_flag():
     assert r["heights"]["1"]["height_m"] == 2.7 and r["heights"]["1"]["basis"] == "code and variant"
     assert "2" not in r["heights"] and "P1C7" in next(u for u in r["unlinked_dpa"] if u["number"] == "2")["reason"]
     assert r["heights"]["3"]["basis"] == "code (RLS not variant-specific)"
-    assert [c["number"] for c in r["conflicts"]] == ["5"]                       # flagged by the register: no height chosen
+    assert r["heights"]["5"]["height_m"] == 2.7 and not r["conflicts"]          # D-035: a flagged sheet takes the highest printed height, no conflict
     assert {u["number"] for u in r["unlinked_dpa"]} >= {"4", "6"}                # MTRM-M is not MTRM; a row with no height is not a link
 
 
@@ -188,10 +189,13 @@ def test_rls_variant_read_from_the_file_name_of_a_combined_sheet():
 
 def test_rls_single_height_conflict_flag_is_worded_as_a_flag():
     from src.workbook.assemble import height_conflict_text
-    r = link_rls([dict(number="1", name="a", code="243_DICL_P1C0")], [_rls("30", "243", "DICL", "", "2700", flag="several_heights_tie")], "30")
-    c = r["conflicts"][0]
-    assert c["values"] == [2.7] and c["flags"] == ["several heights tie"]
-    assert "more than one ceiling height" in height_conflict_text(c) and scan_strings({"t": [height_conflict_text(c)]}) == []
+    # D-035: the highest printed height is used where a sheet prints two (the register row prints CH=2700; CH=3000)
+    row = _rls("30", "243", "DICL", "", "2700", flag="several_heights_tie")
+    row["heights_mm_as_printed"] = "CH=2700; CH=3000"
+    r = link_rls([dict(number="1", name="a", code="243_DICL_P1C0")], [row], "30")
+    assert r["heights"]["1"]["height_m"] == 3.0 and r["heights"]["1"]["values"] == [2.7, 3.0] and not r["conflicts"]
+    c = dict(number="1", code="x", values=[2.7, 3.0], flags=["several heights tie"])
+    assert scan_strings({"t": [height_conflict_text(c)]}) == []
 
 
 def test_plan_rooms_without_area_take_part_in_the_zoning_links():

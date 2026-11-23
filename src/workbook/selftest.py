@@ -24,7 +24,7 @@ from .styles import CODE_ALLOWED
 ERROR_VALUES = {"#N/A", "#NAME?", "#VALUE!", "#REF!", "#DIV/0!", "#NUM!", "#NULL!", "Err:502", "Err:504", "Err:508", "Err:511",
                 "Err:522", "Err:523"}
 ALLOWED_FUNCS = {"SUM", "SUMIFS", "SUMIF", "SUMPRODUCT", "COUNTIF", "COUNTIFS", "COUNT", "COUNTA", "IF", "AND", "OR", "MAX", "MIN", "ABS", "SIGN",
-                 "SQRT", "ROUND", "ROUNDUP", "TEXT", "INDEX", "MATCH", "ISNUMBER", "ISTEXT", "NOT", "ISERROR", "SEARCH", "ROW", "ROWS", "COLUMN", "LEN", "_XLFN.MAXIFS"}
+                 "SQRT", "ROUND", "ROUNDUP", "TEXT", "INDEX", "MATCH", "ISNUMBER", "ISTEXT", "NOT", "ISERROR", "SEARCH", "ROW", "ROWS", "COLUMN", "LEN", "EXP", "_XLFN.MAXIFS"}
 ALLOWED_LITERALS = {"0", "1", "2"}
 TOL_PCT = 0.5
 
@@ -79,11 +79,19 @@ INTERNAL_PATTERNS = [r"config/", r"out/(qa|registers|zoning|loads|sidecar)", r"\
                      r"(?-i:\bconfig\b)(?!-)", r"\bcached\b", r"\bformulas? kept\b", r"\bre-?read\b", r"\bnot re-?read\b", r"\bjson\b", r"\bcsv\b",
                      r"\bparser\b", r"\b(workbook|document|file|report) generator\b", r"\bself-?test\b", r"\bsidecar\b", r"\bmarkdown\b", r"\bocr\b", r"\bregion growing\b",
                      r"\bscript(s|ed)?\b", r"\bhumani[sz]er\b", r"\bste-lint\b", r"\bworkflow\b", r"\bpipeline\b", r"\bregisters?\b",
-                     r"\bdata/source\b", r"\bscratch\b", r"\bregex\b", r"\balgorithm\b"]
+                     r"\bdata/source\b", r"\bscratch\b", r"\bregex\b", r"\balgorithm\b",
+                     # names of the people and the open items of the project process (item 8 of the fix pass)
+                     r"\bMarcus\b", r"\bOI-R?\d+-\d+\b", r"\bRound 5\b", r"\bladder\b"]
 
 
 # Room type names printed in the DD Booklet criteria and the DPA that contain a scanned word. They are source data and are not changed.
-SOURCE_NAME_PHRASES = ("Workflow Training",)
+SOURCE_NAME_PHRASES = ("Workflow Training", "Mechanical reverse-brief", "reverse-brief", "MOT NSC Register", "AHU Register")      # titles of source documents are data, not wording
+
+
+def _strip_names(text: str) -> str:
+    for ph in SOURCE_NAME_PHRASES:
+        text = re.sub(re.escape(ph), "", text, flags=re.I)
+    return text
 
 
 def language_scan(path: Path, root: Path = Path(".")) -> List[Tuple[str, str, str]]:
@@ -201,7 +209,7 @@ def method_column_scan(path: Path, root: Path = Path(".")) -> Tuple[int, List[Tu
             hits.append((f"G{r}", "empty method"))
             continue
         for name, rx in pats:
-            if rx.search(v):
+            if rx.search(_strip_names(v)):
                 hits.append((f"{ws.cell(r, col).coordinate}", f"{name}: {v[:80]}"))
                 break
     return n, hits
@@ -214,6 +222,7 @@ def scan_strings(obj: Any, root: Path = Path("."), where: str = "") -> List[Tupl
 
     def walk(o: Any, path: str) -> None:
         if isinstance(o, str):
+            o = _strip_names(o)
             for name, rx in pats:
                 m = rx.search(o)
                 if m:
@@ -255,7 +264,7 @@ def generator_text_scan(root: Path = Path(".")) -> Tuple[int, List[Tuple[str, in
                     continue
                 n += 1
                 for name, rx in pats:
-                    if rx.search(v):
+                    if rx.search(_strip_names(v)):
                         hits.append((f.name, node.lineno, f"{name}: {v[:80]}"))
                         break
     return n, hits
@@ -564,8 +573,12 @@ def d013_check(base: Dict[str, Any], work: Path) -> Dict[str, Any]:
     if ahu is None:
         ahu = dict(tag=tag, type="AHU")
         d.setdefault("ahus", []).append(ahu)
+    rooms_of = [r for r in d["rooms"] if r.get("ahu") == tag]
+    sup_of = [r for r in rooms_of if "EXHAUST" not in str(r.get("system_type") or "").upper()]       # the exhaust-only room has no supply and is not counted
+    n_of, area_of = len(sup_of), sum(float(r.get("soa_area_m2") or 0.0) for r in sup_of)
     ahu.update(sched_supply_lps=3500.0, sched_code="D", sched_source="TND-1", tender_source_text="tender equipment schedule Corr 5, test row",
-               zone_rooms=1, zone_area_m2=1.0, zone_code="D", zone_source="TND-1")     # a zone that the counted rooms cover: the room list of the unit is complete (D-027)
+               zone_rooms=n_of, zone_area_m2=area_of, zone_code="D", zone_source="TND-1",
+               second_rooms=len(rooms_of), second_source="TND-1")     # a zone that the counted rooms cover (0.9 to 1.1 of the zoned area, D-054) and a second room list that agrees by count: the room list is complete
     d["fans"] = [dict(tag="RAF-T1", type="RETURN", serves=tag, scheduled_lps=3000.0, code="D", source="TND-1",
                       tender_source_text="tender equipment schedule Corr 5, test fan row")]
     r0 = d["rooms"][0]

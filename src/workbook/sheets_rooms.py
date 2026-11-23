@@ -142,6 +142,8 @@ def write_room_information(ctx: Ctx) -> None:
             style = OCC_NAME if (k == "dens" and density_default and not blank(v)) else None
             if k in ("light", "power") and load_ashrae and not blank(v):
                 style = LOAD_NAME
+            if k in ("eqs", "eql") and r.get("equip_basis") == "PROVISIONAL" and not blank(v):
+                style = LOAD_NAME                    # provisional equipment gain: red text, note in Remarks, vendor data to follow
             _val(ctx, ws, g(k), v, code_s, fmt=fmt, kind=kind, cref=g(k + "_c"), sref=g(k + "_s"), src=src_s,
                  label=f, room=n, style=style)
             _prov_cells(ctx, ws, g(k + "_c"), g(k + "_s"), code_s, src_s, not blank(v))
@@ -235,22 +237,34 @@ def write_criteria(ctx: Ctx) -> None:
                   ("regime", "pressure_regime", "text", None), ("pa_bk", "pressure_pa_booklet", "num", "d1"),
                   ("pa_td", "pressure_pa_tender", "num", "d1"), ("pa_wd", "pressure_pa_working", "num", "d1"),
                   ("cls", "air_class", "text", None), ("filter", "filter", "text", None), ("single", "single_pass", "text", None),
+                  ("tset", "temp_setpoint_c", "num", "d1"),
                   ("after", "afterhours", "text", None)]
         for k, f, kind, fmt in fields:
             _val(ctx, ws, g(k), c.get(f), code, fmt=fmt, kind=kind, cref=g("code"), sref=g("src"), src=src,
                  label=f"criteria {f}", room=r["number"], style=PRES_NAME if c.get("presumed") else None)
         _prov_cells(ctx, ws, g("code"), g("src"), code, src, has)
+        spc = c.get("sp_class") or None
+        _val(ctx, ws, g("spc"), spc, "A", kind="text", cref=g("spc_c"), sref=g("spc_s"), src="GEN-CLASS", label="single-pass class", room=r["number"])
+        _prov_cells(ctx, ws, g("spc_c"), g("spc_s"), "A", "GEN-CLASS", spc is not None)
         calc = {
             "pa": f'=IF({g("pa_td")}<>"",{g("pa_td")},IF({g("pa_wd")}<>"",{g("pa_wd")},IF({g("pa_bk")}<>"",{g("pa_bk")},"")))',
             "pdiff": (f'=IF(AND(COUNT({g("pa_bk")},{g("pa_td")},{g("pa_wd")})>1,MAX({g("pa_bk")},{g("pa_td")},{g("pa_wd")})'
                       f'<>MIN({g("pa_bk")},{g("pa_td")},{g("pa_wd")})),"YES","")'),
             "press": f'=IF({g("regime")}="POSITIVE","P",IF({g("regime")}="NEGATIVE","N","-"))',
+            # design condition of the room from the printed range (code C): the reference value limited to the range; a printed set point wins
+            "td": (f'=IF({g("tset")}<>"",{g("tset")},IF(AND({g("tmin")}="",{g("tmax")}=""),"",'
+                   f'MIN(MAX(DesignTRef,IF({g("tmin")}="",{g("tmax")},{g("tmin")})),IF({g("tmax")}="",{g("tmin")},{g("tmax")}))))'),
+            "rhd": f'=IF({g("td")}="","",MIN(DesignRHMax,IF({g("rh")}="",DesignRHMax,{g("rh")}/PsyPct)))',
+            "pv": f'=IF({g("td")}="","",{g("rhd")}*PsyA*EXP(PsyB*{g("td")}/(PsyC+{g("td")})))',
+            "hd": f'=IF({g("td")}="","",PsyCpA*{g("td")}+PsyEps*{g("pv")}/(PsyP-{g("pv")})*(PsyHfg+PsyCpV*{g("td")}))',
+            "trange": (f'=IF({g("td")}="","",IF(AND({g("tset")}="",OR({g("tmin")}<>"",{g("tmax")}<>""),'
+                       f'OR({g("td")}<IF({g("tmin")}="",{g("tmax")},{g("tmin")}),{g("td")}>IF({g("tmax")}="",{g("tmin")},{g("tmax")}))),"FAIL","PASS"))'),
             "clin": (f'=IF(OR(ISNUMBER({g("pa")}),{g("regime")}="NEGATIVE",{g("single")}="Y",ISNUMBER(SEARCH("HEPA",{g("filter")})),'
                      f'{g("cls")}="1"),"YES","NO")'),
         }
         for k, f in calc.items():
-            cc = put(ws, g(k), f, "Calc", "d1" if k == "pa" else None)
-            if k != "pa":
+            cc = put(ws, g(k), f, "Calc", "d1" if k in ("pa", "td", "hd", "pv") else ("d2" if k == "rhd" else None))
+            if k not in ("pa", "td", "hd", "pv", "rhd"):
                 cc.alignment = Alignment(horizontal="center")
         put(ws, g("remark"), c.get("remark"), "Note")
     last = L.last
@@ -324,7 +338,8 @@ ENG_F: Dict[str, str] = {
     "sens_wm2": "=IF({area}>0,{sens}/{area},0)",
     "lat": "=({lat_inf_w}+{lat_eq}+{lat_ppl})*(1+SafetyFactor)", "lat_wm2": "=IF({area}>0,{lat}/{area},0)",
     "tot": "={sens}+{lat}", "tot_wm2": "=IF({area}>0,{tot}/{area},0)",
-    "troom": "=INDEX(SpaceTypeT,MATCH({sptype},SpaceTypeName,0))", "hroom": "=INDEX(SpaceTypeH,MATCH({sptype},SpaceTypeName,0))",
+    "troom": '=IF({CR.td}<>"",{CR.td},INDEX(SpaceTypeT,MATCH({sptype},SpaceTypeName,0)))',
+    "hroom": '=IF({CR.td}<>"",{CR.hd},INDEX(SpaceTypeH,MATCH({sptype},SpaceTypeName,0)))',
     "tsup": "=SupplyTemp",
     "th_lps": "={sens}/(AirSensibleFactor*({troom}-{tsup}))",
     "fix": '=IF({CR.code}="S",1,0)', "pm": "={AF.pm}",
@@ -408,7 +423,12 @@ AF_F: Dict[str, str] = {
     "single": "={CR.single}",
     "exhaust": '=IF({single}="Y",{extract},IF({kind}="EXHAUST",MAX({ex_min},{off}),{ex_min}))',
     "ret": "={extract}-{exhaust}", "oa_air": "={ENG.oa}",
-    "oa": '=IF({supply}>0,MIN({supply},IF(AND({fix}=1,{oa_spec}>0),{oa_spec},MAX({oa_air},{exhaust}+IF({kind}="SUPPLY",{off},0)))),0)',
+    "spc": "={CR.spc}",
+    # a clean single-pass room is 100 % outdoor air; any other room carries its own minimum outdoor air. The exhaust and the offset air are made up at the AHU.
+    "oa": '=IF({supply}>0,MIN({supply},IF(AND({fix}=1,{oa_spec}>0),{oa_spec},IF({spc}="CLEAN",{supply},{oa_air}))),0)',
+    "th_lo": '=IF(AND({CR.td}<>"",{CR.tmin}<>""),IF({CR.tmin}>SupplyTemp,{sens}/(AirSensibleFactor*({CR.tmin}-SupplyTemp)),""),"")',
+    "lo_chk": '=IF(ISNUMBER({th_lo}),IF({th_lo}>{supply}+OffsetEps,"VERIFY",""),"")',
+    "env_chk": '=IF({ENG.nenv}>0,IF(OR({gov}="THERMAL",{th}>=(1-EnvCheckShare)*{ac}),"VERIFY",""),"")',
     "frac": "=IF({supply}>0,{oa}/{supply},0)",
     "minflow": "=MIN({supply},MAX({ac},{oa},{pm}))",
     "ok": '=IF({supply}>=MAX({th},{ac},{pm}),"PASS",IF({fix}=1,"SPECIFIED","FAIL"))',
@@ -419,8 +439,8 @@ AF_F: Dict[str, str] = {
 }
 AF_STYLE = {"no": "LinkTag", "name": "Link", "storey": "Link", "ahu": "LinkTag", "sys": "Link", "terminal": "LinkTag",
             "exfan": "LinkTag", "clin": "Calc", "systype": "Link", "single": "Link", "ok": "Check", "gov": "Calc",
-            "supply": "Result", "oa": "Calc", "off_chk": "Check"}
-AF_LINK = {"fix", "oa_spec", "area", "vol", "sens", "lat", "troom", "hroom", "ac", "th", "ex_min", "supply", "oa_air"}
+            "supply": "Result", "oa": "Calc", "off_chk": "Check", "spc": "Link", "lo_chk": "Check", "env_chk": "Check"}
+AF_LINK = {"fix", "oa_spec", "area", "vol", "sens", "lat", "troom", "hroom", "ac", "th", "ex_min", "supply", "oa_air", "spc"}
 
 
 def write_airflow(ctx: Ctx) -> None:
@@ -445,7 +465,7 @@ def write_airflow(ctx: Ctx) -> None:
             f = re.sub(r"\{ENG\.(\w+)\}", lambda m: eng(m.group(1)), f)
             f = expand(ctx, f, L, i, {"RI": i, "CR": i})
             st = AF_STYLE.get(k, "Link" if k in AF_LINK else "Calc")
-            fmt = None if k in ("no", "name", "storey", "ahu", "sys", "gov", "single", "ok", "terminal", "exfan", "clin", "systype", "off_chk") \
+            fmt = None if k in ("no", "name", "storey", "ahu", "sys", "gov", "single", "ok", "terminal", "exfan", "clin", "systype", "off_chk", "spc", "lo_chk", "env_chk") \
                 else ("pct1" if k == "frac" else ("d0" if k == "fix" else "d1"))
             c = put(ws, g(k), f, st, fmt, text=fmt is None and st != "Check")
             if fmt is None:
