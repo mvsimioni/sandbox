@@ -309,6 +309,29 @@ def verify_zoning_pdf(out_pdf: Path, src_pdf: Path, page_index: int, expect_tags
 # Multi-page writer (all storeys in one PDF)
 # --------------------------------------------------------------------------- #
 INDEX_PAGE_SIZE = (842.0, 1191.0)    # A3 portrait, pt
+SANS_TTF = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+SANS_BOLD_TTF = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
+MONO_TTF = "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf"
+
+
+def fitz_len(txt: str, size: float = 8.5) -> float:
+    from PIL import ImageFont
+    return ImageFont.truetype(SANS_TTF, 100).getlength(txt) * size / 100.0
+
+
+def _fmt_area(v: float) -> str:
+    return "{:,.1f}".format(v)
+
+
+def _unit_type(tag: str) -> str:
+    import re
+    m = re.match(r"^(AHU|FCU|CRAC|PAHU)-", tag)
+    return m.group(1) if m else tag
+
+
+def _blend(hex_: str, op: float = FILL_OPACITY) -> Tuple[float, float, float]:
+    r, g, b = _hex(hex_)
+    return tuple(op * c + (1.0 - op) for c in (r, g, b))
 
 
 def _zone_contents_multi(z: zn.Zone, st: dict, key: str, label: str) -> str:
@@ -321,9 +344,10 @@ def _zone_contents_multi(z: zn.Zone, st: dict, key: str, label: str) -> str:
         "Area: %.1f m2 (sum of %d rooms); area drawn on this sheet %.1f m2" % (st["area_m2"], st["n_rooms"], st["poly_m2"]),
         "Room count: %d" % st["n_rooms"],
         "Lowest room confidence: %.2f" % st.get("min_conf", 0.0),
+        ("Tender airflow: %s" % getattr(z, "tender_text", "")) if getattr(z, "tender_text", "") else "",
         "Sources: %s" % " | ".join(z.refs),
     ]
-    return "\n".join(lines)
+    return "\n".join(l for l in lines if l)
 
 
 def _add_poly_annot(page, doc, poly: Polygon, name: str, subject: str, contents: str, oc: int, fill_hex: str) -> int:
@@ -334,7 +358,7 @@ def _add_poly_annot(page, doc, poly: Polygon, name: str, subject: str, contents:
 
 
 def write_multi_zoning_pdf(src_pdf: Path, specs: Sequence[dict], out_pdf: Path, title: str,
-                           legend_cols: int = 3, col_w: float = 640.0) -> dict:
+                           legend_cols: int = 3, col_w: float = 760.0) -> dict:
     """Write one PDF: an index page, then one page per storey, each a copy of its source page (content stream untouched).
 
     ``specs``: per storey ``key``, ``label``, ``drawing``, ``page_index`` (0-based page of ``src_pdf``), ``zones`` (``zones.Zone``; ``draw_polygons_pv`` are
@@ -376,31 +400,41 @@ def write_multi_zoning_pdf(src_pdf: Path, specs: Sequence[dict], out_pdf: Path, 
                 raise ValueError("AHU %s has two colours across pages" % z.tag)
             st = stats.get(z.key, {"area_m2": 0.0, "poly_m2": 0.0, "n_rooms": 0})
             oc = ocg_for(z.tag)
-            for k, poly in enumerate(z.drawn()):
+            drawn = list(z.drawn())
+            for k, poly in enumerate(drawn):
                 _add_poly_annot(page, doc, poly, "zone-%s-%s-%d" % (sp["key"], z.key, k), z.tag, _zone_contents_multi(z, st, sp["key"], sp["label"]), oc, z.fill_hex)
                 pm["zones"] += 1
-            index_rows.append((sp["key"], z.tag, z.kind, st["n_rooms"], st["area_m2"]))
+            if drawn:      # tag label on the largest part of the zone
+                big = max(drawn, key=lambda q: q.area)
+                px_, py_ = big.representative_point().coords[0]
+                fs_ = 13.0
+                w_, h_ = len(z.tag) * fs_ * 0.60 + 10.0, fs_ * 1.6
+                lab = page.add_freetext_annot(_unrot_rect((px_ - w_ / 2, py_ - h_ / 2, px_ + w_ / 2, py_ + h_ / 2), page), z.tag, fontsize=fs_, fontname="hebo",
+                                              text_color=(0, 0, 0), fill_color=(1, 1, 1), align=1, rotate=90)
+                _style_annot(doc, lab, "label-%s-%s" % (sp["key"], z.key), z.tag, z.tag, oc, None, (0, 0, 0), 0.85, None)
+            index_rows.append((sp["key"], z.tag, z.kind, st["n_rooms"], st["area_m2"], z.departments, z.fill_hex, sp.get("airflow", {}).get(z.tag)))
         expected_tags[n + 1] = [z.tag for z in zones]
         # legend
-        entries = list(zones)
+        entries = sorted(zones, key=lambda q: q.tag)
         rows = math.ceil(len(entries) / legend_cols) if entries else 0
         ncol = min(legend_cols, max(1, len(entries)))
         row_h, pad = 24.0, 14.0
-        box_w, box_h = ncol * col_w + 2 * pad, rows * row_h + 2 * pad + 36 + 30
+        undrawn = sp.get("undrawn", [])
+        box_w, box_h = ncol * col_w + 2 * pad, rows * row_h + 2 * pad + 36 + 30 + (len(undrawn) * row_h + 8 if undrawn else 0)
         W, H = page.rect.width, page.rect.height
-        found = find_blank_box(page, (box_w, box_h), (700.0, 110.0, max(W - 300, 1500.0), min(H * 0.5, 900.0)))
+        found = find_blank_box(page, (box_w, box_h), (60.0, 60.0, max(W - 60.0, box_w + 60.0), max(H - 60.0, box_h + 60.0)), step=60.0)
         if found is None:        # page too small for the search window: top-left corner, clipped to the page
             found = ((20.0, 20.0, min(20.0 + box_w, W - 20.0), min(20.0 + box_h, H - 20.0)), float("nan"))
         (bx0, by0, bx1, by1), ink = found
         pm["legend_box_pv"] = [bx0, by0, bx1, by1]
         pm["legend_box_ink_fraction"] = ink
         back = page.add_rect_annot(_unrot_rect((bx0, by0, bx1, by1), page))
-        _style_annot(doc, back, "legend-back-%s" % sp["key"], "Legend", "%s\n%s" % (sp["legend_title"], sp["sheet_note"]), legend_oc, "#FFFFFF", (0.3, 0.3, 0.3), 1.0, 1.0)
+        _style_annot(doc, back, "legend-back-%s" % sp["key"], "Legend", "%s\n%s" % (sp["legend_title"], sp["sheet_note"]), legend_oc, "#FFFFFF", (0.3, 0.3, 0.3), 0.6, 0.6)
         tt = page.add_freetext_annot(_unrot_rect((bx0 + pad, by0 + pad / 2, bx1 - pad, by0 + pad / 2 + 26), page), sp["legend_title"][:150],
                                      fontsize=14, fontname="hebo", text_color=(0, 0, 0), rotate=90)
         _style_annot(doc, tt, "legend-title-%s" % sp["key"], "Legend title", sp["legend_title"], legend_oc, None, (0, 0, 0), 1.0, None)
         un = sp.get("unclassified", {})
-        note = "%d of %d rooms have no information (%.0f m2) and are not filled. Sheet %s." % (un.get("unclassified_rooms", 0), un.get("n_rooms", 0), un.get("unclassified_area_m2", 0.0), sp["drawing"])
+        note = "%d of %d rooms have no information (%s m²) and are not filled. Sheet %s." % (un.get("unclassified_rooms", 0), un.get("n_rooms", 0), "{:,.0f}".format(un.get("unclassified_area_m2", 0.0)), sp["drawing"])
         nt = page.add_freetext_annot(_unrot_rect((bx0 + pad, by0 + pad / 2 + 28, bx1 - pad, by0 + pad / 2 + 52), page), note, fontsize=11, fontname="helv",
                                      text_color=(0, 0, 0), rotate=90)
         _style_annot(doc, nt, "legend-note-%s" % sp["key"], "Legend note", note, legend_oc, None, (0, 0, 0), 1.0, None)
@@ -411,9 +445,28 @@ def write_multi_zoning_pdf(src_pdf: Path, specs: Sequence[dict], out_pdf: Path, 
             st = stats.get(z.key, {"area_m2": 0.0, "poly_m2": 0.0, "n_rooms": 0})
             sw = page.add_polygon_annot(_unrot_pts([(x, y + 2), (x + 30, y + 2), (x + 30, y + row_h - 4), (x, y + row_h - 4)], page))
             _style_annot(doc, sw, "legend-swatch-%s-%d" % (sp["key"], i), z.tag, "Legend swatch for %s" % z.tag, legend_oc, z.fill_hex, _darker(z.fill_hex), FILL_OPACITY, FILL_OPACITY)
-            label = "%s | %s | %.0f m2 (%d rooms)" % (z.tag, z.departments if len(z.departments) < 34 else z.departments[:31] + "...", st["area_m2"], st["n_rooms"])
+            ol = page.add_rect_annot(_unrot_rect((x, y + 2, x + 30, y + row_h - 4), page))      # opaque dark outline: the swatch itself is at the fill opacity
+            ol.set_colors(stroke=_darker(z.fill_hex, 0.4), fill=None)
+            ol.set_border(width=1.6)
+            ol.set_opacity(1.0)
+            ol.set_info(title=AUTHOR, subject=z.tag, content="Legend swatch outline for %s" % z.tag)
+            ol.set_flags(4)
+            ol.update()
+            ol.set_oc(legend_oc)
+            doc.xref_set_key(ol.xref, "CA", "1.00")
+            doc.xref_set_key(ol.xref, "NM", "(legend-outline-%s-%d)" % (sp["key"], i))
+            air = sp.get("airflow", {}).get(z.tag)
+            depts = z.departments if len(z.departments) <= 52 else z.departments[:51].rstrip() + "…"
+            label = "%s | %s | %s m² (%d rooms)%s" % (z.tag, depts, "{:,.0f}".format(st["area_m2"]), st["n_rooms"],
+                                                   (" | tender %s L/s" % "{:,.0f}".format(air)) if air else "")
             ft = page.add_freetext_annot(_unrot_rect((x + 36, y, x + col_w - 6, y + row_h), page), label, fontsize=10.5, fontname="helv", text_color=(0, 0, 0), rotate=90)
             _style_annot(doc, ft, "legend-text-%s-%d" % (sp["key"], i), z.tag, label, legend_oc, None, (0, 0, 0), 1.0, None)
+        for j, ud in enumerate(undrawn):       # units that have rooms on this storey and no outline: listed, with the reason
+            y = by0 + 66 + pad + rows * row_h + 8 + j * row_h
+            label = "NOT DRAWN | %s | %s | %d room tag(s) | %s%s" % (ud["tag"], ud["departments"][:40], ud["n_rooms"], ud["reason"],
+                                                                      (" | tender %s L/s" % "{:,.0f}".format(ud["airflow"])) if ud.get("airflow") else "")
+            ft = page.add_freetext_annot(_unrot_rect((bx0 + pad, y, bx1 - pad, y + row_h), page), label, fontsize=10.5, fontname="helv", text_color=(0, 0, 0), rotate=90)
+            _style_annot(doc, ft, "legend-nodraw-%s-%d" % (sp["key"], j), ud["tag"], label, legend_oc, None, (0, 0, 0), 1.0, None)
         # room outlines
         for r in sp["rooms"]:
             poly: Polygon = r["polygon"]
@@ -434,36 +487,117 @@ def write_multi_zoning_pdf(src_pdf: Path, specs: Sequence[dict], out_pdf: Path, 
             doc.xref_set_key(a.xref, "NM", "(%s)" % ("room-" + r["room_id"]))
             pm["rooms"] += 1
         manifest_pages.append(pm)
-    # ---- index pages (first): AHUs by storey ------------------------------------------------------------
-    def index_lines(first_pdf_page: Dict[str, int]):
-        L = [(title, 16, "hebo", 0, 20), ("Index of AHU zones by storey. Each zone is a filled shape (opacity 0.35) on a layer with the name of its AHU or class.", 8, "helv", 0, 14),
-             ("The storey pages are the tender plans, unchanged. Room outlines are on the layer 'Rooms (measured)' (off).", 8, "helv", 0, 22)]
+    # ---- index pages (first): AHUs by storey, as a table -----------------------------------------------
+    import datetime as _dt
+    from ..workbook import conf as _conf
+    rev_txt = "Rev A, %s" % _conf.revision_date()
+    PW, PH = INDEX_PAGE_SIZE
+    M = 40.0
+    X = dict(swatch=M, tag=M + 26, typ=M + 250, rooms=M + 345, area=M + 435, air=M + 525, dept=M + 535)
+    ROW = 14.0
+
+    def lay_out(first_pdf_page: Dict[str, int]):
+        items = []      # (kind, payload)
         for sp in specs:
             rows = [r for r in index_rows if r[0] == sp["key"]]
             un = sp.get("unclassified", {})
-            L.append(("%s  %s  (%s)  PDF page %d" % (sp["key"], sp["label"], sp["drawing"], first_pdf_page[sp["key"]]), 10, "hebo", 0, 13))
+            items.append(("storey", "%s  %s  (%s)  PDF page %d" % (sp["key"], sp["label"], sp["drawing"], first_pdf_page[sp["key"]])))
+            items.append(("head", None))
             if not rows:
-                L.append(("no zones (no room has a class)", 8, "helv", 16, 12))
-            for _, tag, kind, nr, area in rows:
-                L.append(("%-46s %-6s rooms %4d   %9.1f m2" % (tag, kind, nr, area), 8, "cour", 16, 12))
-            L.append(("no information (not filled): %d rooms, %.1f m2" % (un.get("unclassified_rooms", 0), un.get("unclassified_area_m2", 0.0)), 8, "helv", 16, 20))
-        return L
-
-    def paginate(L):
-        pages, cur, y = [], [], 50.0
-        for ln in L:
-            if y + ln[4] > INDEX_PAGE_SIZE[1] - 40:
-                pages.append(cur); cur, y = [], 50.0
-            cur.append((y, ln)); y += ln[4]
+                items.append(("note", "No zones: no room has a class."))
+            for n_, (_, tag, kind, nr, area, depts, colour, air) in enumerate(sorted(rows, key=lambda r: r[1])):
+                items.append(("row", (tag, kind, nr, area, depts, colour, air, n_)))
+            for ud in sp.get("undrawn", []):
+                items.append(("undrawn", (ud["tag"], ud["n_rooms"], ud["departments"], ud["reason"], ud.get("airflow"))))
+            items.append(("note", "No information (not filled): %d rooms, %s m²" % (un.get("unclassified_rooms", 0), _fmt_area(un.get("unclassified_area_m2", 0.0)))))
+        pages, cur, y = [], [], 96.0
+        for kind, pl in items:
+            h = {"storey": 22.0, "head": 18.0, "note": 16.0, "undrawn": ROW * 2 + 2}.get(kind, ROW + (ROW * 0.0))
+            if kind == "row":
+                lines_ = 2 if len(pl[4]) > 70 else 1
+                h = ROW * lines_ + 2
+            if y + h > PH - 50:
+                pages.append(cur)
+                cur, y = [], 96.0
+                if kind in ("row", "note"):          # repeat the column heads on a new page
+                    cur.append((y, "head", None, 18.0))
+                    y += 18.0
+            cur.append((y, kind, pl, h))
+            y += h
         pages.append(cur)
         return pages
 
-    n_index = len(paginate(index_lines({sp["key"]: 1 for sp in specs})))
-    pages_idx = paginate(index_lines({sp["key"]: n_index + i + 1 for i, sp in enumerate(specs)}))
+    n_index = len(lay_out({sp["key"]: 1 for sp in specs}))
+    pages_idx = lay_out({sp["key"]: n_index + i + 1 for i, sp in enumerate(specs)})
     for k, content in enumerate(pages_idx):
-        ip = doc.new_page(pno=k, width=INDEX_PAGE_SIZE[0], height=INDEX_PAGE_SIZE[1])
-        for y, (text, size, font, indent, _) in content:
-            ip.insert_text((40 + indent, y), text, fontsize=size, fontname=font)
+        ip = doc.new_page(pno=k, width=PW, height=PH)
+        ip.insert_font(fontname="lsans", fontfile=SANS_TTF)
+        ip.insert_font(fontname="lsansb", fontfile=SANS_BOLD_TTF)
+        ip.insert_font(fontname="lmono", fontfile=MONO_TTF)
+        ip.insert_text((M, 50), title, fontsize=18, fontname="lsansb")
+        ip.insert_text((M, 68), "Index of AHU zones by storey. Each zone is a filled shape on a layer with the name of its AHU or class.", fontsize=9, fontname="lsans")
+        ip.insert_text((M, 80), "The storey pages are the tender plans, unchanged. Room outlines are on the layer 'Rooms (measured)' (off).", fontsize=9, fontname="lsans")
+        tb = pymupdf.Rect(PW - M - 150, 34, PW - M, 82)                      # title block: revision and sheet
+        ip.draw_rect(tb, color=(0.3, 0.3, 0.3), width=0.6)
+        ip.insert_text((tb.x0 + 6, tb.y0 + 14), "Revision", fontsize=7, fontname="lsans", color=(0.35, 0.35, 0.35))
+        ip.insert_text((tb.x0 + 6, tb.y0 + 28), rev_txt, fontsize=10, fontname="lsansb")
+        ip.insert_text((tb.x0 + 6, tb.y0 + 41), "Index page %d of %d" % (k + 1, len(pages_idx)), fontsize=8, fontname="lsans")
+        ip.draw_line((M, 88), (PW - M, 88), color=(0, 0, 0), width=0.8)
+        for y, kind, pl, h in content:
+            if kind == "storey":
+                ip.draw_rect(pymupdf.Rect(M, y, PW - M, y + h - 2), color=None, fill=(0.94, 0.95, 0.96))
+                ip.insert_text((M + 4, y + 14), pl, fontsize=10.5, fontname="lsansb")
+            elif kind == "head":
+                for key_, txt, right in (("tag", "Tag", False), ("typ", "Type", False), ("rooms", "Rooms", True), ("area", "Area (m²)", True), ("air", "Tender (L/s)", True),
+                                         ("dept", "Departments", False)):
+                    xx = X[key_]
+                    if right:
+                        xx = xx - pymupdf.get_text_length(txt, fontname="lsansb", fontsize=8.5) if False else xx
+                    ip.insert_text((xx if not right else X[key_] - fitz_len(txt), y + 12), txt, fontsize=8.5, fontname="lsansb")
+                ip.draw_line((M, y + 16), (PW - M, y + 16), color=(0.3, 0.3, 0.3), width=0.5)
+            elif kind == "note":
+                ip.insert_text((M + 4, y + 11), pl, fontsize=8.5, fontname="lsans", color=(0.3, 0.3, 0.3))
+            elif kind == "undrawn":
+                tag, nr, depts, reason, air_ud = pl
+                ip.draw_rect(pymupdf.Rect(X["swatch"] + 2, y + 2, X["swatch"] + 20, y + h - 3), color=(0.4, 0.4, 0.4), fill=None, width=0.9, dashes="[2 2] 0")
+                ip.insert_text((X["tag"], y + 10), tag, fontsize=8.5, fontname="lmono")
+                ip.insert_text((X["typ"], y + 10), _unit_type(tag), fontsize=8.5, fontname="lsans")
+                ip.insert_text((X["rooms"] - fitz_len(str(nr)), y + 10), str(nr), fontsize=8.5, fontname="lsans")
+                ip.insert_text((X["area"] - fitz_len("not drawn"), y + 10), "not drawn", fontsize=8.5, fontname="lsans")
+                if air_ud:
+                    txt_ = "{:,.0f}".format(air_ud)
+                    ip.insert_text((X["air"] - fitz_len(txt_), y + 10), txt_, fontsize=8.5, fontname="lsans")
+                ip.insert_text((X["dept"], y + 10), (depts if len(depts) <= 68 else depts[:67] + "…"), fontsize=8, fontname="lsans")
+                ip.insert_text((X["dept"], y + 10 + ROW), "Not drawn. " + reason, fontsize=8, fontname="lsans", color=(0.3, 0.3, 0.3))
+                ip.draw_line((M, y + h), (PW - M, y + h), color=(0.8, 0.8, 0.8), width=0.3)
+            else:
+                tag, kd, nr, area, depts, colour, air, n_ = pl
+                if n_ % 2:
+                    ip.draw_rect(pymupdf.Rect(M, y, PW - M, y + h), color=None, fill=(0.975, 0.975, 0.975))
+                ip.draw_rect(pymupdf.Rect(X["swatch"] + 2, y + 2, X["swatch"] + 20, y + h - 3), color=_darker(colour, 0.4), fill=_blend(colour), width=0.9)
+                ip.insert_text((X["tag"], y + 10), tag, fontsize=8.5, fontname="lmono")
+                ip.insert_text((X["typ"], y + 10), _unit_type(tag), fontsize=8.5, fontname="lsans")
+                for key_, txt in (("rooms", str(nr)), ("area", _fmt_area(area)), ("air", "{:,.0f}".format(air) if air else "–")):
+                    ip.insert_text((X[key_] - fitz_len(txt), y + 10), txt, fontsize=8.5, fontname="lsans")
+                dl = depts if len(depts) <= 70 else depts
+                words, ln_, out_l = dl.split(" "), "", []
+                for w_ in words:
+                    if len(ln_) + len(w_) + 1 > 68:
+                        out_l.append(ln_)
+                        ln_ = w_
+                    else:
+                        ln_ = (ln_ + " " + w_).strip()
+                out_l.append(ln_)
+                for li, txt in enumerate(out_l[:2]):
+                    ip.insert_text((X["dept"], y + 10 + li * ROW), txt, fontsize=8, fontname="lsans")
+                ip.draw_line((M, y + h), (PW - M, y + h), color=(0.8, 0.8, 0.8), width=0.3)
+        ip.draw_line((M, PH - 42), (PW - M, PH - 42), color=(0.5, 0.5, 0.5), width=0.4)
+        ip.insert_text((M, PH - 30), "AIGH IP ACMV: AHU zoning, storeys %s to %s" % (specs[0]["key"], specs[-1]["key"]), fontsize=8, fontname="lsans")
+        ip.insert_text((PW - M - 90, PH - 30), "%s    Page %d of %d" % (rev_txt.split(",")[0], k + 1, len(pages_idx)), fontsize=8, fontname="lsans")
+    try:
+        doc.subset_fonts()
+    except Exception:
+        pass
     page_map = [(o + (n_index - 1), s, k) for (o, s, k) in page_map]
     out_pdf = Path(out_pdf)
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
@@ -509,7 +643,7 @@ def verify_multi_zoning_pdf(out_pdf: Path, src_pdf: Path, page_map: Sequence[Tup
         a = sp.get_pixmap(matrix=pymupdf.Matrix(1, 1), annots=False)
         b = op.get_pixmap(matrix=pymupdf.Matrix(1, 1), annots=False)
         pr["pixels_identical_annots_hidden"] = (a.width == b.width and a.height == b.height and a.samples == b.samples)
-        zones, legends, rooms, problems = [], [], [], []
+        zones, legends, rooms, labels, problems = [], [], [], [], []
         for an in op.annots():
             xref = an.xref
             nm = out.xref_get_key(xref, "NM")[1]
@@ -525,6 +659,8 @@ def verify_multi_zoning_pdf(out_pdf: Path, src_pdf: Path, page_map: Sequence[Tup
                 legends.append(rec)
             elif nm.startswith("room-"):
                 rooms.append(rec)
+            elif nm.startswith("label-"):
+                labels.append(rec)
             else:
                 problems.append("p%d unexpected annotation %s (%s)" % (oi + 1, xref, nm))
         for r in zones:
@@ -539,6 +675,9 @@ def verify_multi_zoning_pdf(out_pdf: Path, src_pdf: Path, page_map: Sequence[Tup
                 problems.append("p%d legend object without /CA: %s" % (oi + 1, r))
             elif r["name"].startswith("legend-back") and num(r["fill_opacity"]) is None:
                 problems.append("p%d legend backing without /FillOpacity: %s" % (oi + 1, r))
+        for r in labels:
+            if r["type"] != "FreeText" or not r["subject"] or r["oc"] != r["subject"] or num(r["ca"]) is None:
+                problems.append("p%d zone label incomplete: %s" % (oi + 1, r))
         for r in rooms:
             if not r["subject"] or r["oc"] != ROOMS_LAYER or num(r["ca"]) is None:
                 problems.append("p%d room annotation incomplete: %s" % (oi + 1, r))

@@ -24,7 +24,7 @@ from .styles import CODE_ALLOWED
 ERROR_VALUES = {"#N/A", "#NAME?", "#VALUE!", "#REF!", "#DIV/0!", "#NUM!", "#NULL!", "Err:502", "Err:504", "Err:508", "Err:511",
                 "Err:522", "Err:523"}
 ALLOWED_FUNCS = {"SUM", "SUMIFS", "SUMIF", "SUMPRODUCT", "COUNTIF", "COUNTIFS", "COUNT", "COUNTA", "IF", "AND", "OR", "MAX", "MIN", "ABS", "SIGN",
-                 "SQRT", "ROUND", "ROUNDUP", "TEXT", "INDEX", "MATCH", "ISNUMBER", "ISTEXT", "NOT", "ISERROR", "SEARCH", "ROW", "ROWS", "COLUMN", "_XLFN.MAXIFS"}
+                 "SQRT", "ROUND", "ROUNDUP", "TEXT", "INDEX", "MATCH", "ISNUMBER", "ISTEXT", "NOT", "ISERROR", "SEARCH", "ROW", "ROWS", "COLUMN", "LEN", "_XLFN.MAXIFS"}
 ALLOWED_LITERALS = {"0", "1", "2"}
 TOL_PCT = 0.5
 
@@ -82,6 +82,10 @@ INTERNAL_PATTERNS = [r"config/", r"out/(qa|registers|zoning|loads|sidecar)", r"\
                      r"\bdata/source\b", r"\bscratch\b", r"\bregex\b", r"\balgorithm\b"]
 
 
+# Room type names printed in the DD Booklet criteria and the DPA that contain a scanned word. They are source data and are not changed.
+SOURCE_NAME_PHRASES = ("Workflow Training",)
+
+
 def language_scan(path: Path, root: Path = Path(".")) -> List[Tuple[str, str, str]]:
     """Forbidden terms of the project configuration (deliverable language) and references to internal files or processes, in the
     text of every cell (text cells, the literals of formulas and the recalculated values), the sheet names, the defined names and the
@@ -96,6 +100,8 @@ def language_scan(path: Path, root: Path = Path(".")) -> List[Tuple[str, str, st
     hits: List[Tuple[str, str, str]] = []
 
     def check(where: str, cell: str, text: str) -> None:
+        for ph in SOURCE_NAME_PHRASES:     # room type names as printed in the source documents are data, not wording
+            text = re.sub(re.escape(ph), "", text, flags=re.I)
         for t, rx in pats:
             m = rx.search(text)
             if m:
@@ -536,7 +542,9 @@ def d013_check(base: Dict[str, Any], work: Path) -> Dict[str, Any]:
     if ahu is None:
         ahu = dict(tag=tag, type="AHU")
         d.setdefault("ahus", []).append(ahu)
-    ahu.update(sched_supply_lps=3500.0, sched_code="D", sched_source="TND-1", tender_source_text="tender equipment schedule Corr 5, test row")
+    ahu.update(sched_supply_lps=3500.0, sched_code="D", sched_source="TND-1", tender_source_text="tender equipment schedule Corr 5, test row",
+               zone_rooms=sum(1 for r in d["rooms"] if r.get("ahu") == tag),
+               zone_area_m2=round(sum(float(r.get("soa_area_m2") or r.get("dpa_area_m2") or 0) for r in d["rooms"] if r.get("ahu") == tag), 1), zone_code="D", zone_source="TND-1")
     d["fans"] = [dict(tag="RAF-T1", type="RETURN", serves=tag, scheduled_lps=3000.0, code="D", source="TND-1",
                       tender_source_text="tender equipment schedule Corr 5, test fan row")]
     r0 = d["rooms"][0]
@@ -565,6 +573,18 @@ def d013_check(base: Dict[str, Any], work: Path) -> Dict[str, Any]:
     fr = [fn.cell(row=7, column=FAN_KEYS.index(k) + 1).value for k in ("sched", "drawn", "red", "redp", "rem")]
     if fr[2] is None or abs(fr[2] - (fr[0] - fr[1])) > 1e-6 or not str(fr[4]).startswith(("Reduced", "VERIFY")):
         fails.append(f"Fans reduction {fr}")
+    # a unit whose room list is partial against the zone schedule shows no reduction and says so
+    dp = copy.deepcopy(d)
+    for a in dp["ahus"]:
+        if a["tag"] == tag:
+            a.update(zone_rooms=500, zone_area_m2=500000.0)
+    outp = work / "d013_partial.xlsx"
+    build_workbook(dp, outp)
+    wbp = openpyxl.load_workbook(recalc(outp, work / "rc_partial"), data_only=True)
+    ahp = wbp["AHU"]
+    redp_, remp, covp = (ahp.cell(row=row, column=idx[k]).value for k in ("red", "rem", "cov"))
+    if redp_ not in (None, "") or not str(remp).startswith("partial:") or not str(covp).startswith("partial:"):
+        fails.append(f"partial unit shows a reduction or no partial text: {redp_!r} {remp!r} {covp!r}")
     return dict(ahu_remarks=rem, fan_row=fr, fails=fails, errors=len(scan_errors(rc)))
 
 
@@ -608,7 +628,7 @@ def occupancy_check(base: Dict[str, Any], work: Path) -> Dict[str, Any]:
     if row1[hdr["Occupancy used"]] != 0:
         fails.append(f"RDS zero became {row1[hdr['Occupancy used']]}")
     note = str(row0[hdr["Remarks"]])
-    if not note.startswith("Occupancy assumed: 7 p/100 m² x") or "To confirm." not in note:
+    if not note.startswith("Occupancy assumed: 7 persons / 100 m² ×") or "To confirm." not in note:
         fails.append(f"remarks note {note[:80]!r}")
     wf = openpyxl.load_workbook(out)
     cell = wf["Room Information"].cell(row=7, column=hdr["Occupancy used"] + 1)

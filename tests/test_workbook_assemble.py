@@ -134,7 +134,7 @@ def test_occupancy_rds_zero_kept_and_default_density_elsewhere(fake_root):
 def test_tender_airflow_schedule_then_schematic(fake_root):
     d = assemble_department("77", None, fake_root)
     a = d["ahus"][0]
-    assert a["tag"] == "AHU-X-01A/B" and a["sched_supply_lps"] == 3000 and "Equipment Schedule Corr 5" in a["tender_source_text"]
+    assert a["tag"] == "AHU-X-01A/B" and a["sched_supply_lps"] == 3000 and "Equipment Schedule" in a["tender_source_text"] and "Corr 5" in a["tender_source_text"]
     assert a["schematic_supply_lps"] == 2500                       # the pair's second tag has a tender schematic figure only
     assert any(f["ref"] == "AHU-X-01A/B" and "covers only" in f["text"] for f in d["flags"])
 
@@ -196,8 +196,8 @@ def test_occupancy_reading_rule(text, people, notes):
 
 
 def test_use_mapping_fix():
-    for name, use in (("Manual Picking I Repackaging Area", "pharmacy_prep"), ("Gown Up", "pharmacy_prep"), ("Automation System", "pharmacy_prep"),
-                      ("Self Pick-Up - Smart Locker", "reception_waiting"), ("Lockers", "break_room_pantry"), ("Mtg", "conference_meeting"),
+    for name, use in (("Manual Picking I Repackaging Area", "pharmacy_prep"), ("Gown Up", "pharmacy_prep"), ("Automation System", "plant_room"),
+                      ("Self Pick-Up - Smart Locker", "reception_waiting"), ("Lockers", None), ("Locker - Staff", None), ("Bay - Handwashing, Type A", "corridor_circulation"), ("Lecture Theatre", "lecture_classroom"), ("Patient Bay - Holding", "patient_room"), ("Sub-Wait - Outpatient Holding", "reception_waiting"), ("Clinical Workroom - ICU", "office"), ("Anaesthesia Prep", "medical_procedure"), ("Mtg", "conference_meeting"),
                       ("Chg", "toilet"), ("Lact", "office"), ("Staff Accom", "break_room_pantry"), ("Controlled Drug Room", "pharmacy_prep"),
                       ("Space for Roll Call", "conference_meeting"), ("ELEC", "plant_room")):
         assert room_use(name)[0] == use, name

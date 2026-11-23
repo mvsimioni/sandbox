@@ -16,7 +16,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from . import conf
-from .assemble import (REG, _expand_abbreviations, _f, _norm, _read, _tag_candidates, _tender_for_tag, criteria_from_row, criteria_text, match_criteria, room_use)
+from .common import ROOM_THERMAL_NOTE
+from .assemble import (REG, _expand_abbreviations, _f, _norm, _read, _tag_candidates, _tender_for_tag, criteria_from_row, criteria_text, load_zone_assignments,
+                       match_criteria, room_use, zone_key, zone_totals)
 from .build import build_workbook
 from .reva import build_reva_input
 
@@ -77,6 +79,11 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
             text_as_read="design room condition of the Rev A design basis (24 °C, 52.6 kJ/kg) applied where no space type is set", method="Assumption, to confirm", confidence="low")
     add_src("ASM-ACTIVITY", document="Workbook defaults", issue="", page="", location="activity of occupants",
             text_as_read="activity Seated (Rev A table) applied where occupancy is assumed", method="Assumption, to confirm", confidence="low")
+    from . import conf as _conf
+    ch_default = float((_conf.config().get("ceiling_height") or {}).get("flagged_default_m") or 0) or None
+    if ch_default:
+        add_src("ASM-CEILING", document="Workbook defaults", issue="", page="", location="ceiling height",
+                text_as_read=f"ceiling height {ch_default:g} m applied where the room layout sheets give none", method="Assumption, to confirm", confidence="low")
     add_src("OCC-DENSITY", document="ASHRAE Standard 62.1, Table 6.2.2.1: default occupant density", issue="edition to confirm (health-care rows: 62.1-2007)",
             page="Table 6.2.2.1", location="persons per 100 m² by occupancy category", text_as_read="default densities per 100 m², as listed in the project design basis",
             method="Value taken from the project design basis", confidence="medium")
@@ -95,9 +102,20 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
     n_default = n_booklet = n_none = 0
     none_names: List[str] = []
 
-    def criteria_for(name: str, number: str):
-        """(criteria dict or None, kind) for a space: booklet row, circulation default, or none."""
-        key = name.lower()
+    def criteria_for(name: str, number: str, is_ac: bool = False):
+        """(criteria dict or None, kind) for a space: booklet row, circulation default, or none.
+        An outline with several names is not one room type. Where its App D mode is air-conditioned it takes the D-011 default for circulation and common
+        space, as a whole (code A); it is not split and no single name sets its criteria."""
+        key = (name.lower(), is_ac)
+        parts_ = [x.strip() for x in re.split(r"\s/\s", name) if x.strip()] or [name]
+        if key not in crit_cache and is_ac and (len(parts_) >= 2 or name == "Common space"):
+            c_ = dict(crit)
+            if len(parts_) >= 2:
+                c_["remark"] = (f"Outline with {len(parts_)} names ({name}), air-conditioned on App D. It is not split: the default for circulation and common space applies to "
+                                "the whole outline. To confirm.")
+            crit_cache[key] = (c_, "default")
+        if key not in crit_cache and len(parts_) >= 2:
+            crit_cache[key] = (None, "none")
         if key not in crit_cache:
             row, variants, how = None, [], ""
             parts = [x.strip() for x in re.split(r"\s/\s", name) if x.strip()] or [name]
@@ -129,7 +147,15 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
                 crit_cache[key] = (None, "none")
         return crit_cache[key]
 
-    # unit of each space: nearest AHU, PAHU or FCU
+    # unit of each space: the class of the zone schedule for the plan rooms inside the App D outline (never a tag that is drawn inside it)
+    zone_rows = load_zone_assignments(root)
+    class_of_space: Dict[Any, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    for st_key in STOREYS.values():
+        pr = _read(root / REG / f"room_polygons_{st_key}.csv") if (root / REG / f"room_polygons_{st_key}.csv").exists() else []
+        for r in pr:
+            za = zone_rows.get(st_key, {}).get(r["room_id"])
+            if r.get("appd_annotation_index") and za is not None:
+                class_of_space[(st_key, r["appd_annotation_index"])][(za.get("class") or "").strip() or "no information"] += _f(r.get("a_area_m2")) or 1.0
     type_of = {_norm(e["tag_normalised"]): e["type"] for e in equip}
     rooms: List[Dict[str, Any]] = []
     skipped: List[str] = []
@@ -150,13 +176,17 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
                       method="Area label and room outline read from the marked-up drawing", confidence="high" if s.get("printed_area_m2") else "medium")
         room: Dict[str, Any] = dict(number=number, name=name, storey=st, ahu=None, zone_tag=None, system_type=None, terminal_tag=None, exhaust_fan=None,
                                     space_type="UNCLASSIFIED", room_condition="Comfort", dpa_area_m2=None, soa_area_m2=printed if printed else None,
-                                    measured_area_m2=meas, area_selector="SOA" if printed else None, ceiling_height_m=None, occupancy_people=None,
+                                    measured_area_m2=meas, area_selector="SOA" if printed else None, ceiling_height_m=ch_default, occupancy_people=None,
                                     occupancy_per_100m2=None, iof=None, activity=None, operation_hours=None, lighting_w_m2=None, small_power_w_m2=None,
                                     gaps={}, criteria={}, envelope=[],
                                     prov={"identity": ["D", sid], "zoning": ["D", sid], "space_type": ["A", "ASM-DEFAULT"], "soa_area": ["D", sid],
-                                          "measured_area": ["M", sid], "area_selector": ["S", "GEN-BASIS"]},
+                                          "measured_area": ["M", sid], "area_selector": ["S", "GEN-BASIS"],
+                                          **({"ceiling_height": ["A", "ASM-CEILING"]} if ch_default else {})},
                                     remark=f"App D page {s['page']}: area label {printed:g} m²" if printed else f"App D page {s['page']}: outline {meas:g} m² at 1:250")
-        cc, kind = criteria_for(name, number)
+        if ch_default:
+            room["remark"] += f"; ceiling height {ch_default:g} m assumed (no room layout sheet applies to a common area)"
+        is_ac = (s.get("mode_label") or "").upper().startswith("AC")
+        cc, kind = criteria_for(name, number, is_ac)
         if cc is not None:
             room["criteria"] = dict(cc)
             if kind == "default":
@@ -168,15 +198,28 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
             none_names.append(name)
             room["gaps"]["criteria"] = ("No booklet room type fits this space and it is not a circulation, corridor or lobby space. "
                                         "No criteria are set: only its thermal load can set an airflow.")
-        cands = [t for t in unit_tags(s.get("equipment_tags_within_60pt", "")) if type_of.get(_norm(t)) in UNIT_TYPES]
-        if cands:
-            room["ahu"] = cands[0]
-            room["system_type"] = "FCU" if type_of[_norm(cands[0])] == "FCU" else None
-            if len(cands) > 1:
-                room["remark"] += f"; other units near the space: {', '.join(cands[1:4])}"
-            n_unit += 1
+        zc = class_of_space.get((st, s["annotation_index"]))
+        if zc:
+            cls, _a = max(zc.items(), key=lambda kv: kv[1])
+            share = zc[cls] / (sum(zc.values()) or 1.0)
+            zsid = add_src(f"ZONE-{st}-APPD{s['annotation_index']}", document=f"AHU zone schedule, storey {st}", issue="Rev A", page=st,
+                           location=f"plan rooms inside the App D outline {s['annotation_index']}",
+                           text_as_read="; ".join(f"class {k}: {v:.0f} m²" for k, v in sorted(zc.items(), key=lambda kv: -kv[1])),
+                           method="Class of the plan rooms inside the outline in the zone schedule", confidence="medium")
+            if re.match(r"^(AHU|PAHU|FCU)-", cls):
+                room["ahu"] = cls
+                room["system_type"] = "FCU" if cls.startswith("FCU") else None
+                room["prov"]["zoning"] = ["D", zsid]
+                room["remark"] += f"; unit {cls} from the zone schedule ({share * 100:.0f} % of the plan room area inside the outline)"
+                if len(zc) > 1:
+                    room["remark"] += f"; other classes inside the outline: {', '.join(k for k in zc if k != cls)}"
+                    room["gaps"]["ahu"] = f"The plan rooms inside this outline have several classes: {', '.join(f'{k} ({v:.0f} m²)' for k, v in sorted(zc.items(), key=lambda kv: -kv[1]))}. The largest is used. Confirm."
+                n_unit += 1
+            else:
+                room["remark"] += f"; zone schedule class {cls}: no air handling or fan coil unit serves the space"
+                room["prov"]["zoning"] = ["D", zsid]
         else:
-            room["gaps"]["ahu"] = "No App D unit is marked inside or beside this space."
+            room["gaps"]["ahu"] = "No plan room of the zone schedule lies inside this outline: no unit is set. A tag drawn inside the outline is not taken as the serving unit."
         m = dpa_by.get((st, _norm(name)))
         if m and len(m) == 1 and _f(m[0].get("designed_area_m2")):
             room["dpa_area_m2"] = _f(m[0]["designed_area_m2"])
@@ -185,6 +228,8 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
             room["prov"]["dpa_area"] = ["D", dsid]
             n_dpa += 1
         use, label = room_use(name)
+        if cc is not None and kind == "default" and len(re.split(r"\s/\s", name)) >= 2:
+            use = "corridor_circulation"
         if use is not None and use in densities:
             room["occupancy_per_100m2"] = float(densities[use])
             room["occupancy_basis"] = "DENSITY DEFAULT"
@@ -195,11 +240,14 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
                 room["prov"]["activity"] = ["A", "ASM-ACTIVITY"]
         else:
             room["occupancy_basis"] = "NOT SET"
-            room["remark"] += "; occupancy not set (0 people is a placeholder)"
+            room["remark"] += "; occupancy not set"
             room["gaps"]["occupancy"] = "Occupancy is not set. No RDS applies to the common areas. No room use fits the space name for the default density."
+        room["remark"] = room["remark"].rstrip(".") + ". " + ROOM_THERMAL_NOTE
         room["_space"] = s
         rooms.append(room)
 
+    ztot = zone_totals(root)
+    mot_sched = {_norm(r["tag"].replace("lSONP", "ISONP")): r for r in _read(root / REG / "mot_ahu_schedule.csv") if r.get("equipment_type") in ("AHU", "PAHU")}
     # units: every AHU, PAHU and FCU of App D, with the tender airflow
     ahus: List[Dict[str, Any]] = []
     on_rooms = {r["ahu"] for r in rooms if r["ahu"]}
@@ -207,9 +255,15 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
     for tag in dict.fromkeys(e["tag_normalised"] for e in equip):
         typ = type_of[_norm(tag)]
         if typ in UNIT_TYPES:
-            t = _tender_for_tag(tag, ahu_sched, fcu_sched, sched_equip, sched_totals, add_src)
+            t = _tender_for_tag(tag, ahu_sched, fcu_sched, sched_equip, sched_totals, add_src, mot_sched, root=root)
             a = dict(tag=tag, type=t.pop("type", typ))
             a.update(t)
+            zt = ztot.get(zone_key(tag))
+            if zt is not None:
+                zs_ = add_src(f"ZUNIT-{_norm(zone_key(tag))}"[:60], document="AHU zone schedule, LB3 to L07", issue="Rev A", page="storeys " + ", ".join(zt["storeys"]),
+                              location=f"unit {tag}", text_as_read=f"{zt['rooms']} zoned room(s), {zt['area']:.1f} m² measured on the tender plan",
+                              method="Rooms and area of the unit in the zone schedule", confidence="medium")
+                a.update(zone_rooms=zt["rooms"], zone_area_m2=round(zt["area"], 1), zone_code="D", zone_source=zs_)
             if tag not in on_rooms:
                 a["list_without_rooms"] = True
             ahus.append(a)
@@ -239,6 +293,19 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
             else:
                 f.update(code="D", source="CIRC-DEFAULT" if False else "ASM-DEFAULT")
             fans.append(f)
+    # units that the zoning gives to the spaces and that App D does not print under this tag form: the same tender lookup and the zone schedule totals as for the others
+    have_tags = {a["tag"] for a in ahus}
+    for tag in sorted(on_rooms - have_tags):
+        t = _tender_for_tag(tag, ahu_sched, fcu_sched, sched_equip, sched_totals, add_src, mot_sched, root=root)
+        a = dict(tag=tag, type=t.pop("type", re.match(r"^([A-Z]+)", tag).group(1) if re.match(r"^([A-Z]+)", tag) else "AHU"))
+        a.update(t)
+        zt = ztot.get(zone_key(tag))
+        if zt is not None:
+            zs_ = add_src(f"ZUNIT-{_norm(zone_key(tag))}"[:60], document="AHU zone schedule, LB3 to L07", issue="Rev A", page="storeys " + ", ".join(zt["storeys"]),
+                          location=f"unit {tag}", text_as_read=f"{zt['rooms']} zoned room(s), {zt['area']:.1f} m² measured on the tender plan",
+                          method="Rooms and area of the unit in the zone schedule", confidence="medium")
+            a.update(zone_rooms=zt["rooms"], zone_area_m2=round(zt["area"], 1), zone_code="D", zone_source=zs_)
+        ahus.append(a)
     # exhaust fan of a space: the nearest exhaust fan marked in it
     fan_tags = {f["tag"] for f in fans}
     for room in rooms:
@@ -261,7 +328,7 @@ def assemble_common_areas(root: Path = Path(".")) -> Dict[str, Any]:
         if a.get("list_without_rooms"):
             flags.append(dict(type="VERIFY", ref=a["tag"], text=f"Unit {a['tag']} is marked on App D but no space of this workbook carries it. It is listed with its tender airflow and no calculation.", source=""))
     flags.append(dict(type="CONFIRM", ref="Envelope", text="Envelope rows are not set. Every space is treated as internal, with no glazing, wall or roof gain.", source="ASM-DEFAULT"))
-    flags.append(dict(type="CONFIRM", ref="Room Information", text="Ceiling height, lighting, small power, equipment and operation time are not set: no document gives them.", source="ASM-DEFAULT"))
+    flags.append(dict(type="CONFIRM", ref="Room Information", text="Lighting, small power, equipment and operation time are not set: no document gives them. The ceiling height is the flagged default.", source="ASM-DEFAULT"))
     if not all(people.values()):
         flags.append(dict(type="CONFIRM", ref="README", text="Author, checker and approver of the revision block are not given. They are left blank.", source="ASM-DEFAULT"))
     sp = list(base["space_types"]) + [dict(name="UNCLASSIFIED", room_t_c=base["space_types"][0]["room_t_c"], room_h_kjkg=base["space_types"][0]["room_h_kjkg"],

@@ -37,30 +37,38 @@ SCOPE_STOREYS = ("LB3", "B3", "B2", "B1", "L01", "L02", "L03", "L04", "L05", "L0
 # Room use for the default occupant density (D-017): the first rule that matches the room name gives the use (a key of
 # occupancy.density_default.per_100m2 in the project configuration). The mapping is an assumption and is stated on Basis of Design.
 USE_RULES: List[Tuple[str, str, str]] = [
-    (r"toilet|\bwc\b|shower|changing|change room|change cubicle|sanitary", "toilet", "toilets and changing rooms"),
+    (r"hand ?-?wash|scrub bay|scrub up", "corridor_circulation", "hand-wash bays (a recess of the corridor, not an occupied room)"),
+    (r"^(?!.*(?:smart|self pick)).*locker", "", "locker rooms (the density table has no row for them)"),
+    (r"operator room", "office", "operator rooms (staff workstations of a server room)"),
+    (r"lecture|\blect\b", "lecture_classroom", "lecture rooms and lecture theatres"),
+    (r"sub-?wait|waiting|\bwait\b|reception|counter|kiosk|dispensing|payment|self pick|service centre|registration", "reception_waiting", "reception, waiting and counters"),
+    (r"toilet|\bwc\b|shower|ensuite|changing|change room|change cubicle|sanitary", "toilet", "toilets and changing rooms"),
     (r"plant|\bups\b|compressor|riser|shaft|\bahu\b|electrical|comms|server|\bpts\b|\bdb\b|substation|generator|switch ?room|battery|"
-     r"transformer|rainwater|\btank\b|\bpump", "plant_room", "plant, electrical and communication rooms"),
+     r"transformer|rainwater|\btank\b|\bpump|water treatment|equipment room|automation system|filter room|fire suppression|gas cylinder|control panel|machine room", "plant_room", "plant, equipment, electrical and communication rooms"),
     (r"cleaner|cleaning|janitor|linen|\bstore\b|storage|stock|refrigerat|archive|trolley|bulk|warehouse|\bstr\b|refuse|disposal|waste|"
-     r"loading bay|deboxing|equipment store|pigeon|utility|\bholding\b", "storage", "stores, cleaners rooms and utility rooms"),
-    (r"corridor|circulation|lobby|airlock|air lock|vestibule|lift|concourse|\bcorr\b|agv bay", "corridor_circulation", "corridors, lobbies and airlocks"),
-    (r"theatre|operating", "operating_room", "operating theatres"),
+     r"loading bay|deboxing|equipment store|pigeon|utility|cold room|storeroom|inventory|manual library|cart staging|receiving", "storage", "stores, cleaners rooms and utility rooms"),
+    (r"corridor|circulation|lobby|airlock|air lock|sound lock|vestibule|lift|concourse|\bcorr\b|agv bay|^bay\s*-|(?:c-arm|amr|bed|stroller|wheelchair) park", "corridor_circulation",
+     "corridors, lobbies, airlocks and bays that are recesses of a corridor"),
+    (r"workroom|work room", "office", "clinical work rooms"),
+    (r"anaesthe|anesthe", "medical_procedure", "anaesthesia preparation rooms (nearest listed use: procedure room)"),
     (r"recovery|\bicu\b|\bhdu\b|intensive", "recovery_icu", "recovery and intensive care"),
-    (r"ward|bed room|1-bed|single bed|patient room|isolation room", "patient_room", "patient rooms"),
-    (r"procedure|treatment|examination|exam room|consult|endoscop|scan|clinic", "medical_procedure", "procedure and consulting rooms"),
-    (r"pantry|break|tea point|kitchenette|lounge|bev|staff accommodation|(?<!smart )locker|rest room|staff room", "break_room_pantry", "pantries, break rooms and staff rooms"),
+    (r"patient bay|\bbay\b.*(?:acute|edtu|resus|p2|holding)|isolation|acute|resus|ward|bed room|1-bed|single bed|patient room|\bholding\b", "patient_room", "patient rooms and patient bays"),
+    (r"theatre|operating", "operating_room", "operating theatres"),
+    (r"procedure|treatment|therapeutic|examination|exam room|consult|endoscop|scan|clinic|triage|medication room", "medical_procedure", "procedure and consulting rooms"),
+    (r"pantry|break|tea point|kitchenette|lounge|bev|staff accommodation|rest room|staff room", "break_room_pantry", "pantries, break rooms and staff rooms"),
     (r"meeting|conference|focus|interview|huddle|roll call", "conference_meeting", "meeting rooms"),
-    (r"waiting|reception|counter|kiosk|dispensing|payment|self pick|service centre|registration", "reception_waiting", "reception, waiting and counters"),
-    (r"office|\boff\b|workstation|write-up|writeup|admin|technician|workspace|desk|supervisor|control room|lactation|nurse station|workshop",
+    (r"office|\boff\b|workstation|write-up|writeup|admin|technician|workspace|desk|supervisor|control room|lactation|nurse station|staff station|workshop|workroom|work room",
      "office", "offices, workstations and small private rooms"),
+    (r"x-?ray|\bmri\b|ultrasound|\bct\b|fluoro|angio|mammo|cath lab|nuclear|\bpet\b|dexa|imaging|radiograph", "medical_procedure",
+     "imaging rooms (nearest listed use: procedure room)"),
     (r"simulation|training|\btrg\b|classroom|seminar", "classroom_training", "training rooms"),
     (r"picking|repackag|automation|asrs|ipas|gown|ante ?room|extemporaneous|compounding|sterile prep|pharmacy|controlled drug|drug room|"
      r"preparation|\bprep\b|clean room", "pharmacy_prep", "pharmacy preparation, picking and automation rooms (pharmacy preparation area)"),
-    (r"laborator|\blab\b", "laboratory", "laboratories"),
-    (r"decontamination|washing|inspection|packing|steril|reprocess|endoscope|assembly|workstation zone",
+    (r"laborator|\blab\b|bench|haematology|hameotology|chemistry|histopatholog|specimen", "laboratory", "laboratories and laboratory benches"),
+    (r"decontamination|washing|wash/dry|laundry|inspection|packing|steril|reprocess|endoscope|assembly|workstation zone",
      "process_area", "process rooms such as decontamination, washing, inspection and packing (light industrial, nearest listed use)"),
-    (r"lecture|\blect\b", "lecture_classroom", "lecture rooms"),
     (r"\brtl\b|retail|shop|store front", "retail_sales", "retail areas"),
-    (r"kitchen|cooking|pot wash", "kitchen_cooking", "kitchens"),
+    (r"kitchen|cooking|pot wash|cook chill|pastry|bakery|plating", "kitchen_cooking", "kitchens and food preparation rooms"),
     (r"cafeteria|dining|canteen", "cafeteria_dining", "dining areas"),
 ]
 
@@ -75,6 +83,22 @@ APPD_ABBREVIATIONS: Dict[str, str] = {
     "agv": "agv bay", "ll": "lift lobby", "tll": "lift lobby", "iso": "isolation", "off": "office", "lect": "lecture", "rm": "room",
     "str": "store", "trg": "training room", "rtl": "retail", "refuse": "refuse store", "cln": "cleaner room", "lounge": "lounge",
 }
+
+
+def dept_label(key: str, root: Path = Path(".")) -> str:
+    """Department name: src/booklet_departments.json department_label, else the DD Sign-OFF folder title kept in dept_units.json."""
+    try:
+        files = json.loads((Path(root) / "src" / "booklet_departments.json").read_text(encoding="utf-8")).get("files", {})
+    except OSError:
+        files = {}
+    for v in files.values():
+        if v.get("dept_no") == key and v.get("department_label"):
+            return v["department_label"]
+    from .dept_units import load_raw
+    return load_raw().get("department_names", {}).get(key, "")
+
+
+from .tag_notes import cath_tag_note  # noqa: E402
 
 
 def _norm(s: Optional[str]) -> str:
@@ -160,12 +184,50 @@ def load_polygons(root: Path) -> Dict[str, List[Dict[str, str]]]:
     return out
 
 
+_ZONE_PAIR = re.compile(r"^(.*-\d{2})([AB])(?:/B)?$")
+
+
+def zone_key(tag: str) -> str:
+    """A duty and standby pair ('-01A', '-01B' or '-01A/B') is one zone."""
+    m = _ZONE_PAIR.match((tag or "").strip())
+    return m.group(1) if m else (tag or "").strip()
+
+
+def zone_totals(root: Path) -> Dict[str, Dict[str, Any]]:
+    """Rooms and measured area of every unit on the zoning drawing (all storeys), from the zone assignment of each storey."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for st, rows in load_zone_assignments(root).items():
+        for r in rows.values():
+            cls = (r.get("class") or "").strip()
+            if not cls or cls.lower().startswith(("no information", "review", "mv", "nv")) or (r.get("class_kind") or "").upper() in ("MV", "NV"):
+                continue
+            t = out.setdefault(zone_key(cls), dict(rooms=0, area=0.0, storeys=[]))
+            t["rooms"] += 1
+            t["area"] += _f(r.get("area_m2")) or 0.0
+            if st not in t["storeys"]:
+                t["storeys"].append(st)
+    return out
+
+
 def load_zone_assignments(root: Path) -> Dict[str, Dict[str, Dict[str, str]]]:
     """storey -> room_id -> row, for every zone_assignment_<storey>.csv that exists."""
     out: Dict[str, Dict[str, Dict[str, str]]] = {}
     for f in sorted(glob.glob(str(root / REG / "zone_assignment_*.csv"))):
-        out[Path(f).stem.replace("zone_assignment_", "")] = {r["room_id"]: r for r in _read(Path(f)) if r.get("room_id")}
+        rows = [{k: (re.sub(r"\bD-\d{3}\s*[:;,]?\s*", "", v) if isinstance(v, str) else v) for k, v in r.items()} for r in _read(Path(f))]   # decision numbers are internal
+        out[Path(f).stem.replace("zone_assignment_", "")] = {r["room_id"]: r for r in rows if r.get("room_id")}
     return out
+
+
+def basis_text(method: str) -> str:
+    """Issued wording of the basis of a zoning class: the documents it rests on, not the steps of the work (D-015)."""
+    t = (method or "").strip()
+    t = re.sub(r"^adjudicated:\s*", "", t)
+    t = re.sub(r";?\s*open conflict(?: CF-\d{4})?", "; the documents differ", t)
+    t = re.sub(r"\bCF-\d{4}\b", "", t)
+    t = t.replace("booklet picture", "booklet drawing").replace("graphic zone", "booklet drawing zone").replace("graphic tag", "booklet drawing tag")
+    t = re.sub(r"\bgraphic\b", "booklet drawing", t)
+    t = re.sub(r"^; ", "", t.strip(" ;"))
+    return t or "not stated"
 
 
 def _first(row: Dict[str, str], cols: Tuple[str, ...]) -> str:
@@ -175,13 +237,23 @@ def _first(row: Dict[str, str], cols: Tuple[str, ...]) -> str:
     return ""
 
 
+from .common import ROOM_THERMAL_NOTE  # noqa: E402
+
+OCCUPIED_USES = {"office", "conference_meeting", "break_room_pantry", "reception_waiting", "laboratory", "kitchen_cooking", "pharmacy_prep", "classroom_training",
+                 "lecture_classroom", "medical_procedure", "patient_room", "retail_sales", "process_area", "recovery_icu", "operating_room"}
+
+# Rooms whose load is led by equipment: the equipment gain is not known (the schedule of equipment is outside the scope), so the thermal load is not representative.
+EQUIPMENT_LED = re.compile(r"data cent|server|\bcrac\b|\bups\b|batter|comms|\basrs\b|automation|chiller|freezer|cold room|kitchen|food prep|bakery|pastry|cook chill|"
+                           r"\bmri\b|\bct\b|x-?ray|angio|cath|fluoro|ultrasound|mammo|imaging|laborator|\blab\b|haematolog|hameotolog|histo|microbiolog|chemistry|specimen", re.I)
+
+
 def room_use(name: str) -> Tuple[Optional[str], str]:
     """(key of the density table, wording of the rule) for a room name; (None, '') when no rule matches."""
     low = (name or "").lower()
     for text in (low, _expand_abbreviations(low)):
         for rx, key, label in USE_RULES:
             if re.search(rx, text, re.I):
-                return key, label
+                return (key or None), label
     return None, ""
 
 
@@ -447,8 +519,9 @@ def criteria_text(row: Dict[str, str]) -> str:
 
 
 def _criteria_alternatives(row: Dict[str, str]) -> List[str]:
+    """Names listed inside one booklet row: the whole room type first, then each name of a multi-name row (separated by '/', '&' or ',')."""
     t = row.get("room_type_as_printed") or ""
-    alts = [t] + [x for x in re.split(r"\s*/\s*|\s+-\s+|,\s*|\s+&\s+|\(|\)", t) if x.strip()]
+    alts = [t] + [x for x in re.split(r"\s*/\s*|,\s*|\s+&\s+", t) if x.strip()]
     return [a.strip() for a in alts if a.strip()]
 
 
@@ -518,24 +591,12 @@ def match_criteria(room_name: str, rows: List[Dict[str, str]], modal: bool = Fal
     best: List[Tuple[float, Dict[str, str], str]] = []
     for c in rows:
         top, how = 0.0, ""
-        for alt in _criteria_alternatives(c):
+        for k, alt in enumerate(_criteria_alternatives(c)):
             an = _norm(alt)
-            aw = set(_words(alt))
-            if not an:
-                continue
-            if an == rn:
-                sc, h = 3.0, "same name"
-            elif aw and aw <= rw and len(aw) >= 2:
-                sc, h = 2.0 + len(aw) / 10, "room type words found in the room name"
-            elif aw and rw and rw <= aw and len(rw) >= 2:
-                sc, h = 2.0 + len(rw) / 10, "room name words found in the room type"
-            elif len(aw) == 1 and aw <= rw and len(an) >= 5:
-                sc, h = 1.5, "one key word in common"
-            else:
-                r = difflib.SequenceMatcher(None, an, rn).ratio()
-                sc, h = (1.0 + r, "similar name") if r >= 0.88 else (0.0, "")
-            if sc > top:
-                top, how = sc, h
+            if an and an == rn:                  # exact name only. A name that is part of a multi-name row is an assumption (code A). No word overlap, no similar name.
+                sc, h = (3.0, "same name") if k == 0 else (2.5, "name listed in a multi-name booklet row")
+                if sc > top:
+                    top, how = sc, h
         if top > 0:
             best.append((top, c, how))
     if not best:
@@ -565,66 +626,80 @@ def match_criteria(room_name: str, rows: List[Dict[str, str]], modal: bool = Fal
 
 # --------------------------------------------------------------------------- #
 def _tag_candidates(tag: str) -> List[str]:
-    """Tags to look up for a zone tag: 'AHU-X-01A/B' is the duty and standby pair '...-01A' and '...-01B'."""
+    """Tags to look up for a zone tag: 'AHU-X-01A/B' is the duty and standby pair '...-01A' and '...-01B'. A tag that ends in a number
+    ('AHU-X-01') can be scheduled as '...-01A' and '...-01B'. After these, the same tags with the served level in place of the plant level
+    ('AHU-B-07-04CATH-01' -> 'AHU-B-04-04CATH-01'): the schedule then prints another form of the tag, and the source text says so."""
     t = (tag or "").strip()
+    out = [t]
     m = re.fullmatch(r"(.*?)([A-Z])((?:[/&][A-Z])+)", t)
     if m:
         letters = [m.group(2)] + re.findall(r"[A-Z]", m.group(3))
-        return [m.group(1) + x for x in letters] + [t]
-    return [t]
+        out = [m.group(1) + x for x in letters] + [t]
+    elif re.search(r"\d$", t):
+        out = [t, t + "A", t + "B"]
+    elif re.search(r"-\d{2}[AB]$", t):
+        out = [t, t[:-1], t[:-1] + ("B" if t[-1] == "A" else "A")]
+    return list(dict.fromkeys(out))
 
 
-def _tender_for_tag(tag: str, sched: Dict[str, Dict[str, str]], fcu: Dict[str, Dict[str, str]], eq: List[Dict[str, str]],
-                    totals: List[Dict[str, str]], add_src) -> Dict[str, Any]:
-    """Tender airflow of one tag: Equipment Schedule (Corr 5) row by normalised tag, else the tender air-side schematic figure."""
+def _level_variant_tags(cands: List[str]) -> List[str]:
+    out: List[str] = []
+    for c in cands:
+        m = re.match(r"^((?:AHU|PAHU|FCU)-B-)(\d\d)-(\d\d)(.*)$", c)
+        if m and m.group(2) != m.group(3):
+            out.append(f"{m.group(1)}{m.group(3)}-{m.group(3)}{m.group(4)}")
+    return out
+
+
+def _tender_for_tag(tag: str, sched: Dict[str, Dict[str, str]] = None, fcu: Dict[str, Dict[str, str]] = None, eq: List[Dict[str, str]] = None,
+                    totals: List[Dict[str, str]] = None, add_src=None, mot: Optional[Dict[str, Dict[str, str]]] = None, schematic_only: bool = False,
+                    root: Optional[Path] = None) -> Dict[str, Any]:
+    """Tender airflow of one tag from the one lookup of every deliverable (``tender_lookup``): Equipment Schedule (Corr 5), else the MOT NSC Overall AC
+    Equipment Schedule (Corr 2), else the tender air-side schematic. The tables of the arguments are not used: they remain for the callers."""
+    from . import tender_lookup as tl
+    t = tl.shared(None if root is None or Path(root) == Path(".") else root)
     out: Dict[str, Any] = {}
-    cands = _tag_candidates(tag)
-    for c in cands:
-        row = sched.get(_norm(c))
-        if row:
-            sup = _f(row.get("supply_airflow_l_s [Supply Airflow (l/s)]"))
-            oa = _f(row.get("outdoor_air_min_l_s [Outdoor Airflow / Min (l/s)]"))
-            if sup is not None:
-                sid = f"EQS5-{_norm(c)}"[:60]
-                page = row.get("page(s)", "")
-                add_src(sid, document="Equipment Schedule, air handling unit schedule", issue="Corr 5", page=f"page {page}",
-                        location=f"sheet {row.get('sheet_code', '')}, tag {row.get('tag_as_written', c)}",
-                        text_as_read=f"{row.get('tag_as_written', c)}: supply airflow {sup:g} L/s; outdoor airflow minimum {oa if oa is not None else 'not printed'}",
-                        method="Value read from the Equipment Schedule table", confidence="high")
-                out.update(sched_supply_lps=sup, sched_oa_lps=oa, sched_source=sid, sched_code="D", type=row.get("type") or "AHU",
-                           tender_source_text=f"Equipment Schedule Corr 5, page {page}, {row.get('tag_as_written', c)}")
-                return out
-        frow = fcu.get(_norm(c))
-        if frow:
-            sup = _f(frow.get("Min Airflow (l/s)"))
-            if sup is not None:
-                sid = f"EQS5-{_norm(c)}"[:60]
-                add_src(sid, document="Equipment Schedule, fan coil unit schedule", issue="Corr 5", page=f"page {frow.get('page(s)', '')}",
-                        location=f"sheet {frow.get('sheet_code', '')}, tag {frow.get('tag_as_written', c)}",
-                        text_as_read=f"{frow.get('tag_as_written', c)}: minimum airflow {sup:g} L/s", method="Value read from the Equipment Schedule table",
-                        confidence="high")
-                out.update(sched_supply_lps=sup, sched_source=sid, sched_code="D", type="FCU",
-                           tender_source_text=f"Equipment Schedule Corr 5, page {frow.get('page(s)', '')}, {frow.get('tag_as_written', c)}")
-                return out
-    for c in cands:
-        for t in totals:
-            if t.get("issue_set") == "tender" and t.get("ahu_tag") == c and _f(t.get("ahu_supply_L_s")) is not None:
-                sid = f"TSCH-{_norm(c)}"[:60]
-                add_src(sid, document=f"Air-side schematic {t.get('sheet', '')}", issue=t.get("issue", "tender issue"), page=t.get("sheet", ""),
-                        location=f"AHU {c}", text_as_read=t.get("ahu_supply_as_written", ""), method="Value read from the text printed on the air-side schematic", confidence="medium")
-                out.update(sched_supply_lps=_f(t["ahu_supply_L_s"]), sched_source=sid, sched_code="D",
-                           tender_source_text=f"tender air-side schematic {t.get('sheet', '')}, {c}")
-                return out
-        for e in eq:
-            if e.get("issue_set") == "tender" and e.get("tag") == c:
-                m = re.match(r"\s*([\d,]+)\s*L/s", e.get("duty_as_written") or "")
-                if m:
-                    sid = f"TSCH-{_norm(c)}"[:60]
-                    add_src(sid, document=f"Air-side schematic {e.get('sheet', '')}", issue=e.get("issue", "tender issue"), page=f"page {e.get('page', '')}",
-                            location=f"AHU {c}", text_as_read=e["duty_as_written"], method="Value read from the text printed on the air-side schematic", confidence=e.get("confidence", ""))
-                    out.update(sched_supply_lps=float(m.group(1).replace(",", "")), sched_source=sid, sched_code="D",
-                               tender_source_text=f"tender air-side schematic {e.get('sheet', '')}, {c}")
-                    return out
+    if schematic_only:
+        sv = t.schematic_value([tag])
+        if sv is None:
+            return out
+        sid = f"TSCH-{_norm(sv['cand'])}"[:60]
+        add_src(sid, document=f"Air-side schematic {sv['sheet']}", issue=sv.get("issue", "tender issue"), page=f"page {sv['page']}" if sv.get("page") else sv["sheet"],
+                location=f"AHU {sv['cand']}", text_as_read=sv.get("text_as_read") or f"{sv['value']:g} L/s", method="Value read from the text printed on the air-side schematic",
+                confidence="medium")
+        out.update(sched_supply_lps=sv["value"], sched_source=sid, sched_code="D")
+        return out
+    r = t.lookup([tag])
+    if r["value"] is None:
+        out["tender_source_text"] = r["text"]
+        out["tender_other_values"] = [(v, s) for v, s in r.get("others", [])]
+        return out
+    v, kind, c = r["value"], r["kind"], r["cand"]
+    page = r.get("page", "")
+    if kind == "eq5":
+        sid = f"EQS5-{_norm(c)}"[:60]
+        oa = r.get("oa")
+        add_src(sid, document="Equipment Schedule, air handling unit schedule", issue="Corr 5", page=f"page {page}", location=f"sheet {r.get('sheet', '')}, tag {r['tag_as_written']}",
+                text_as_read=f"{r['tag_as_written']}: supply airflow {v:g} L/s; outdoor airflow minimum {oa if oa is not None else 'not printed'}",
+                method="Value read from the Equipment Schedule table", confidence="high")
+        out.update(sched_oa_lps=oa)
+    elif kind == "eq5fcu":
+        sid = f"EQS5-{_norm(c)}"[:60]
+        add_src(sid, document="Equipment Schedule, fan coil unit schedule", issue="Corr 5", page=f"page {page}", location=f"sheet {r.get('sheet', '')}, tag {r['tag_as_written']}",
+                text_as_read=f"{r['tag_as_written']}: minimum airflow {v:g} L/s", method="Value read from the Equipment Schedule table", confidence="high")
+    elif kind == "mot":
+        sid = f"MOT2-{_norm(c)}"[:60]
+        add_src(sid, document="MOT NSC Overall AC Equipment Schedule", issue=r.get("issue", "Corr 2"), page=f"page {page}", location=f"tag {c}",
+                text_as_read=f"{c}: supply airflow {v:g} L/s; outdoor airflow minimum {r.get('oa') if r.get('oa') is not None else 'not printed'}",
+                method="Value read from the MOT NSC equipment schedule table", confidence="high")
+        out.update(sched_oa_lps=r.get("oa"))
+    else:
+        sid = f"TSCH-{_norm(c)}"[:60]
+        add_src(sid, document=f"Air-side schematic {r.get('sheet', '')}", issue=r.get("issue", "tender issue"), page=f"page {page}" if page else r.get("sheet", ""), location=f"AHU {c}",
+                text_as_read=r.get("text_as_read") or f"{v:g} L/s", method="Value read from the text printed on the air-side schematic", confidence="medium")
+    out.update(sched_supply_lps=v, sched_source=sid, sched_code="D", tender_source_text=r["text"], tender_other_values=[(x, s) for x, s in r.get("others", [])])
+    if r.get("type"):
+        out["type"] = r["type"]
     return out
 
 
@@ -682,13 +757,19 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
             dpa_units[r["fpu_department_no"]].append(r)
     soa_units = {r.get("unit_zone_code", "") for r in soa_all}
     cand_units = {c: rows for c, rows in dpa_units.items() if c in soa_units} if soa_units else dpa_units
-    ip_map = ip_units(key, stack, cand_units)
+    from .dept_units import keep_room, resolve_units
+    res_units = resolve_units(key, stack, dpa_units, soa_units, lambda: ip_units(key, stack, cand_units), _storey_code, _dept_key, SCOPE_STOREYS)
+    unit_info = res_units["units"]
+    ip_map = {c: i["storey"] for c, i in unit_info.items()}
     if not ip_map:
-        raise ValueError(f"department {key}: no DPA unit matches an IP-block entry of the stacking diagram")
-    if soa_all:
-        dept_name = re.sub(r"^\d+\s*-\s*", "", soa_all[0]["department_folder"])
-    else:
-        dept_name = next((r["department_as_written"] for r in stack if r.get("dept_no") and _dept_key(r["dept_no"]) == key and r["block"].startswith("IP")), key)
+        raise ValueError(f"department {key}: no DPA unit with a storey in LB3-L07 (no explicit entry, name match or SOA unit)"
+                         + (f"; unresolved SOA units {res_units['unresolved']}" if res_units["unresolved"] else ""))
+    dept_name = dept_label(key, root)
+    if not dept_name:
+        if soa_all:
+            dept_name = re.sub(r"^\d+\s*-\s*", "", soa_all[0]["department_folder"])
+        else:
+            dept_name = next((r["department_as_written"] for r in stack if r.get("dept_no") and _dept_key(r["dept_no"]) == key and r["block"].startswith("IP")), key)
     base = build_reva_input(root)
     people = conf.people(root)
     densities = conf.occupancy_cfg(root).get("per_100m2") or {}
@@ -701,6 +782,11 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
     sched_totals = _read(root / REG / "schematic_ahu_totals.csv")
     ahu_sched = {_norm(r["tag_normalised"]): r for r in _read(root / REG / "ahu_schedule.csv")}
     fcu_sched = {_norm(r["tag_normalised"]): r for r in _read(root / REG / "equipment_schedule_air_handling.csv") if r.get("type") == "FCU"}
+    from . import criteria_map as cm
+    mot = cm.MotTheatres(root) if key.lstrip("0") == "22" else None
+    dc_table = cm.datacentre_table(root) if key.lstrip("0") == "42" else {}
+    unmapped_names: Dict[str, List[str]] = defaultdict(list)
+    mot_sched = {_norm(r["tag"].replace("lSONP", "ISONP")): r for r in _read(root / REG / "mot_ahu_schedule.csv") if r.get("equipment_type") in ("AHU", "PAHU")}
     abbr = _expansions(root)
 
     sources: List[Dict[str, Any]] = [s for s in base["sources"] if s["id"] in ("RA-RZ-TBL", "RA-BOD-C19", "RA-BOD-C28", "RA-BOD-C30", "RA-BOD-C31",
@@ -743,6 +829,8 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
         for r in dpa_units[code]:
             by_id[r["unique_room_identifier"]].append(r)
         for ident, group in by_id.items():
+            if not keep_room(unit_info[code], group[0]["room_name"], group[0].get("fpu_group_name", "")):
+                continue
             pick = next((g for g in group if (_f(g.get("designed_area_m2")) or 0) > 0), group[0])
             ident_storey = _storey_code(pick.get("storey_from_identifier") or "")
             soa_q = soa_by_code.get(ident)
@@ -757,7 +845,8 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
 
     # plan rooms of the department, per storey
     first_word = re.sub(r"[^A-Za-z ]", "", dept_name).split()[0] if re.sub(r"[^A-Za-z ]", "", dept_name).split() else dept_name
-    dept_re = re.compile(rf"\(0*{int(key)}\)|^{re.escape(first_word)}\b", re.I)
+    from .dept_units import plan_regex
+    dept_re = re.compile(plan_regex(key) or rf"\(0*{int(key)}\)|^{re.escape(first_word)}\b", re.I)
     plan: List[Dict[str, Any]] = []
     for st in sorted({d["storey"] for d in dpa_rows}):
         for p in polygons.get(st, []):
@@ -885,12 +974,19 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
                 room["system_type"] = _first(za, SYSTYPE_COLUMNS) or ("FCU" if kind in ("FCU", "DXFCU") else None)
                 zsid = add_src(f"ZONE-{p['storey']}-{poly['room_id']}", document=f"AHU zoning, storey {p['storey']}", issue="zoning assignment",
                                page=p["storey"], location=f"plan room {poly['room_id']}",
-                               text_as_read=f"class {za.get('class', '')} ({za.get('class_kind', '')}); department {za.get('department', '')}; basis {za.get('method', '')}",
+                               text_as_read=f"class {za.get('class', '')} ({za.get('class_kind', '')}); department {za.get('department', '')}; basis: {basis_text(za.get('method', ''))}",
                                method="Zoning of the storey, as printed on the room tag of the plan", confidence=str(za.get("confidence", "")))
                 room["prov"]["zoning"] = ["D", zsid]
                 ahu_kinds.setdefault(tag, kind or "AHU")
             else:
                 gaps["ahu"] = f"The plan room shows class '{za.get('class', '')}' and no system tag."
+                if (za.get("class") or "").strip():                 # a zoning class with no unit tag (MV, NV, no information) is the system class of the room
+                    zsid = add_src(f"ZONE-{p['storey']}-{poly['room_id']}", document=f"AHU zoning, storey {p['storey']}", issue="zoning assignment",
+                                   page=p["storey"], location=f"plan room {poly['room_id']}",
+                                   text_as_read=f"class {za.get('class', '')} ({za.get('class_kind', '')}); department {za.get('department', '')}; basis: {basis_text(za.get('method', ''))}",
+                                   method="Zoning of the storey, as printed on the room tag of the plan", confidence=str(za.get("confidence", "")))
+                    room["system_type"] = za.get("class", "").strip().upper()
+                    room["prov"]["zoning"] = ["D", zsid]
         else:
             rj = rejected_by.get(number)
             notes_plan: List[str] = []
@@ -929,6 +1025,9 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
                     ahu_kinds.setdefault(zl["tag"], zl["kind"] or "AHU")
                 else:
                     gaps["ahu"] = f"The plan rooms of the same name show class '{zl['value']}' and no system tag."
+                    if str(zl["value"] or "").strip():
+                        room["system_type"] = str(zl["value"]).strip().upper()
+                        room["prov"]["zoning"] = [zcode, zsid]
             elif rj is None:
                 notes_plan.append("No plan room matches this room by name, department and storey.")
             gaps["plan"] = " ".join(notes_plan)
@@ -953,18 +1052,89 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
             if hc:
                 gaps["height"] = height_conflict_text(hc)[0].upper() + height_conflict_text(hc)[1:] + "."
             n_ch_default += 1
-        row, variants, how = match_criteria(d["name"], criteria)
-        if row is not None:
+        row, variants, how = None, [], ""
+        crit_done = False
+        if key.lstrip("0") == "22":                                  # operating theatres and anaesthesia preparation rooms: fixed by the MOT NSC specification
+            spec = mot.theatre(number) or (mot.prep(number, d["name"]) if d["name"].startswith("Anaesthesia Prep") else None)
+            if spec is not None:
+                msid = add_src(f"MOT-{_norm(number)}"[:60], document="MOT NSC air-side schematic and schedule of modes", issue="Corr 2", page=spec["sheet"],
+                               location=spec["what"], text_as_read=spec["text"], method="Value read from the room box of the MOT NSC air-side schematic", confidence="medium")
+                booklet = [c for c in criteria if c["room_type_as_printed"].strip().lower() == ("operating theatre" if d["name"].startswith("Operating") else "anaesthetic prépara6on")
+                           or (not d["name"].startswith("Operating") and c["room_type_as_printed"].lower().startswith("anaesthe") and cm.suite_of(number) == "DSOT" and 111 <= (_f(c["booklet_page"]) or 0) <= 112)]
+                booklet = [c for c in booklet if (cm.suite_of(number) == "DSOT") == (110 <= (_f(c["booklet_page"]) or 0) <= 113)]
+                comp = ""
+                if booklet:
+                    b = booklet[0]
+                    comp = (f" Booklet row '{b['room_type_as_printed']}' (page {b['booklet_page']}), for comparison only: outdoor air {b['min_oa_ach']} and total {b['min_total_ach']} "
+                            f"air changes, pressure {b['pressure_regime_as_printed']}.")
+                room["criteria"] = dict(criteria_row=f"MOT NSC specified: {'operating theatre' if d['name'].startswith('Operating') else 'anaesthesia preparation room'}",
+                                        page=spec["sheet"], supply_specified_lps=spec["supply"], oa_specified_lps=spec["oa"], exhaust_specified_lps=spec["exhaust"],
+                                        temp_min_c=spec["tmin"], temp_max_c=spec["tmax"], rh_max_pct=spec["rh"],
+                                        pressure_regime=("POSITIVE" if (spec["pa"] or 0) > 0 else "NEGATIVE" if (spec["pa"] or 0) < 0 else None),
+                                        pressure_pa_tender=spec["pa"], air_class=spec["air_class"], filter=spec["filter"],
+                                        single_pass="Y" if spec["mode"] == "single pass" else None, source=msid, code="S",
+                                        remark=(f"Specified by the MOT NSC ({spec['what']}), mode '{spec['mode']}': {spec['text']}. The specified airflows are not resized." + comp))
+                crit_stats["MOT NSC specified"].append(number)
+                crit_done = True
+                if not room["ahu"]:                     # the unit of a theatre is the one that the schedule of modes names; the preparation room is on the unit of its theatre
+                    utag = mot.theatre_ahu.get(number) if d["name"].startswith("Operating") else (spec.get("unit_tag") or (spec.get("sch_tags") or [None])[0])
+                    if utag and re.match(r"^AHU-B-\d\d-\d\d", utag):
+                        utag = utag.replace("lSONP", "ISONP")
+                        if re.search(r"-\d{2}A$", utag):
+                            utag = zone_key(utag) + "A/B"
+                        room["ahu"] = utag
+                        room["prov"]["zoning"] = ["D", msid]
+                        remark.append(f"unit {utag} from the MOT NSC schedule of modes and air-side schematic")
+                        gaps.pop("ahu", None)
+                        ahu_kinds.setdefault(utag, "AHU")
+        if not crit_done and key.lstrip("0") == "42":
+            dc = cm.datacentre_criteria(d["name"], d["dpa_area"] or soa_area_of(number), dc_table, _regime)
+            if dc is not None:
+                csid = add_src(f"CRIT-42-{_norm(dc['criteria_row'])}-{dc['page'].split()[-1]}"[:60], document="DD Booklet, Data Centre (criteria table read from the page image)", issue="R2",
+                               page=dc["page"], location="criteria table", text_as_read="; ".join(f"{k} {v}" for k, v in dc["_row"].items() if not k.startswith("_") and k != "Room"),
+                               method="Value read from the page image of the DD Booklet criteria table", confidence="medium")
+                note_ = dc.pop("_note"); dc.pop("_pdf_page"); dc.pop("_file"); dc.pop("_row")
+                dc.update(source=csid, code="D", remark=(f"Booklet room type '{dc['criteria_row']}'. " + (note_ + "." if note_ else "")).strip())
+                if d["name"] not in (dc["criteria_row"],):
+                    dc["code"] = "A"
+                    dc["remark"] += f" The room '{d['name']}' is mapped to this room type by name; confirm."
+                room["criteria"] = dc
+                crit_stats[f"{dc['criteria_row']} (Data Centre booklet)"].append(number)
+                crit_done = True
+        if not crit_done:
+            mp = cm.mapped_row(key, d["name"], number, criteria, _regime)
+            if mp is not None:
+                mrow, why = mp
+                csid = add_src(f"CRIT-{key}-{_norm(mrow['room_type_as_printed'])}"[:60], document=_doc(mrow["source_file"]), issue=mrow.get("department_label", "booklet"),
+                               page=f"page {mrow['booklet_page']}", location=mrow.get("bbox", ""), text_as_read=criteria_text(mrow),
+                               method="Value read from the DD Booklet criteria table", confidence=str(mrow.get("confidence", "")))
+                room["criteria"] = criteria_from_row(mrow, csid, "room type mapped", "A",
+                                                     f"Booklet room type '{mrow['room_type_as_printed']}' (page {mrow['booklet_page']}) mapped to the room type '{d['name']}': {why}. Confirm the mapping.")
+                crit_stats[mrow["room_type_as_printed"] + " (mapped)"].append(number)
+                _sig = lambda c: (c.get("min_oa_ach"), c.get("min_total_ach"), c.get("pressure_pa"), c.get("pressure_regime_as_printed"), c.get("air_class"))
+                _var = [c for c in criteria if c["room_type_norm"] == mrow["room_type_norm"] and _sig(c) != _sig(mrow)]
+                if _var:
+                    gaps["criteria"] = _variant_text(mrow, _var)
+                crit_done = True
+        if not crit_done:
+            row, variants, how = match_criteria(d["name"], criteria)
+        if crit_done:
+            pass
+        elif row is not None:
             csid = add_src(f"CRIT-{key}-{_norm(row['room_type_as_printed'])}"[:60], document=_doc(row["source_file"]), issue=row.get("department_label", "booklet"),
                            page=f"page {row['booklet_page']}", location=row.get("bbox", ""), text_as_read=criteria_text(row),
                            method="Value read from the DD Booklet criteria table", confidence=str(row.get("confidence", "")))
-            room["criteria"] = criteria_from_row(row, csid, how)
+            if how.startswith("name listed"):
+                room["criteria"] = criteria_from_row(row, csid, how, "A", f"The name '{d['name']}' is listed inside the booklet row '{row['room_type_as_printed']}' (page {row['booklet_page']}). Confirm the mapping.")
+            else:
+                room["criteria"] = criteria_from_row(row, csid, how)
             crit_stats[row["room_type_as_printed"]].append(number)
             if variants:
                 gaps["criteria"] = _variant_text(row, variants)
         else:
             unmapped_crit.append(number)
-            gaps["criteria"] = "No booklet room type fits this room name" + (f" ({how})" if how else "") + "."
+            unmapped_names[d["name"]].append(number)
+            gaps["criteria"] = "No booklet room type is mapped to this room name" + (f" ({how})" if how else "") + ". The room has no criteria row. Confirm the room type."
         rl = rds_link["links"].get(number)
         rds = rl["resolved"]["row"] if rl else None
         rds_conflict = rl["resolved"]["conflict"] if rl else []
@@ -983,7 +1153,7 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
         if rds_conflict:
             n_nouse += 1
             room["occupancy_basis"] = "NOT SET"
-            remark.append("occupancy not set (the RDS issues disagree; 0 people is a placeholder)")
+            remark.append("occupancy not set (the RDS issues disagree)")
             gaps["occupancy"] = ("The RDS gives different occupancy texts for this room in the same issue: " + "; ".join(f"'{t}'" for t in rds_conflict) +
                                  ". None is chosen. Confirm the occupancy.")
         elif occ is not None:
@@ -1002,6 +1172,10 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
             if "shifts" in onotes:
                 gaps["occupancy_note"] = (f"The RDS occupancy '{occ[1]}' gives two shifts. The design occupancy is the sum of the upper bounds, {occ[0]:g} people, as the "
                                           "reading rule sets. The shifts are not present at the same time: the peak at one time is lower. Confirm the design occupancy.")
+            if occ[0] == 0 and not gaps.get("occupancy_note"):
+                use0, _lab0 = room_use(d["name"])
+                if use0 in OCCUPIED_USES:
+                    gaps["occupancy_note"] = (f"RDS occupancy '{occ[1]}' taken as 0 persons (RDS value). The room use is normally occupied. To confirm.")
             if occ[0] > 0:
                 room["activity"] = "Seated"
                 room["prov"]["activity"] = ["A", "ASM-ACTIVITY"]
@@ -1017,35 +1191,147 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
                     room["prov"]["activity"] = ["A", "ASM-ACTIVITY"]
                 n_default += 1
                 remark.append(("no RDS for this room" if rds is None else "RDS occupancy field empty") + f"; room use {use.replace('_', ' ')}")
+                if re.search(r"hand ?-?wash|scrub bay|scrub up", d["name"], re.I):
+                    remark.append("Hand-wash bay: use taken as circulation, 0 persons. To confirm")
                 if rl and rl["resolved"]["notes"]:
                     remark.append("RDS " + "; ".join(rl["resolved"]["notes"]))
             else:
                 n_nouse += 1
                 room["occupancy_basis"] = "NOT SET"
-                remark.append("occupancy not set (0 people is a placeholder)")
+                remark.append("occupancy not set")
                 gaps["occupancy"] = ("Occupancy is not set. " + ("The RDS field is empty." if rds is not None else "No RDS row matches.") +
-                                     " No room use fits the room name for the default density.")
+                                     (f" The density table has no value for this room use ({label}). " if label else " No room use fits the room name for the default density. ") +
+                                     "Give the number of persons.")
         room["remark"] = ". ".join(_sentence_case(x.replace("; ", ". ")) for x in remark) + "."
+        room["remark"] += " " + ROOM_THERMAL_NOTE
+        if EQUIPMENT_LED.search(d["name"]):
+            gaps["equipment"] = "Equipment gain is not known, so the thermal load is not representative. No load value is added."
+        if room["ahu"] and cath_tag_note(room["ahu"]):
+            room["remark"] += " " + cath_tag_note(room["ahu"])
         rooms.append(room)
 
-    # tender schematic room (comparison) and a pressure target from it where the booklet gives a direction only
+    # rooms with no unit: the room number printed on an air-side schematic box (for example 'ICU BED 05.02.06') names the unit of the room. A link needs the
+    # number and a word of the room name in common; a number that two units print stays unlinked and is listed.
+    sch_num: Dict[str, List[Dict[str, str]]] = defaultdict(list)
+    for sr in _read(root / REG / "schematic_rooms.csv"):
+        mm = re.search(r"(\d\d\.\d\d\.\d\d)", sr.get("room_name_as_written", ""))
+        if mm and sr.get("ahu_tag"):
+            sch_num[mm.group(1)].append(sr)
+    sch_linked, sch_conflict, sch_nomatch = 0, [], 0
+    stop = {"room", "bed", "bay", "the", "and", "of", "for", "no", "area"}
+    for room in rooms:
+        if room["ahu"]:
+            continue
+        mm = re.search(r"(\d\d\.\d\d\.\d\d)", room["number"])
+        cands = sch_num.get(mm.group(1), []) if mm else []
+        if not cands:
+            continue
+        rw = {w for w in re.findall(r"[a-z]{3,}", room["name"].lower())} - stop
+        cands = [c for c in cands if c.get("storey") == room["storey"]
+                 and (rw & ({w for w in re.findall(r"[a-z]{3,}", c["room_name_as_written"].lower())} - stop)
+                      or any(w[:3] in c["room_name_as_written"].lower() for w in rw if len(w) > 4))]
+        if not cands:
+            sch_nomatch += 1
+            continue
+        tags_ = sorted({t.strip() for c in cands for t in c["ahu_tag"].split(";") if t.strip() and not re.search(r"/\d+[A-Z]$", t.strip())})   # a standby unit '-03/04C' is not a zone
+        zkeys = {zone_key(t) for t in tags_}
+        if len(zkeys) > 1:
+            sch_conflict.append((room["number"], tags_))
+            continue
+        if not tags_:
+            continue
+        tag = tags_[0]
+        if len(tags_) > 1 and all(re.search(r"-\d{2}[AB]$", t) for t in tags_):
+            tag = zone_key(tags_[0]) + "A/B"                  # the duty and standby pair is one zone
+        c0 = sorted(cands, key=lambda c: (c["issue_set"] != "tender", c["sheet"]))[0]
+        zsid = add_src(f"SCHROOM-{_norm(c0['sheet'])}-{_norm(room['number'])}"[:60], document=f"Air-side schematic {c0['sheet']}", issue=c0.get("issue", ""), page=f"page {c0.get('page', '')}",
+                       location=f"room box '{c0['room_name_as_written']}'", text_as_read=f"{c0['room_name_as_written']} on unit {c0['ahu_tag']}",
+                       method="Unit of the room read from the room box of the air-side schematic, linked by the room number", confidence=c0.get("confidence", "") or "medium")
+        room["ahu"] = tag
+        room["prov"]["zoning"] = ["D", zsid]
+        room["remark"] = room["remark"].rstrip(".") + f". Unit {tag} from the room number on schematic {c0['sheet']}."
+        room["gaps"].pop("ahu", None)
+        ahu_kinds.setdefault(tag, "AHU")
+        sch_linked += 1
+    if sch_linked or sch_conflict:
+        flags.append(dict(type="VERIFY", ref="Room Information", text=f"{sch_linked} room(s) take their unit from the room number printed on an air-side schematic box. "
+                          f"{len(sch_conflict)} room number(s) are printed on boxes of different units and stay unlinked"
+                          + (": " + "; ".join(f"{n} ({', '.join(u)})" for n, u in sch_conflict[:6]) if sch_conflict else "") + ".", source=""))
+    n_noahu = sum(1 for r in rooms if not r["ahu"])
+    flags.append(dict(type="VERIFY", ref="Room Information", text=f"{n_noahu} of {len(rooms)} room(s) have no unit: no plan room of the zone schedule and no schematic room number links "
+                      "them to one. Their supply is not on any unit. The airflow of a unit is the sum of its linked rooms only.", source=""))
+    # tender schematic room (comparison) and a pressure target from it where the booklet gives a direction only.
+    # Link by unit, room name and typical count (brief 7.3 step 4): (1) the room names of the unit's schematic boxes; where a name has several boxes with the same
+    # figures they are one typical room; (2) for a room with no unit, a schematic name of the same storey whose typical counts add up to the number of rooms of
+    # this workbook with that name. A name that fits more than one set of figures stays unlinked and is listed.
+    def _typ(s_):
+        try:
+            return max(1, int(float(s_.get("typical_count") or 1)))
+        except ValueError:
+            return 1
+
+    def _fig(s_):
+        return (s_.get("supply_L_s"), s_.get("return_L_s"), s_.get("exhaust_L_s"), s_.get("pressure"))
+
+    def _link_schematic(room, s, how):
+        ssid = add_src(f"TSCH-{s['sheet']}-{_norm(s['room_name_as_written'])}"[:60], document=f"Air-side schematic {s['sheet']}", issue=s.get("issue", "tender issue"),
+                       page=f"page {s.get('page', '')}", location=s.get("box_page_view_table", ""), text_as_read=s.get("airflow_as_printed", ""),
+                       method="Value read from the room table on the air-side schematic", confidence=s.get("confidence", ""))
+        room["schematic"] = dict(supply_lps=_f(s["supply_L_s"]), return_lps=_f(s["return_L_s"]), exhaust_lps=_f(s["exhaust_L_s"]),
+                                 pressure_pa=_pa(s.get("pressure")), source=ssid, code="D" if how.startswith("unit") else "A",
+                                 source_text=f"tender air-side schematic {s['sheet']}, {s['room_name_as_written']} (linked by {how})")
+        used_sr.add(id(s))
+        c = room["criteria"]
+        if c and _pa(s.get("pressure")) is not None and c.get("pressure_pa_booklet") is None and c.get("pressure_regime") in ("POSITIVE", "NEGATIVE"):
+            c["pressure_pa_tender"] = _pa(s.get("pressure"))
+
+    used_sr: set = set()
+    sr_ambiguous: List[str] = []
+    n_by_name: Dict[Tuple[str, str], int] = defaultdict(int)
+    for room in rooms:
+        n_by_name[(_norm(room["name"]), room["storey"])] += 1
     for room in rooms:
         if not room["ahu"]:
             continue
         tag_c = _tag_candidates(room["ahu"])
         rws = [s for s in sched_rooms if any(t in (s["ahu_tag"] or "") for t in tag_c) and _norm(s["room_name_as_written"]) == _norm(room["name"])
                and (not room["storey"] or s["storey"] == room["storey"])]
-        if len(rws) == 1:
-            s = rws[0]
-            ssid = add_src(f"TSCH-{s['sheet']}-{_norm(s['room_name_as_written'])}"[:60], document=f"Air-side schematic {s['sheet']}", issue=s.get("issue", "tender issue"),
-                           page=f"page {s.get('page', '')}", location=s.get("box_page_view_table", ""), text_as_read=s.get("airflow_as_printed", ""),
-                           method="Value read from the room table on the air-side schematic", confidence=s.get("confidence", ""))
-            room["schematic"] = dict(supply_lps=_f(s["supply_L_s"]), return_lps=_f(s["return_L_s"]), exhaust_lps=_f(s["exhaust_L_s"]),
-                                     pressure_pa=_pa(s.get("pressure")), source=ssid, code="D",
-                                     source_text=f"tender air-side schematic {s['sheet']}, {s['room_name_as_written']}")
-            c = room["criteria"]
-            if c and _pa(s.get("pressure")) is not None and c.get("pressure_pa_booklet") is None and c.get("pressure_regime") in ("POSITIVE", "NEGATIVE"):
-                c["pressure_pa_tender"] = _pa(s.get("pressure"))
+        if len(rws) == 1 or (len(rws) > 1 and len({_fig(x) for x in rws}) == 1):
+            _link_schematic(room, rws[0], "unit, name and typical count")
+            for x in rws[1:]:
+                used_sr.add(id(x))
+        elif len(rws) > 1:
+            sr_ambiguous.append(f"{room['number']} ({len(rws)} boxes with different figures)")
+    for room in rooms:
+        if room.get("schematic"):
+            continue
+        rws = [s for s in sched_rooms if _norm(s["room_name_as_written"]) == _norm(room["name"]) and s["storey"] == room["storey"]]
+        if rws and len({_fig(x) for x in rws}) == 1 and sum(_typ(x) for x in rws) == n_by_name[(_norm(room["name"]), room["storey"])]:
+            _link_schematic(room, rws[0], "name and typical count")
+        elif rws:
+            sr_ambiguous.append(f"{room['number']} ({len(rws)} boxes, typical count {sum(_typ(x) for x in rws)} against {n_by_name[(_norm(room['name']), room['storey'])]} rooms)")
+    num_rows: Dict[str, List[Dict[str, str]]] = defaultdict(list)
+    for s_ in sched_rooms:
+        mm_ = re.search(r"(\d\d\.\d\d\.\d\d)", s_.get("room_name_as_written", ""))
+        if mm_:
+            num_rows[mm_.group(1)].append(s_)
+    for room in rooms:                 # (3) the room number printed in the box name, on the same storey, with a word of the room name in common
+        if room.get("schematic"):
+            continue
+        mm_ = re.search(r"(\d\d\.\d\d\.\d\d)", room["number"])
+        cands_ = [x for x in (num_rows.get(mm_.group(1), []) if mm_ else []) if x["storey"] == room["storey"]]
+        rw_ = {w for w in re.findall(r"[a-z]{3,}", room["name"].lower())} - {"room", "bed", "bay", "the", "and", "for", "area"}
+        cands_ = [x for x in cands_ if rw_ & ({w for w in re.findall(r"[a-z]{3,}", x["room_name_as_written"].lower())} - {"room", "bed", "bay", "the", "and", "for", "area"})
+                  or any(w[:3] in x["room_name_as_written"].lower() for w in rw_ if len(w) > 4)]
+        if cands_ and len({_fig(x) for x in cands_}) == 1:
+            _link_schematic(room, cands_[0], "room number printed in the box")
+    n_sch = sum(1 for r in rooms if r.get("schematic"))
+    unit_tags = {r["ahu"] for r in rooms if r["ahu"]}
+    unmatched_sr = [s for s in sched_rooms if id(s) not in used_sr and any(t in (s["ahu_tag"] or "") for u in unit_tags for t in _tag_candidates(u))]
+    flags.append(dict(type="VERIFY", ref="Airflow Comparison", text=f"{n_sch} of {len(rooms)} room(s) are linked to a room box of the tender air-side schematics (by unit and name, "
+                      "or by name and typical count). " + (f"{len(unmatched_sr)} room box(es) of the schematics on the units of this workbook match no room: "
+                      + "; ".join(f"{x['room_name_as_written']} ({x['sheet']})" for x in unmatched_sr[:8]) + (" and others" if len(unmatched_sr) > 8 else "") + ". " if unmatched_sr else "") +
+                      (f"{len(sr_ambiguous)} room(s) fit more than one set of figures or a different count and stay unlinked: " + "; ".join(sr_ambiguous[:6]) + ("." if len(sr_ambiguous) <= 6 else " and others.") if sr_ambiguous else ""), source=""))
     # rooms with a pressure target: no door data, so no Pressure block; flagged
     for room in rooms:
         c = room["criteria"]
@@ -1056,13 +1342,24 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
             room["gaps"]["door"] = f"pressure target {pa:g} Pa, but no document gives door data. It is not calculated on Pressure."
     ahus: List[Dict[str, Any]] = []
     for tag in dict.fromkeys(r["ahu"] for r in rooms if r["ahu"]):
-        t = _tender_for_tag(tag, ahu_sched, fcu_sched, sched_equip, sched_totals, add_src)
+        t = _tender_for_tag(tag, ahu_sched, fcu_sched, sched_equip, sched_totals, add_src, mot_sched, root=root)
         a = dict(tag=tag, type=t.pop("type", ahu_kinds.get(tag, "AHU")))
         a.update(t)
-        sc = _tender_for_tag(tag, {}, {}, sched_equip, sched_totals, add_src)
+        sc = _tender_for_tag(tag, None, None, None, None, add_src, schematic_only=True, root=root)
         if sc.get("sched_supply_lps") is not None:
             a.update(schematic_supply_lps=sc["sched_supply_lps"], schematic_source=sc["sched_source"], schematic_code="D")
         ahus.append(a)
+        if a.get("sched_supply_lps") is None and any(str((r["prov"].get("zoning") or ["", ""])[1]).startswith("MOT-") for r in rooms if r["ahu"] == tag):
+            flags.append(dict(type="VERIFY", ref=tag, text=f"Unit {tag} is named by the MOT NSC schedule of modes (Appendix J), for the rooms that carry it here. The MOT NSC "
+                              "Overall AC Equipment Schedule does not list this tag, and the zone schedule does not show it. No tender airflow is available. Confirm the tag.", source=""))
+    ztot = zone_totals(root)
+    for a in ahus:
+        z = ztot.get(zone_key(a["tag"]))
+        if z is not None:
+            sid_z = add_src(f"ZUNIT-{_norm(zone_key(a['tag']))}"[:60], document="AHU zone schedule, LB3 to L07", issue="Rev A", page="storeys " + ", ".join(z["storeys"]),
+                            location=f"unit {a['tag']}", text_as_read=f"{z['rooms']} zoned room(s), {z['area']:.1f} m² measured on the tender plan",
+                            method="Rooms and area of the unit in the zone schedule", confidence="medium")
+            a.update(zone_rooms=z["rooms"], zone_area_m2=round(z["area"], 1), zone_code="D", zone_source=sid_z)
     dept_fans, fan_flags = department_fans(root, [a["tag"] for a in ahus], rooms, add_src)
     flags.extend(fan_flags)
     for a in ahus:
@@ -1102,8 +1399,14 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
     sp = list(base["space_types"]) + [dict(name=UNCLASSIFIED, room_t_c=base["space_types"][0]["room_t_c"], room_h_kjkg=base["space_types"][0]["room_h_kjkg"],
                                            code="A", source="ASM-DEFAULT")]
     crit_lines = [f"Criteria row '{t}' applied to {len(v)} room(s): {', '.join(v[:6])}{' and others' if len(v) > 6 else ''}." for t, v in sorted(crit_stats.items())]
-    crit_lines.append(f"{len(unmapped_crit)} room(s) have no matching booklet room type. They are listed on Flags." if unmapped_crit
-                      else "Every room has a matching booklet room type.")
+    crit_lines.append(f"{len(unmapped_crit)} room(s) have no criteria row. They are listed on Flags." if unmapped_crit
+                      else "Every room has a criteria row.")
+    if unmapped_names:
+        crit_lines.append("Room types with no criteria row, by name and number of rooms: " +
+                          "; ".join(f"{n} ({len(v)})" for n, v in sorted(unmapped_names.items(), key=lambda kv: (-len(kv[1]), kv[0]))) + ". Confirm the booklet room type of each.")
+        for n, v in sorted(unmapped_names.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+            flags.append(dict(type="CONFIRM", ref=n, text=f"{len(v)} room(s) named '{n}' have no criteria row: no booklet room type is mapped to this room name. "
+                              f"Their air-change and outdoor airflows are 0 L/s until the room type is confirmed. First rooms: {', '.join(v[:4])}.", source=""))
     use_lines = ["Occupancy comes from the RDS occupancy field.",
                  "The default density applies only where that field is empty or the room has no RDS. It is in persons per 100 m², rounded up to a whole person.",
                  "The room use comes from the room name. Each rule below gives the room kind and its density per 100 m²."] + \
@@ -1132,7 +1435,8 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
         with_ahu=sum(1 for r in rooms if r["ahu"]), with_criteria=sum(1 for r in rooms if r["criteria"]), with_soa=sum(1 for r in rooms if r.get("soa_area_m2") is not None),
         with_rds=n_rds, occupancy_from_rds=n_rds_occ, occupancy_default_density=n_default, occupancy_not_set=n_nouse, ahus=len(ahus), fans=len(dept_fans),
         ahus_with_tender=sum(1 for a in ahus if a.get("sched_supply_lps") is not None), pressure_rooms_not_calculated=sum(1 for r in rooms if r["gaps"].get("door")),
-        units=list(ip_map.items()),
+        units=list(ip_map.items()), unit_basis={c: i["basis"] for c, i in unit_info.items()}, units_excluded=res_units["excluded"],
+        units_unresolved=res_units["unresolved"],
         plan_linked=len(pairs) + len(region_of) + len(zlinks), plan_pairs=len(pairs), plan_by_name_and_count=zl_count_count[0], plan_by_department_rule=zl_rule_count[0],
         rds_links_by_basis=dict(rds_basis_count), rds_unlinked_dpa=len(rds_link['unlinked_dpa']), rds_unlinked_rds=len(rds_link['unlinked_rds']),
         height_from_rls=n_rls, height_default=n_ch_default, height_conflicts=len(rls_link['conflicts']), rls_rows=len(rls_rows))
@@ -1156,6 +1460,8 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
         if id(p_) not in count_plan_ids:
             audit.append(dict(side="PLAN", dept=key, ref=p_["poly"]["room_id"], name=p_["name"], storey=p_["storey"], ahu=_class_of(p_),
                               plan_basis="no DPA room one to one" + ("; used by the department rule" if rule_users.get(id(p_)) else "")))
+    for n_, u_ in sch_conflict:
+        audit.append(dict(side="SCHEM", dept=key, ref=n_, name="room number printed on the box of more than one unit", ahu="; ".join(u_)))
     data["link_audit"] = audit
     if out is not None:
         Path(out).parent.mkdir(parents=True, exist_ok=True)

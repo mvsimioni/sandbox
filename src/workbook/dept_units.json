@@ -1,0 +1,304 @@
+{
+ "_about": "Explicit department -> DPA unit -> IP storey mapping, used by src/workbook/dept_units.py only where the SOA unit codes plus the name match to the stacking diagram do not give the storey. Every entry carries its evidence. 'storey' is one IP storey in LB3-L07. 'exclude' entries record DPA units of the department that are not in the IP block (reason given). 'room_name_regex' and 'exclude_group_regex' (case-insensitive) restrict the unit to some rooms where two departments share one DPA unit.",
+ "stacking_ref": "out/registers/stacking_diagram.csv (AH Stacking Diagram, block IP tower); out/qa/stacking_diagram.md",
+ "entries": {
+  "04": [
+   {
+    "unit": "ICHA",
+    "storey": "L05",
+    "evidence": "SOA unit ICHA is 'ICU | HDU (44)'. Stacking diagram L5 NE and SE cells are 'ICU / HDU 22' each: 2 x 22 = 44 beds. The DPA unit name carries the same number (44)."
+   },
+   {
+    "unit": "ICHB",
+    "storey": "L04",
+    "evidence": "SOA unit ICHB is 'ICU | HDU (48)'. Stacking diagram L4 NE and SE cells are 'HOT ICU / HDU 24' each: 2 x 24 = 48 beds. The DPA unit name carries the same number (48)."
+   }
+  ],
+  "11": [
+   {
+    "unit": "EMER",
+    "storey": "L01",
+    "evidence": "DPA unit 'Emergency'. Stacking diagram L1: 'ED DROP OFF' (NW) and 'EMERGENCY/CAC' (SW), both dept 11. RDS of dept 11 are Emergency Dept and Department - ED."
+   },
+   {
+    "unit": "OCAC",
+    "storey": "L01",
+    "evidence": "DPA unit 'ED - CAC'. Stacking diagram L1 SW cell 'EMERGENCY/CAC' (dept 11). RDS of dept 11 include 'Department - CAC' (7 rooms)."
+   }
+  ],
+  "22": [
+   {
+    "unit": "MSOT",
+    "storey": "L05",
+    "evidence": "DPA unit 'Major Operating Theatre'. Stacking diagram L5 NW 'MAJOR' and SW 'OPERATING + THEATRES' (dept 22)."
+   },
+   {
+    "unit": "DSOT",
+    "storey": "L06",
+    "evidence": "DPA unit 'Day Surgery'. Stacking diagram L6 NW 'DAY SURGERY' and SW 'OPERATING + THEATRES' (dept 22)."
+   },
+   {
+    "unit": "AMSC",
+    "storey": "L06",
+    "evidence": "DPA unit 'Ambulatory Surgical Centre' (ASC). Stacking diagram L6 'ASC - DOSA' and 'ASC- ASW & SLEEP STUDIES' (dept 22)."
+   }
+  ],
+  "23": [
+   {
+    "unit": "ENDO",
+    "storey": "L02",
+    "evidence": "DPA unit 'Endoscopy'. Stacking diagram L2 NW 'ENDOSCOPY CENTRE + AN' (dept 23)."
+   }
+  ],
+  "26": [
+   {
+    "unit": "DIIP",
+    "storey": "L04",
+    "evidence": "DPA unit 'Diagnostic Imaging - IP'. Stacking diagram L4 SW 'CATH LAB + DIAG IMAGING - IP' (dept 26). The 'CT Scan' cell on L5 (dept 26) has no plan room of dept 26 on L05 in zone_assignment_L05.csv, so L05 DIIP rooms stay with the L04 unit."
+   },
+   {
+    "unit": "DINM",
+    "exclude": true,
+    "reason": "Nuclear Medicine: stacking diagram puts it in the OP block (L7 'NUC MED'), not in the IP block."
+   },
+   {
+    "unit": "DIOP",
+    "exclude": true,
+    "reason": "Diagnostic Imaging - OP: OP block (L7 'DIAG IMAGING - OP')."
+   },
+   {
+    "unit": "DISA",
+    "exclude": true,
+    "reason": "Diagnostic Imaging - Satellite: OP block (L6 'DI - SATELLITE/ BREAST CLINIC')."
+   }
+  ],
+  "28": [
+   {
+    "unit": "CATH",
+    "storey": "L04",
+    "evidence": "DPA unit 'Cardiac Lab'; SOA unit CATH of dept 28. Stacking diagram L4 SW 'CATH LAB' (dept 28)."
+   }
+  ],
+  "29": [
+   {
+    "unit": "LABM",
+    "storey": "L03",
+    "evidence": "DPA unit 'Lab'. Stacking diagram L3 SW 'LABORATORY + CSSD' (dept 29). zone_assignment_L03.csv has 'Laboratory (29)'."
+   }
+  ],
+  "31": [
+   {
+    "unit": "ANWSIP2",
+    "storey": "L02",
+    "evidence": "DPA unit 'Admin Workspace - IP (L2)'. Stacking diagram L2 SW 'AN - ED' (dept 31). D-009: the L02 AN-ED area is future EDTU, office criteria."
+   },
+   {
+    "unit": "AIWLL2",
+    "storey": "L02",
+    "evidence": "DPA unit 'Admin Neighbourhood - IP (L2)'; AN = Admin Neighbourhood, IP. Stacking diagram L2 SW 'AN - ED' (dept 31). Inferred from the unit name and the level in the name; to confirm."
+   },
+   {
+    "unit": "ANWSIP4",
+    "storey": "L04",
+    "evidence": "DPA unit 'Admin Workspace - IP (L4)'. Stacking diagram L4 'AN - DI' and 'AN - ICU' (dept 31). D-009: L04 AN spaces on schematics IP-BH-05041/05042/05048."
+   }
+  ],
+  "34": [
+   {
+    "unit": "MRHI",
+    "storey": "B2",
+    "evidence": "DPA unit 'MRO'; room identifiers read 'MRHI 01.B2.xx'. Stacking diagram B2 SE 'HS: SSR, C3, FACILITY MANAGEMENT MRO, BME' (dept 35;34;37)."
+   }
+  ],
+  "35": [
+   {
+    "unit": "FACM",
+    "storey": "B2",
+    "evidence": "DPA unit 'FM'. Stacking diagram B2 SE 'HS: SSR, C3, FACILITY MANAGEMENT MRO, BME' (dept 35;34;37)."
+   }
+  ],
+  "36": [
+   {
+    "unit": "HOSP",
+    "storey": "B2",
+    "evidence": "DPA unit 'Hospitality' (waste management, housekeeping, clean linen). zone_assignment_B2.csv has 'Hospitality' (25 plan rooms); the stacking diagram B2 SE cell 'CLEAN LINEN' has no dept number."
+   }
+  ],
+  "37": [
+   {
+    "unit": "BIOM",
+    "storey": "B2",
+    "evidence": "DPA unit 'BME'. Stacking diagram B2 SE 'HS: SSR, C3, FACILITY MANAGEMENT MRO, BME' (dept 35;34;37)."
+   }
+  ],
+  "39": [
+   {
+    "unit": "MORT",
+    "storey": "B2",
+    "evidence": "DPA unit 'Mortuary'; room identifiers read 'MORT 01.B2.xx'. Its rooms (Body Store, Mortuary In Charge) are the RDS rooms of dept 39 General Services. Stacking diagram B2 SE 'MORTUARY' and 'CLEAN LINEN' (dept 39 for CLEAN LINEN)."
+   },
+   {
+    "unit": "MAIL",
+    "storey": "B2",
+    "evidence": "DPA unit 'Mail Room'; room identifier 'MAIL 01.B2.02'. 'Mail Room' is an RDS room of dept 39 General Services."
+   }
+  ],
+  "40": [
+   {
+    "unit": "MMDT",
+    "storey": "B2",
+    "evidence": "DPA unit 'Materials Management'. Stacking diagram B2 SW 'LOADING DOCK / MAT. MGMT.' (dept 40)."
+   }
+  ],
+  "42": [
+   {
+    "unit": "DATA",
+    "storey": "B2",
+    "evidence": "DPA unit 'Data Centre'; room identifiers read 'DATA 01.B2.xx'. Stacking diagram B2 NW 'PRIMARY SERVER ROOM' (dept 42)."
+   }
+  ],
+  "43": [
+   {
+    "unit": "ITEC",
+    "storey": "L07",
+    "exclude_room_name_regex": "innovation lab",
+    "evidence": "DPA unit 'ITD'. Stacking diagram L7 SE 'ITD/INNOVATION LAB + BRIDGE' (dept 43;44). The room 'Innovation Lab' of the unit goes to dept 44."
+   }
+  ],
+  "44": [
+   {
+    "unit": "ITEC",
+    "storey": "L07",
+    "room_name_regex": "innovation lab",
+    "evidence": "DPA unit 'ITD' holds one room 'Innovation Lab', the only RDS room of dept 44. Stacking diagram L7 SE 'ITD/INNOVATION LAB + BRIDGE' (dept 43;44)."
+   }
+  ],
+  "45": [
+   {
+    "unit": "OFOO",
+    "storey": "B2",
+    "evidence": "DPA unit 'Catering | Kitchen'; room identifiers read 'OFOO 01.B2.xx'. Stacking diagram B2 NW 'FOOD SERVICES' (dept 45)."
+   }
+  ],
+  "46": [
+   {
+    "unit": "COMM",
+    "storey": "B2",
+    "evidence": "DPA unit 'Common - Staff Rest&WC'; group names 'Cluster n @ B2'; rooms match the RDS rooms of dept 46 (Staff Toilet, Union Office, Support Ops Office, Pantry - Staff)."
+   }
+  ],
+  "47": [
+   {
+    "unit": "ANWSIP6",
+    "storey": "L06",
+    "evidence": "DPA unit 'Admin Workspace - IP (L6)'. Stacking diagram L6 SE 'ADMIN W (FUTURE ASW)' (dept 47)."
+   },
+   {
+    "unit": "ANWSIP7",
+    "storey": "L07",
+    "evidence": "DPA unit 'Admin Workspace - IP (L7)'. The Admin Workspace DD Booklet gives an 'IP 7' keyplan (zoning_adjudication_L07.md CF-0073); zone_assignment_L07.csv has 'Admin workspace (south block)'. The stacking diagram L7 has no admin cell."
+   }
+  ],
+  "50": [
+   {
+    "unit": "TRED",
+    "storey": "L02",
+    "exclude_group_regex": "SIMULATION",
+    "evidence": "DPA unit 'Training'. Stacking diagram L2 SE 'TRAINING + AUDITORIUM + RETAIL' (dept 50); zone_assignment_L02.csv has 'Training and auditorium (50)'. Groups 'SIMULATION & TRAINING ...' belong to dept 49 TRED - Simulation Lab (OP block B2 'SIM LAB') and stay out."
+   }
+  ],
+  "30": [
+   {
+    "unit": "PHAO",
+    "exclude": true,
+    "reason": "Pharmacy - Outpatient: OP block L1 'PHARMACY - OP' in the stacking diagram."
+   },
+   {
+    "unit": "PHAR",
+    "exclude": true,
+    "reason": "Pharmacy - Retail: retail tenancy, not an IP-block pharmacy cell of the stacking diagram."
+   }
+  ]
+ },
+ "plan_departments": {
+  "_about": "Regular expressions (case-insensitive, searched in the 'department' column of out/registers/zone_assignment_<storey>.csv) that select the plan rooms of a department where the default rule (text '(nn)' or the first word of the department name at the start) does not. Only the storeys of the department's DPA units are read. Evidence is the department text printed in the zone assignment.",
+  "04": {
+   "regex": "^ICU$|ICU / HDU \\(04\\)",
+   "evidence": "zone_assignment_L04: 'ICU' (121 rooms); zone_assignment_L05: 'ICU / HDU (04)' (132 rooms)"
+  },
+  "11": {
+   "regex": "^Emergency$",
+   "evidence": "zone_assignment_L01: 'Emergency' (147 rooms)"
+  },
+  "22": {
+   "regex": "\\(22\\)|\\(DSOT\\)|\\(ASW\\)|^ASW staff area",
+   "evidence": "zone_assignment_L05 'MOT (22)'; L06 'Day Surgery Operating Theatres (DSOT)', 'Ambulatory Surgical Ward (ASW)', 'ASW staff area'"
+  },
+  "26": {
+   "regex": "Diagnostic Imaging",
+   "evidence": "zone_assignment_L04: 'Diagnostic Imaging (DI)' (83 rooms)"
+  },
+  "28": {
+   "regex": "Diagnostic Imaging",
+   "evidence": "zone_assignment_L04: the CATH rooms are inside 'Diagnostic Imaging (DI)'; no separate Cath Lab text"
+  },
+  "31": {
+   "regex": "Admin workspace",
+   "evidence": "zone_assignment_L02 'Admin workspace and AN (D-009: future EDTU, office)'; L04 'Admin workspace (AN-ICU / AN-DI)'"
+  },
+  "34": {
+   "regex": "OP Basement 2",
+   "evidence": "zone_assignment_B2: 'OP Basement 2 (BME, MRO, C3)' (27 rooms); stacking diagram B2 SE cell lists MRO"
+  },
+  "35": {
+   "regex": "OP Basement 2",
+   "evidence": "zone_assignment_B2: 'OP Basement 2 (BME, MRO, C3)'; stacking diagram B2 SE cell lists FACILITY MANAGEMENT"
+  },
+  "36": {
+   "regex": "^Hospitality$",
+   "evidence": "zone_assignment_B2: 'Hospitality' (25 rooms)"
+  },
+  "37": {
+   "regex": "OP Basement 2",
+   "evidence": "zone_assignment_B2: 'OP Basement 2 (BME, MRO, C3)'; stacking diagram B2 SE cell lists BME"
+  },
+  "43": {
+   "regex": "ITD / Innovation Lab",
+   "evidence": "zone_assignment_L07: 'ITD / Innovation Lab' (6 rooms)"
+  },
+  "44": {
+   "regex": "ITD / Innovation Lab",
+   "evidence": "zone_assignment_L07: 'ITD / Innovation Lab' (6 rooms)"
+  },
+  "46": {
+   "regex": "OP Basement 2",
+   "evidence": "zone_assignment_B2: 'OP Basement 2 (BME, MRO, C3)'; stacking diagram B2 SE cell lists SSR (shared support rooms)"
+  },
+  "47": {
+   "regex": "Admin workspace|ASW admin workspace",
+   "evidence": "zone_assignment_L06 'ASW admin workspace (future ASW)'; L07 'Admin workspace (south block)'"
+  }
+ },
+ "department_names": {
+  "_about": "Used where src/booklet_departments.json has no department_label for the department: the DD Sign-OFF folder title without its number.",
+  "11": "Emergency",
+  "22": "MOT DSOT ASW Sleep Lab",
+  "23": "Endoscopy",
+  "28": "Cath Lab",
+  "29": "Lab",
+  "31": "AN IP & Caregiver Lounge",
+  "34": "MRO",
+  "35": "FM",
+  "36": "Hospitality",
+  "37": "BME",
+  "39": "General Services",
+  "40": "MMD & Pharmacy Store",
+  "41": "CSSD",
+  "43": "ITD",
+  "44": "Innovation Lab",
+  "45": "Food Services",
+  "46": "Shared Facilities for Support Ops & Union Office in B2",
+  "47": "Admin Workspace",
+  "50": "TRED - Learning Centre"
+ }
+}

@@ -81,6 +81,13 @@ def _z(value: Any) -> float:
     return 0.0 if value is None or value == "" else float(value)
 
 
+def _round_half_up(value: float, ndigits: int = 0) -> float:
+    """Spreadsheet ROUND: halves go away from zero (Python's round() takes 10.25 to 10.2, the spreadsheet to 10.3)."""
+    f = 10.0 ** ndigits
+    x = abs(value) * f
+    return math.copysign(math.floor(x + 0.5 + 1e-9) / f, value)
+
+
 def _roundup(value: float, step: float) -> float:
     if step <= 0:
         return value
@@ -122,25 +129,25 @@ def select_area(room: Dict[str, Any], c: Dict[str, Any]) -> Tuple[float, str]:
     dpa = _num(room.get("dpa_area_m2"))
     sel = str(room.get("area_selector") or "AUTO").upper()
     if sel == "DPA" and dpa is not None:
-        return round(dpa, 1), "DPA"
+        return _round_half_up(dpa, 1), "DPA"
     if dpa is not None and dpa > 0:
         soa = dpa                                    # the design area: DPA designed area, else SOA
     if soa is None and meas is None:
         raise RecomputeError(f"room {room.get('number')}: no area")
     if soa is None:
-        return round(meas, 1), "MEASURED"
+        return _round_half_up(meas, 1), "MEASURED"
     if meas is None:
-        return round(soa, 1), "SOA"
+        return _round_half_up(soa, 1), "SOA"
     if sel == "SOA":
-        return round(soa, 1), "SOA"
+        return _round_half_up(soa, 1), "SOA"
     if sel == "MEASURED":
-        return round(meas, 1), "MEASURED"
+        return _round_half_up(meas, 1), "MEASURED"
     if sel == "LARGER":
-        return round(max(soa, meas), 1), "LARGER"
+        return _round_half_up(max(soa, meas), 1), "LARGER"
     diff = abs(soa - meas)
     if diff <= c["area_agree_m2"] or (soa and diff / soa * 100.0 <= c["area_agree_pct"]):
-        return round(soa, 1), "SOA"
-    return round(meas, 1), "MEASURED"
+        return _round_half_up(soa, 1), "SOA"
+    return _round_half_up(meas, 1), "MEASURED"
 
 
 def _table(items: List[Dict[str, Any]], key: str = "name") -> Dict[str, Dict[str, Any]]:
@@ -221,7 +228,7 @@ def room_loads(room: Dict[str, Any], c: Dict[str, Any], tables: Dict[str, Any]) 
     oa_pp = _z(crit.get("oa_lps_per_person"))
     oa_req = max(people * oa_pp * iof, _z(crit.get("min_oa_ach")) * vol / 3.6, _z(crit.get("oa_specified_lps")))
     min_supply = max(_z(crit.get("supply_lps_m2")) * area, _z(crit.get("min_total_ach")) * vol / 3.6,
-                     _z(crit.get("supply_specified_lps")))
+                     _z(crit.get("supply_specified_lps")), _z(crit.get("oa_specified_lps")))     # the specified outdoor air is a floor of the supply
     exh_calc = max(_z(crit.get("exhaust_lps_m2")) * area, _z(crit.get("exhaust_ach")) * vol / 3.6)
     exh_spec = _num(crit.get("exhaust_specified_lps"))
     # the example rounds the calculated exhaust up once, like the supply: AG = ROUNDUP(AF, -1)

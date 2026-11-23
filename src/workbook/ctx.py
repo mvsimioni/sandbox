@@ -12,8 +12,8 @@ from .model import Layout, InputError, blank, validate
 from .styles import CODE_STYLES, put, tag_variant, link_to
 
 BUILTIN_SOURCES = [
-    {"id": "GEN-ENGINE", "document": "Beca NDH Inpatients HVAC Load Calc template and Rev A worked example",
-     "issue": "Rev A, 1 Oct 2026", "page": "sheet Level 1 Room Zones, AHU Summary",
+    {"id": "GEN-METHOD", "document": "Beca NDH Inpatients HVAC Load Calc template and Rev A worked example (AIGH_C2_L1_OP_Pharmacy_AHU_Thermal_Load_Calc_RevA.xlsx)",
+     "issue": "Rev A (draft for engineer review), 1 Oct 2026, as printed on the Basis of Design sheet of the template", "page": "sheet Level 1 Room Zones, AHU Summary",
      "location": "formula chain and conventions (10 % safety factor, 1.21 / 1.2 / 1.18 air constants)",
      "text_as_read": "template conventions", "method": "Formulas and conventions as set in the template", "confidence": "high"},
     {"id": "GEN-BASIS", "document": "Project design basis: default values for the department workbooks",
@@ -28,21 +28,23 @@ BUILTIN_SOURCES = [
 
 # name: (label, value, unit, code, source, remark)
 DEFAULTS: Dict[str, Tuple] = {
-    "SafetyFactor": ("Safety factor on room loads", 0.10, "fraction", "S", "GEN-ENGINE", "template convention"),
+    "SafetyFactor": ("Safety factor on room loads", 0.10, "fraction", "S", "GEN-METHOD", "template convention"),
     "DuctLeakage": ("Duct leakage allowance on AHU supply airflow", 0.10, "fraction", "S", "GEN-BASIS",
                     "10 % default confirmed; any leakage class stated by a project document is a recorded difference"),
-    "InfiltrationACH": ("Infiltration of a room with envelope, not pressurised", 0.5, "ACH", "S", "GEN-ENGINE",
+    "TenderLeakage": ("Duct leakage stated on the tender schematics (comparison only)", 0.15, "fraction", "S", "GEN-BASIS",
+                      "air-side schematics: stated value, used only in the Remarks wording; no calculation uses it"),
+    "InfiltrationACH": ("Infiltration of a room with envelope, not pressurised", 0.5, "ACH", "S", "GEN-METHOD",
                         "template convention"),
     "AirSensibleFactor": ("Air constant, sensible (airflow from sensible load)", 1.21, "W per (L/s K)", "S",
-                          "GEN-ENGINE", "template"),
+                          "GEN-METHOD", "template"),
     "AirDensity": ("Air density", 1.2, "kg/m³", "S", "GEN-PRESSURE", "also the density of the door-gap equation"),
-    "AirLatentFactor": ("Air constant, latent (infiltration)", 1.18, "W per (L/s kJ/kg)", "S", "GEN-ENGINE", "template"),
-    "ConvM3hPerLps": ("Conversion, m³/h per L/s", 3.6, "–", "S", "GEN-ENGINE", "unit conversion"),
+    "AirLatentFactor": ("Air constant, latent (infiltration)", 1.18, "W per (L/s kJ/kg)", "S", "GEN-METHOD", "template"),
+    "ConvM3hPerLps": ("Conversion, m³/h per L/s", 3.6, "–", "S", "GEN-METHOD", "unit conversion"),
     "SecPerHour": ("Seconds per hour", 3600, "s", "S", "GEN-PRESSURE", "door-gap equation"),
-    "WperkW": ("Watts per kilowatt", 1000, "W", "S", "GEN-ENGINE", "unit conversion"),
-    "LperM3": ("Litres per cubic metre", 1000, "L", "S", "GEN-ENGINE", "unit conversion: airflow L/s to m³/s"),
-    "PercentBase": ("Occupancy density base (persons per 100 m²)", 100, "m²", "S", "GEN-ENGINE", "unit conversion"),
-    "RoundTo": ("Rounding of final supply (ROUNDUP digits; −1 = 10 L/s)", -1, "digits", "S", "GEN-ENGINE",
+    "WperkW": ("Watts per kilowatt", 1000, "W", "S", "GEN-METHOD", "unit conversion"),
+    "LperM3": ("Litres per cubic metre", 1000, "L", "S", "GEN-METHOD", "unit conversion: airflow L/s to m³/s"),
+    "PercentBase": ("Occupancy density base (persons per 100 m²)", 100, "m²", "S", "GEN-METHOD", "unit conversion"),
+    "RoundTo": ("Rounding of final supply (ROUNDUP digits; −1 = 10 L/s)", -1, "digits", "S", "GEN-METHOD",
                 "as the example"),
     "AreaDecimals": ("Decimal places of the area used (areas are taken to 0.1 m²)", 1, "digits", "S", "GEN-BASIS",
                      "areas are taken to 0.1 m²; airflows are calculated unrounded"),
@@ -72,12 +74,14 @@ DEFAULTS: Dict[str, Tuple] = {
     "GapBedWidth": ("Provisional gap area, bed-width sealed door", 20, "cm²", "A", "GEN-PRESSURE", ""),
     "GapShaft": ("Provisional gap area, shaft access door", 10, "cm²", "A", "GEN-PRESSURE", ""),
     "NewtonEps": ("Smallest pressure difference used in the iteration slope", 0.01, "Pa", "S", "GEN-PRESSURE",
-                  "numerical guard of the fixed-step solution"),
+                  "smallest pressure difference used in the slope of the iteration step"),
     "OffsetEps": ("Offset below which no offset is needed", 0.000001, "m³/h", "S", "GEN-PRESSURE", ""),
     "AreaTolPct": ("Area agreement tolerance, per cent", 0.03, "fraction", "S", "GEN-BASIS", "project design basis tolerances"),
     "AreaTolM2": ("Area agreement tolerance, absolute", 0.5, "m²", "S", "GEN-BASIS", "project design basis tolerances"),
     "BalTolPct": ("Flow balance closure tolerance", 0.01, "fraction", "S", "GEN-BASIS", "project design basis tolerances"),
     "BalTolLps": ("Flow balance closure tolerance, absolute", 10, "L/s", "S", "GEN-BASIS", "project design basis tolerances"),
+    "ZoneCoverMin": ("Share of the zoned area that the room list of a unit must reach before a reduction against tender is stated", 0.9, "fraction", "A",
+                     "GEN-BASIS", "to confirm"),
     "SchedTolPct": ("Tolerance on an airflow increase against a schematic", 0.05, "fraction", "S", "GEN-BASIS", "project design basis"),
     "SchedTolLps": ("Tolerance on an airflow increase against a schematic, absolute", 10, "L/s", "S", "GEN-BASIS", "project design basis"),
     "StartPressure": ("Iteration starting pressure of a free space", 0, "Pa", "S", "GEN-PRESSURE", "numerical start only"),
@@ -94,12 +98,12 @@ GROUPS = [
     ("Load method", ["SafetyFactor", "SupplyTemp", "InfiltrationACH", "RoofSolarGain", "OutdoorDB", "OutdoorWB", "OutdoorH",
                      "AirSensibleFactor", "AirDensity", "AirLatentFactor", "RoundTo", "AreaDecimals", "ConvM3hPerLps", "PercentBase",
                      "WperkW", "LperM3"]),
-    ("AHU totalisation", ["DuctLeakage", "FanPressure", "FanEfficiency", "OAShare", "OADrop", "PAHUOffT", "PAHUOffH"]),
+    ("AHU totalisation", ["DuctLeakage", "TenderLeakage", "FanPressure", "FanEfficiency", "OAShare", "OADrop", "PAHUOffT", "PAHUOffH"]),
     ("Pressure method", ["AirtightLimit", "TighterLimit", "FlowN", "FlowNLow", "FlowNHigh", "DoorCd", "RefPressure",
                          "RatioFail", "RatioVerify", "ApplyFromPa", "SecPerHour", "MMperM", "CM2perM2", "GapSides",
                          "GapBottom", "GapHinged", "GapSliding", "GapBedWidth", "GapShaft", "NewtonEps", "OffsetEps",
                          "StartPressure", "PressureBracket", "TolPressure"]),
-    ("Check tolerances", ["AreaTolPct", "AreaTolM2", "BalTolPct", "BalTolLps", "SchedTolPct", "SchedTolLps"]),
+    ("Check tolerances", ["AreaTolPct", "AreaTolM2", "BalTolPct", "BalTolLps", "SchedTolPct", "SchedTolLps", "ZoneCoverMin"]),
 ]
 
 
@@ -144,7 +148,7 @@ class Ctx:
                 raise InputError(f"design constant '{name}' is required (with source id); unknown values are not invented")
         for name, (label, unit) in OPTIONAL_BLANK.items():
             if name not in consts:
-                consts[name] = dict(label=label, value=None, unit=unit, code="A", source="GEN-ENGINE",
+                consts[name] = dict(label=label, value=None, unit=unit, code="A", source="GEN-METHOD",
                                     remark="blank: not given by any document, set before treated outdoor air is used")
         validate(data)
         self.constants = consts

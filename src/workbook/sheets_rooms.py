@@ -6,6 +6,7 @@ import re
 from typing import Any, Dict, List
 
 from openpyxl.styles import Alignment
+from openpyxl.utils import get_column_letter
 
 from .common import (band_rows, cf_formula, cf_text, expand, group_cols, list_validation, title_block, write_headers)
 from .ctx import Ctx
@@ -82,7 +83,7 @@ def write_room_information(ctx: Ctx) -> None:
                 "A assumption) and a source ID that links to Sources. Unknown values stay blank and are listed on Flags.", ctx)
     write_headers(ws, L, spec, 4, {"no": "ROOM", "ahu": "SYSTEM (approved zoning)", "sptype": "SPACE TYPE AND CONDITION",
                                    "dpa": "AREA", "h": "HEIGHT", "pfix": "OCCUPANCY AND OPERATION", "light": "GAINS",
-                                   "glz": "FENESTRATION (from Envelope)", "remark": "SOURCE REMARK"})
+                                   "glz": "FENESTRATION FROM ENVELOPE", "remark": "REMARKS"})
     for i, r in enumerate(ctx.rooms):
         row = L.row(i)
         n = r["number"]
@@ -107,7 +108,7 @@ def write_room_information(ctx: Ctx) -> None:
                   ("dpa", "dpa_area_m2", "dpa_area", "num", "d1"),
                   ("soa", "soa_area_m2", "soa_area", "num", "d1"), ("meas", "measured_area_m2", "measured_area", "num", "d1"),
                   ("sel", "area_selector", "area_selector", "text", None), ("h", "ceiling_height_m", "ceiling_height", "num", "d2"),
-                  ("pfix", "occupancy_people", "occupancy_people", "num", "d1"),
+                  ("pfix", "occupancy_people", "occupancy_people", "num", "d0"),
                   ("dens", "occupancy_per_100m2", "occupancy_density", "num", "d1"), ("iof", "iof", "iof", "num", "d2"),
                   ("act", "activity", "activity", "text", None), ("hours", "operation_hours", "operation_hours", "num", "d1"),
                   ("light", "lighting_w_m2", "lighting", "num", "d1"), ("power", "small_power_w_m2", "small_power", "num", "d1"),
@@ -141,11 +142,11 @@ def write_room_information(ctx: Ctx) -> None:
                               ("diff", f'=IF(AND({base}<>"",{meas}<>"",{base}<>0),({base}-{meas})/{base},"")', "Calc", "pct1"),
                               ("agree", agree, "Calc", None),
                               ("vol", f"={g('area')}*{g('h')}", "Calc", "d1"),
-                              ("people", people, OCC_NAME if density_default else "Calc", "d1"),
+                              ("people", people, OCC_NAME if density_default else "Calc", "d0"),
                               ("glz", f"=SUMIFS([EN.glz],[EN.room],{g('no')})", "Link", "d1"),
                               ("wall", f"=SUMIFS([EN.wall],[EN.room],{g('no')})", "Link", "d1"),
                               ("roof", f"=SUMIFS([EN.roof],[EN.room],{g('no')})", "Link", "d1"),
-                              ("face", f'=IF(COUNTIF([EN.room],{g("no")})=0,"Internal",INDEX([EN.face],MATCH({g("no")},[EN.room],0))'
+                              ("face", f'=IF(COUNTIF([EN.room],{g("no")})=0,"No envelope data",INDEX([EN.face],MATCH({g("no")},[EN.room],0))'
                                        f'&" "&INDEX([EN.az],MATCH({g("no")},[EN.room],0))&"°, "&INDEX([EN.shade],MATCH({g("no")},[EN.room],0))'
                                        f'&IF(COUNTIF([EN.room],{g("no")})>1," (+"&(COUNTIF([EN.room],{g("no")})-1)&" more)",""))',
                                "Link", None)):
@@ -159,9 +160,12 @@ def write_room_information(ctx: Ctx) -> None:
             ctx.coded.append(dict(sheet=ws.title, cell=g("people"), code_cell=g("dens_c"), src_cell=g("dens_s"), code="A"))
         rem = r.get("remark")
         if density_default:
-            put(ws, g("remark"), _density_remark(ctx, r, g, rem), "Note")
+            put(ws, g("remark"), _density_remark(ctx, r, g, rem), "Remark")
+            nl = -(-(len(str(rem or "")) + 150) // 165)
         else:
-            put(ws, g("remark"), rem, "Note")
+            put(ws, g("remark"), rem, "Remark")
+            nl = -(-len(str(rem or "")) // 165)
+        ws.row_dimensions[row].height = 13.0 * max(1, nl) + 2
     last = L.last
     list_validation(ws, f"{L.col('sptype')}{L.first}:{L.col('sptype')}{last}", "ListSpaceType")
     list_validation(ws, f"{L.col('cond')}{L.first}:{L.col('cond')}{last}", "ListCondition")
@@ -174,7 +178,16 @@ def write_room_information(ctx: Ctx) -> None:
     # occupancy that no RDS value and no room use gives: the 0 is a placeholder, shown on a yellow fill so it is not read as a value
     for k in ("obasis", "people"):
         cf_formula(ws, f"{L.col(k)}{L.first}:{L.col(k)}{last}", f'${L.col("obasis")}{L.first}="NOT SET"', bold=True, fill="FFFFF2CC")
-    _setup(ws, ctx, L, L.idx["remark"], last, "4:6", f"{L.col('name')}{L.first}", "FF1F4E79")
+    # provenance pairs and detail blocks: one outline level, collapsed for print; the label columns stay visible
+    group_cols(ws, L, "zone", "oacond_s", collapsed=True)
+    group_cols(ws, L, "glz", "face", collapsed=True)
+    for k in L.idx:
+        if k.endswith("_c") or k.endswith("_s"):
+            dim = ws.column_dimensions[L.col(k)]
+            dim.outline_level = 1
+            dim.hidden = True
+    ws.column_dimensions[L.col("remark")].width = 150
+    _setup(ws, ctx, L, L.idx["remark"], last, "4:6", f"{get_column_letter(L.idx['name'] + 1)}{L.first}", "FF1F4E79")
 
 
 # --------------------------------------------------------------------------- #
@@ -190,7 +203,7 @@ def write_criteria(ctx: Ctx) -> None:
         row = L.row(i)
         g = lambda k: f"{L.col(k)}{row}"
         put(ws, g("no"), expand(ctx, "={RI.no}", L, i), "LinkTag")
-        put(ws, g("name"), expand(ctx, "={RI.name}", L, i), "Link").alignment = Alignment(horizontal="left")
+        put(ws, g("name"), expand(ctx, "={RI.name}", L, i), "Link", text=True).alignment = Alignment(horizontal="left")
         c = r.get("criteria") or {}
         has = any(not blank(v) for k, v in c.items() if k not in ("source", "code"))
         code, src = (c.get("code", "D"), c.get("source", "")) if has else ("", "")
@@ -261,7 +274,7 @@ def write_envelope(ctx: Ctx) -> None:
     last = L.last
     list_validation(ws, f"{L.col('ori')}{L.first}:{L.col('ori')}{last}", "ListOrientation")
     band_rows(ws, f"A{L.first}:{L.col('remark')}{last}")
-    _setup(ws, ctx, L, L.idx["remark"], last, "4:6", f"{L.col('seg')}{L.first}", "FF1F4E79")
+    _setup(ws, ctx, L, L.idx["remark"], L.first + max(len(ctx.env_rows), 1) - 1, "4:6", f"{L.col('seg')}{L.first}", "FF1F4E79")
 
 
 # --------------------------------------------------------------------------- #
@@ -273,7 +286,7 @@ ENG_F: Dict[str, str] = {
     "occ": "={RI.people}", "iof": "={RI.iof}", "oa_ach": "={CR.oa_ach}", "oa_lpp": "={CR.oa_lpp}", "oa_spec": "={CR.oa_spec}",
     "oa": "=IF(AND({fix}=1,{oa_spec}>0),{oa_spec},MAX({occ}*{oa_lpp}*{iof},{oa_ach}*{vol}/ConvM3hPerLps,{oa_spec}))",
     "sa_ach": "={CR.sa_ach}", "sa_lpm2": "={CR.sa_lpm2}", "sa_spec": "={CR.sa_spec}",
-    "sa_lps": "=MAX({sa_lpm2}*{area},{sa_ach}*{vol}/ConvM3hPerLps,{sa_spec})",
+    "sa_lps": "=MAX({sa_lpm2}*{area},{sa_ach}*{vol}/ConvM3hPerLps,{sa_spec},{oa_spec})",       # the specified outdoor air (for example L/s per m2) is a floor of the supply
     "ex_ach": "={CR.ex_ach}", "ex_lpm2": "={CR.ex_lpm2}", "ex_spec": "={CR.ex_spec}",
     "ex_lps": "=MAX({area}*{ex_lpm2},{ex_ach}*{vol}/ConvM3hPerLps)",
     "ex_fin": "=IF({ex_spec}>0,{ex_spec},IF({ex_lps}>0,ROUNDUP({ex_lps},RoundTo),0))",
@@ -318,7 +331,7 @@ def write_engines(ctx: Ctx) -> None:
     for st in ctx.storeys:
         E = ctx.eng_layouts[st]
         ws = ctx.wb[E.sheet]
-        title_block(ws, E.sheet, f"Load engine of the NDH template / Rev A example for {ctx.label(st)}. Inputs arrive from "
+        title_block(ws, E.sheet, f"Room loads for {ctx.label(st)}. Inputs arrive from "
                     "Room Information, Criteria and Envelope (green); the code row under each header gives the cell code of the "
                     "whole column. Detail columns are grouped and can be collapsed.", ctx)
         spec = [(k, h, u, w) for k, h, u, w, c, grp in ENG]
@@ -339,7 +352,7 @@ def write_engines(ctx: Ctx) -> None:
                 style = STYLE_OF[c]
                 if k in TAG_KEYS:
                     style = tag_variant(style)
-                cell = put(ws, E.local(k, j), f, style, ENG_FMT.get(k, "d1"))
+                cell = put(ws, E.local(k, j), f, style, ENG_FMT.get(k, "d1"), text=k in TEXT_KEYS)
                 if k in TEXT_KEYS:
                     cell.alignment = Alignment(horizontal="left", vertical="center")
         # totals
@@ -356,12 +369,12 @@ def write_engines(ctx: Ctx) -> None:
         band_rows(ws, f"A{E.first}:{E.col('frac')}{E.last}")
         cf_formula(ws, f"{E.col('fin')}{E.first}:{E.col('fin')}{E.last}",
                    f"{E.col('fin')}{E.first}<{E.col('sa_lps')}{E.first}")
-        group_cols(ws, E, "glz", "nenv")
-        group_cols(ws, E, "oa_lpp", "oa_spec")
-        group_cols(ws, E, "sa_lpm2", "sa_spec")
-        group_cols(ws, E, "ex_ach", "ex_spec")
-        group_cols(ws, E, "ppl", "inf_w")
-        group_cols(ws, E, "lat_ppl_wp", "lat_inf_w")
+        group_cols(ws, E, "glz", "nenv", collapsed=True)
+        group_cols(ws, E, "oa_lpp", "oa_spec", collapsed=True)
+        group_cols(ws, E, "sa_lpm2", "sa_spec", collapsed=True)
+        group_cols(ws, E, "ex_ach", "ex_spec", collapsed=True)
+        group_cols(ws, E, "ppl", "inf_w", collapsed=True)
+        group_cols(ws, E, "lat_ppl_wp", "lat_inf_w", collapsed=True)
         _setup(ws, ctx, E, E.idx["frac"], tr, "4:7", f"{E.col('name')}{E.first}", "FF0070C0")
 
 
@@ -389,7 +402,7 @@ AF_F: Dict[str, str] = {
 }
 AF_STYLE = {"no": "LinkTag", "name": "Link", "storey": "Link", "ahu": "LinkTag", "sys": "Link", "terminal": "LinkTag",
             "exfan": "LinkTag", "clin": "Calc", "systype": "Link", "single": "Link", "ok": "Check", "gov": "Calc",
-            "supply": "Result", "oa": "Result", "off_chk": "Check"}
+            "supply": "Result", "oa": "Calc", "off_chk": "Check"}
 AF_LINK = {"fix", "oa_spec", "area", "vol", "sens", "lat", "troom", "hroom", "ac", "th", "ex_min", "supply", "oa_air"}
 
 
@@ -417,7 +430,7 @@ def write_airflow(ctx: Ctx) -> None:
             st = AF_STYLE.get(k, "Link" if k in AF_LINK else "Calc")
             fmt = None if k in ("no", "name", "storey", "ahu", "sys", "gov", "single", "ok", "terminal", "exfan", "clin", "systype", "off_chk") \
                 else ("pct1" if k == "frac" else ("d0" if k == "fix" else "d1"))
-            c = put(ws, g(k), f, st, fmt)
+            c = put(ws, g(k), f, st, fmt, text=fmt is None and st != "Check")
             if fmt is None:
                 c.alignment = Alignment(horizontal="left" if st != "Check" else "center", vertical="center")
         # kind / off
@@ -463,7 +476,7 @@ def write_airflow(ctx: Ctx) -> None:
                               f'COUNTIF({L.upto("status", i)},"SEPARATE")+COUNTIF({L.upto("status", i)},"LIST FOR REVIEW"),0)', "Calc", "d0")
         put(ws, g("fcurank"), f'=IF({g("fcu")}=1,SUM({L.upto("fcu", i)}),0)', "Calc", "d0")
     last = L.last
-    band_rows(ws, f"A{L.first}:{L.col('ok')}{last}")
+    band_rows(ws, f"A{L.first}:{L.col('fcurank')}{last}")
     cf_text(ws, f"{L.col('ok')}{L.first}:{L.col('ok')}{last}", f"{L.col('ok')}{L.first}", "FAIL")
     cf_text(ws, f"{L.col('ok')}{L.first}:{L.col('ok')}{last}", f"{L.col('ok')}{L.first}", "SPECIFIED", fill="FFFFF2CC")
     cf_text(ws, f"{L.col('off_chk')}{L.first}:{L.col('off_chk')}{last}", f"{L.col('off_chk')}{L.first}", "SHORT")
@@ -472,8 +485,5 @@ def write_airflow(ctx: Ctx) -> None:
     cf_formula(ws, f"{L.col('supply')}{L.first}:{L.col('supply')}{last}",
                f"{L.col('supply')}{L.first}<{L.col('ac')}{L.first}")
     cf_text(ws, f"{L.col('status')}{L.first}:{L.col('status')}{last}", f"{L.col('status')}{L.first}", "SEPARATE", fill="FFFFF2CC")
-    group_cols(ws, L, "terminal", "systype")
-    group_cols(ws, L, "in1", f"lst{OA_ROUNDS}")
-    group_cols(ws, L, "cmark0", "fcurank")
-    group_cols(ws, L, "single", "single")
+    group_cols(ws, L, "terminal", "fcurank", collapsed=True)      # one contiguous group: keys and the outdoor-air rule rounds
     _setup(ws, ctx, L, L.idx["fcurank"], last, "4:6", f"{L.col('name')}{L.first}", "FF00B050")

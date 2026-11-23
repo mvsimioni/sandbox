@@ -120,13 +120,15 @@ def build_workbook(data: Union[Dict[str, Any], Path, str], out: Optional[Path] =
         data = load_input(Path(data))
     data = copy.deepcopy(data)
     ctx = Ctx(data)
+    from . import styles as _styles
+    _styles.FOOTER_DEPT = f"{data['department'].get('number', '')} {data['department'].get('name', '')}".strip()
     _prepare(ctx)
     wb = Workbook()
     wb.remove(wb.active)
     ctx.wb = wb
     install_styles(wb)
     names = ["README", "Basis of Design", "Room Information", "Criteria", "Envelope"] + [ctx.sheet_for(s) for s in ctx.storeys] + \
-            ["Airflow", "Pressure", "AHU", "FCU", "Fans", "VAV", "Venturi Valves", "Flow Balance", "Airflow Comparison", "Checks",
+            ["Airflow", "Pressure", "AHU", "FCU", "Fans", "VAV", "Venturi Valves", "Flow Balance", "Airflow Comparison", "Comparison by AHU", "Reference Rows", "Checks",
              "Sources", "Flags"]
     for n in names:
         wb.create_sheet(n)
@@ -149,11 +151,13 @@ def build_workbook(data: Union[Dict[str, Any], Path, str], out: Optional[Path] =
     rows = SB.build_flag_rows(ctx)
     ctx.n_live = min(len(ctx.rooms), 4 * len(ctx.ahus))       # outdoor-air rule: one live flag per separated or listed room
     ctx.n_flags = len(rows) + ctx.n_live
-    ctx.lay["FL"] = Layout("Flags", ["id", "type", "ref", "desc", "status", "owner", "src", "note"], 7, ctx.n_flags)
+    ctx.lay["FL"] = Layout("Flags", ["id", "type", "ref", "desc", "status", "owner", "src"], 7, ctx.n_flags)
     SB.write_checks(ctx)
     SB.write_readme(ctx)
     SB.write_flags(ctx, rows)
     SB.write_basis_tail(ctx)
+    from .polish import polish
+    polish(ctx)
     wb.properties.creator = str((data.get("project", {}).get("revision") or {}).get("by") or "")
     wb.properties.lastModifiedBy = wb.properties.creator
     wb.properties.title = f"{ctx.project}: {data['department'].get('name', '')} thermal load calculation"

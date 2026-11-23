@@ -165,7 +165,7 @@ airflow_comparison:
   attribute_reduction_to: [area_basis, criteria_ach_or_thermal, duct_leakage_10_vs_15, oa_rule]
   # D-013: every equipment row carries Tender airflow (original, with source), Calculated, Reduction L/s, Reduction %, Remarks.
   equipment_columns: [tender_airflow_L_s, tender_source, calculated_airflow_L_s, reduction_L_s, reduction_pct, remarks]
-  tender_source_order: [equipment_schedule_corr5, tender_airside_schematic]
+  tender_source_order: [equipment_schedule_corr5, mot_nsc_equipment_schedule_corr2, tender_airside_schematic]   # MOT NSC units: Overall AC Equipment Schedule (Corr 2) or the IP-BH-16xxx tender schematics
 
 # D-015 (Marcus, 22 Nov 2026): deliverable language.
 deliverable_language:
@@ -187,7 +187,7 @@ occupancy:
 # All values VERIFY against the issued standard (edition to confirm). Cell text red, note in Remarks.
   density_default:
     style: {font_colour: "FFC00000", named_style: Assumption-Occupancy, code: A}
-    remarks_template: "Occupancy assumed: {density} p/100 m2 x {area} m2 = {people} (ASHRAE 62.1 Table 6.2.2.1, {use}). No RDS value. To confirm."
+    remarks_template: "Occupancy assumed: {density} persons / 100 m² × {area} m². Number of persons: {people} (ASHRAE 62.1 Table 6.2.2.1, {use}). No RDS value. To confirm."
     rounding: up_to_whole_person
     per_100m2:
       office: 5

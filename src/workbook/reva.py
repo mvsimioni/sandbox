@@ -10,7 +10,7 @@ import openpyxl
 
 REVA_PATH = Path("data/source/Template/AIGH_C2_L1_OP_Pharmacy_AHU_Thermal_Load_Calc_RevA.xlsx")
 REVA_NAME = REVA_PATH.name
-ISSUE = "Rev A draft, 1 Oct 2026"
+ISSUE = "Rev A (draft for engineer review), 1 Oct 2026, as printed on the Basis of Design sheet of the template"
 SS = "Level 1 Room Zones"
 
 

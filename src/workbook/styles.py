@@ -80,8 +80,23 @@ def _ns(name, font, fill=None, align=None, border=None):
     return s
 
 
+def set_default_font(wb) -> None:
+    """Normal style = Arial 10, so that empty cells, default row heights and footers use the body face."""
+    from openpyxl.utils.indexed_list import IndexedList
+    base = Font(name=FONT, size=10, family=2, scheme=None)
+    fonts = IndexedList([base])
+    for f in list(wb._fonts)[1:]:
+        fonts.add(f)
+    wb._fonts = fonts
+    try:
+        wb._named_styles["Normal"].font = base
+    except Exception:
+        pass
+
+
 def install_styles(wb) -> None:
     """Add every named style used by the workbook."""
+    set_default_font(wb)
     left = Alignment(horizontal="left", vertical="center")
     right = Alignment(horizontal="right", vertical="center")
     centre = Alignment(horizontal="center", vertical="center")
@@ -99,8 +114,13 @@ def install_styles(wb) -> None:
         _ns("TextWrap", _font(), align=wrap),
         _ns("Tag", _font(name=MONO), align=left),
         _ns("Code", _font(name=MONO), align=centre),
-        _ns("Note", _font(color=GREY_TXT, italic=True, size=8), align=Alignment(horizontal="left", vertical="top",
+        _ns("Note", _font(color=GREY_TXT, italic=True, size=8), align=Alignment(horizontal="left", vertical="center",
                                                                               wrap_text=True)),
+        _ns("Remark", _font(), align=Alignment(horizontal="left", vertical="top", wrap_text=True)),
+        _ns("Band", _font(bold=True), fill=FILL_HEAD, border=Border(bottom=HAIR),
+            align=Alignment(horizontal="centerContinuous", vertical="center")),
+        _ns("BandLeft", _font(bold=True), fill=FILL_HEAD, border=Border(bottom=HAIR),
+            align=Alignment(horizontal="left", vertical="center")),
         _ns("Input", _font(color=BLUE), align=right),
         _ns("InputTag", _font(color=BLUE, name=MONO), align=left),
         _ns("Specified", _font(color=BLUE), fill=FILL_SPEC, align=right),
@@ -115,6 +135,8 @@ def install_styles(wb) -> None:
         _ns("Result", _font(bold=True), border=Border(top=HAIR), align=right),
         _ns("ResultTag", _font(bold=True, name=MONO), border=Border(top=HAIR), align=left),
         _ns("Total", _font(bold=True), border=Border(top=HAIR), align=right),
+        _ns("ResultText", _font(bold=True), border=Border(top=HAIR), align=left),
+        _ns("ResultCheck", _font(bold=True), border=Border(top=HAIR), align=centre),
         _ns("Check", _font(), align=centre),
     ]
     for s in defs:
@@ -131,9 +153,16 @@ def style_for_code(code: str) -> str:
     return CODE_STYLES[code][0]
 
 
-def put(ws, ref: str, value: Any, style: str, fmt: Optional[str] = None, align: Optional[str] = None):
-    """Write a value or formula with a named style (and optional number format key or string)."""
+_LINK = re.compile(r"^=((?:'[^']+'|[A-Za-z_][\w ]*)!)?\$?[A-Z]{1,3}\$?\d+$")
+
+
+def put(ws, ref: str, value: Any, style: str, fmt: Optional[str] = None, align: Optional[str] = None, text: bool = False):
+    """Write a value or formula with a named style (and optional number format key or string).
+
+    A text link to another cell (``=Sheet!A1``) shows nothing, not 0, where the source cell is blank: unknown stays unknown."""
     c = ws[ref]
+    if isinstance(value, str) and (text or style in ("LinkTag",)) and _LINK.match(value):
+        value = f'=IF({value[1:]}="","",{value[1:]})'
     c.value = value
     c.style = style
     if fmt:
@@ -148,6 +177,7 @@ def link_to(cell, sheet: str, target: str) -> None:
     cell.hyperlink = Hyperlink(ref=cell.coordinate, location=f"'{sheet}'!{target}", display=str(cell.value))
 
 
+FOOTER_DEPT = ""          # set by the workbook builder: department number and name, put in the footer of every tab
 PRINT_MIN_SCALE = 0.75     # body text 10 pt must print at no less than 7.5 pt
 A3_PRINTABLE_IN = 16.54 - 1.0   # A3 landscape width less 0.5 in margins
 
@@ -224,12 +254,12 @@ def setup_sheet(ws, title: str, *, rev: str, date: str, project: str, print_rows
     ws.page_setup.fitToWidth = pages
     if pages > 1 and repeat_to:
         ws.print_title_cols = f"A:{get_column_letter(repeat_to)}"
-    ws.oddFooter.left.text = f"{project}"
-    ws.oddFooter.left.size = 8
-    ws.oddFooter.center.text = "&A"
-    ws.oddFooter.center.size = 8
-    ws.oddFooter.right.text = f"Rev {rev}  {date}  Page &P of &N"
-    ws.oddFooter.right.size = 8
+    left = f"{project}" + (f"  |  {FOOTER_DEPT}" if FOOTER_DEPT else "")
+    for part, text in ((ws.oddFooter.left, left), (ws.oddFooter.center, "&A"), (ws.oddFooter.right, f"Rev {rev}  {date}  Page &P of &N")):
+        part.text = text
+        part.size = 8
+        part.font = "Arial,Regular"
+    ws.page_setup.pageOrder = "overThenDown"
     if tab_colour:
         ws.sheet_properties.tabColor = tab_colour
     if freeze:

@@ -34,7 +34,7 @@ Provenance is given as `[code, source_id]`. A room carries `prov`, a map from in
 
 Required `constants` (no default, never invented): `SupplyTemp`, `OutdoorDB`, `OutdoorWB`, `OutdoorH`, `FanPressure`, `FanEfficiency`,
 `RoofSolarGain`. Every other constant (safety factor 0.10, duct leakage 0.10, air constants 1.21, 1.2 and 1.18, the pressure method,
-the outdoor-air rule 5 % and 5 percentage points, check tolerances) has a default with a built-in source (`GEN-ENGINE`,
+the outdoor-air rule 5 % and 5 percentage points, check tolerances) has a default with a built-in source (`GEN-METHOD`,
 `GEN-CONFIG`, `GEN-PRESSURE`) and can be overridden. All are named cells on Basis of Design.
 
 ## Room

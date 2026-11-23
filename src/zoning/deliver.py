@@ -23,7 +23,7 @@ from openpyxl.worksheet.properties import PageSetupProperties
 
 from .. import common
 from . import text_clean as tc
-from .storeys import ALL_STOREYS, AHU_RE, out_pdf_path, schedule_plant_level, storey_info, zone_key
+from .storeys import ALL_STOREYS, AHU_RE, display_tag, out_pdf_path, schedule_plant_level, storey_info, zone_key
 
 NON_UNIT = {"MV", "NV", "no information"}
 INK, PAPER, RULE, BAND = "1F2A33", "FFFFFF", "B8C0C6", "EEF1F3"
@@ -50,57 +50,8 @@ def load_rooms(storeys: List[str]) -> Dict[str, List[dict]]:
     return out
 
 
-class Tender:
-    """Tender airflow of a unit: Equipment Schedule (Corr 5) first, then the tender air-side schematic; blank (no information) otherwise."""
-
-    def __init__(self) -> None:
-        P = common.resolve_paths()
-        self.sched: Dict[str, dict] = {}
-        for r in common.read_csv_dicts(P["registers"] / "ahu_schedule.csv"):
-            v = _num(r.get("supply_airflow_l_s [Supply Airflow (l/s)]", ""))
-            if v is not None:
-                self.sched.setdefault(r["tag_normalised"].strip(), {"v": v, "sheet": r["sheet_code"], "pages": r["page(s)"], "title": r["schedule_title"]})
-        for r in common.read_csv_dicts(P["registers"] / "equipment_schedule_air_handling.csv"):     # fan coil units: same schedule document
-            if r.get("type") != "FCU":
-                continue
-            v = _num(r.get("Min Airflow (l/s)", ""))
-            if v is not None:
-                self.sched.setdefault(r["tag_normalised"].strip(), {"v": v, "sheet": r["sheet_code"], "pages": r["page(s)"], "title": r["schedule_title"]})
-        self.schem: Dict[str, List[dict]] = defaultdict(list)
-        for r in common.read_csv_dicts(P["registers"] / "schematic_ahu_totals.csv"):
-            if r["issue_set"] != "tender" or r["scope"] != "sheet":
-                continue
-            v = _num(r["ahu_supply_L_s"])
-            if v is not None:
-                self.schem[r["ahu_tag"].strip()].append({"v": v, "sheet": r["sheet"], "issue": r["issue"]})
-
-    @staticmethod
-    def candidates(tags: List[str]) -> List[str]:
-        out: List[str] = []
-        for t in tags:
-            base = t[:-3] if t.endswith("A/B") else (t[:-1] if t[-1:] in "AB" and AHU_RE.match(t) else None)
-            out.append(t)
-            if base is not None:
-                out += [base + "A", base + "B", base]
-        return list(dict.fromkeys(out))
-
-    def find(self, tags: List[str]) -> Tuple[Optional[float], str]:
-        cands = self.candidates(tags)
-        hits = [(c, self.sched[c]) for c in cands if c in self.sched]
-        if hits:
-            vals = {h[1]["v"] for h in hits}
-            if len(vals) == 1:
-                h = hits[0][1]
-                return h["v"], "Equipment Schedule SCH/1 (Corr 5), %s, page %s" % (h["sheet"], h["pages"])
-            return None, "No information: the duty and standby units show different airflows in Equipment Schedule (Corr 5) (%s L/s)" % ", ".join("%s %g" % (c, h["v"]) for c, h in hits)
-        hits2 = [(c, x) for c in cands for x in self.schem.get(c, [])]
-        if hits2:
-            vals = {h[1]["v"] for h in hits2}
-            if len(vals) == 1:
-                h = hits2[0][1]
-                return h["v"], "Tender air-side schematic %s (%s)" % (h["sheet"], h["issue"])
-            return None, "No information: tender air-side schematics show different airflows (%s L/s)" % ", ".join(sorted("%g" % v for v in vals))
-        return None, "No information: the unit is not in Equipment Schedule (Corr 5) or in the tender air-side schematics"
+from ..workbook.common import THERMAL_NOTE  # noqa: E402
+from ..workbook.tender_lookup import Tender  # noqa: E402,F401   (one tender lookup for every deliverable)
 
 
 def build_units(rooms: Dict[str, List[dict]]) -> Dict[str, dict]:
@@ -114,7 +65,7 @@ def build_units(rooms: Dict[str, List[dict]]) -> Dict[str, dict]:
             u = units.setdefault(zk, {"tag": disp, "tags": set(), "depts": set(), "storeys": [], "n": 0, "area": 0.0, "conf": 1.0})
             u["tags"].add(cls)
             if r["department"]:
-                u["depts"].add(tc.clean_dept(r["department"]))
+                u["depts"].add(tc.clean_dept(r["department"], cls))
             if k not in u["storeys"]:
                 u["storeys"].append(k)
             u["n"] += 1
@@ -122,52 +73,60 @@ def build_units(rooms: Dict[str, List[dict]]) -> Dict[str, dict]:
             u["conf"] = min(u["conf"], _num(r["confidence"]) or 0.0)
     for zk, u in units.items():
         t = sorted(u["tags"])
-        u["tag"] = zone_key(t[0])[1] if (len(t) > 1 or AHU_RE.match(t[0])) else t[0]
+        u["tag"] = display_tag(t)
     return units
 
 
+from ..workbook.tag_notes import cath_tag_note  # noqa: E402
+
+
 def plant_level(tag: str) -> str:
-    return schedule_plant_level(tag) or "no information (tag does not give it and the unit is not scheduled)"
+    """Plant level from the tag pattern AHU-B-<plant level>-<served level><name>-<no.>, cross-checked with Equipment Schedule (Corr 5).
+    Basement tags and tags that do not follow the pattern take the schedule value."""
+    from .zones import parse_tag_levels
+    from_tag = parse_tag_levels(tag.split("/")[0])[0]
+    sched = schedule_plant_level(tag)
+    if from_tag:
+        lvl = "L" + from_tag
+        if sched and sched != lvl:
+            return "%s (tag); Equipment Schedule (Corr 5) gives %s" % (lvl, sched)
+        return lvl
+    return sched or "no information (the tag does not give it and the unit is not in Equipment Schedule (Corr 5))"
 
 
 # --------------------------------------------------------------------------- #
 # workbook
 # --------------------------------------------------------------------------- #
-def _font(bold=False, mono=False, size=9, colour=INK, italic=False) -> Font:
-    return Font(name=MONO if mono else SANS, size=size, bold=bold, color=colour, italic=italic)
+_FMT_INT = '#,##0;"−"#,##0;"–"'
+_FMT_D1 = '#,##0.0;"−"#,##0.0;"–"'
+_FMT_D2 = '0.00;"−"0.00;"–"'
+_FMT_PCT = '0.0%;"−"0.0%;"–"'
+NUM_HEADS = {"Rooms", "Area (m²)", "Rooms counted in the department workbooks", "Area counted in the department workbooks (m²)", "Lowest room confidence", "Tender airflow (L/s)", "Calculated airflow (L/s)", "Reduction (L/s)", "Reduction (%)", "Confidence"}
+LEFT_HEADS = {"Remarks", "Sources", "Tender airflow source", "Departments", "Room name", "Department"}
+
+
+def _project() -> str:
+    from ..workbook import conf
+    return str((conf.config().get("project") or {}).get("name") or "Project")
 
 
 def _head(ws, row: int, labels: List[str], widths: List[float]) -> None:
-    thin = Side(style="thin", color=RULE)
+    """Header row in the house style: hairline rule under it, numeric headers right-aligned, text headers left-aligned."""
     for i, (lab, w) in enumerate(zip(labels, widths), 1):
         c = ws.cell(row=row, column=i, value=lab)
-        c.font = Font(name=SANS, size=9, bold=True, color=PAPER)
-        c.fill = PatternFill("solid", fgColor=INK)
-        c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-        c.border = Border(bottom=thin)
+        c.style = "HeaderLeft" if lab not in NUM_HEADS else "Header"
+        if lab in NUM_HEADS:
+            c.alignment = Alignment(horizontal="right", vertical="center", wrap_text=True)
         ws.column_dimensions[get_column_letter(i)].width = w
-    ws.row_dimensions[row].height = 30
+    ws.row_dimensions[row].height = 42
 
 
-def _print_setup(ws, last_col: int, last_row: int, title_row: int = 1, head: str = "") -> None:
-    ws.page_setup.orientation = "landscape"
-    ws.page_setup.paperSize = ws.PAPERSIZE_A3
+def _print_setup(ws, last_col: int, last_row: int, title_row: int = 1, head: str = "", date: str = "") -> None:
+    from ..workbook.styles import setup_sheet
+    setup_sheet(ws, ws.title, rev="A", date=date, project=_project(), print_rows="%d:%d" % (title_row, title_row), last_col=last_col, last_row=max(last_row, 2),
+                zoom=100)
     ws.page_setup.fitToWidth = 1
-    ws.page_setup.fitToHeight = 0
-    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
-    ws.print_title_rows = "%d:%d" % (title_row, title_row)
-    ws.print_area = "A1:%s%d" % (get_column_letter(last_col), max(last_row, 2))
-    ws.page_margins.left = ws.page_margins.right = 0.4
-    ws.page_margins.top = 0.6
-    ws.page_margins.bottom = 0.6
-    ws.oddHeader.left.text = "AIGH IP, AHU zone schedule"
-    ws.oddHeader.left.font = "Arial,Bold"
-    ws.oddHeader.left.size = 9
-    ws.oddHeader.right.text = head or ws.title
-    ws.oddHeader.right.size = 9
-    ws.oddFooter.center.text = "Page &P of &N"
-    ws.oddFooter.center.size = 8
-    ws.sheet_view.showGridLines = False
+    ws.page_setup.pageOrder = "overThenDown"
 
 
 README = [
@@ -185,12 +144,17 @@ README = [
     ("Sources lists the documents with number, issue, sheet and page. Remarks give the basis of the class and any difference between documents.", ""),
     ("AHU summary", "h"),
     ("Departments, Storeys served and Plant level come from the room sheets and from the unit tag.", ""),
-    ("Tender airflow is the supply airflow in L/s. The first source is Equipment Schedule SCH/1 (Corr 5). If the schedule has no figure, the source is the tender air-side schematic. The next column names the source.", ""),
+    ("Tender airflow is the supply airflow in L/s. The first source is Equipment Schedule SCH/1 (Corr 5). For the units of the MOT NSC (operating theatres, day surgery theatres, sterile services, cath lab and angiography), the source is the MOT NSC Overall AC Equipment Schedule (Corr 2); the tender air-side schematics IP-BH-16xxx show the same units. If no schedule has a figure, the source is the tender air-side schematic. The next column names the source.", ""),
+    ("A unit is looked up by its tag with and without the suffix A or B. Where a schedule prints another form of the tag, the source column states the tag as the schedule prints it.", ""),
+    ("Plant level comes from the tag (AHU-B-<plant level>-<served level><name>-<no.>). It is checked against Equipment Schedule (Corr 5). Basement tags take the level from the schedule.", ""),
     ("If neither source has a figure, the cell is blank and the source column gives the reason.", ""),
-    ("Enter the calculated airflow in L/s in the Calculated airflow column. Cells with a blue font are inputs.", ""),
-    ("Reduction (L/s) = Tender airflow minus Calculated airflow. Reduction (%) = Reduction divided by Tender airflow. Both are formulas and stay blank until you enter the calculated airflow.", ""),
+    ("The Calculated airflow column holds the supply airflow in L/s from AHU_master_summary.xlsx (tab AHU Master): the room supply of the department workbooks that carry rooms on the unit, plus the duct leakage. The Calculated airflow source ID column points to the Sources sheet, which names the master row and the department workbooks. The values are numbers: they do not update when a workbook changes.", ""),
+    ("Reduction (L/s) = Tender airflow minus Calculated airflow. Reduction (%) = Reduction divided by Tender airflow. Both are formulas and stay blank where the tender airflow or the calculated airflow is blank, or where the room list of the unit is partial.", ""),
+    ("Room list of the unit: the department workbooks add up only the rooms that they hold. The cell reads 'partial: ...' when the counted area is less than the share 0.9 of the zoned area of the unit, or more than 1 divided by 0.9 of it, or when the rooms that have a criteria row and a supply airflow hold less than the share 0.9 of the counted area. A partial unit shows no reduction. Its Remarks cell states the tender and the calculated airflow of the counted rooms only.", ""),
+    ("The calculated airflow and the reduction include occupants only. Lighting, small power, equipment and envelope gains are not included, so the reduction is an upper limit.", ""),
     ("The Remarks cell is a formula. It states the tender airflow, the calculated airflow and the change. If the calculated airflow is more than the tender airflow, the Remarks cell starts with VERIFY.", ""),
     ("Schematic and schedule airflows are for comparison only. They do not set the zone.", ""),
+    ("Units that are in AHU_master_summary.xlsx and not on the zoning drawing are listed after the zoned units. Their Departments, Storeys and Rooms come from the master summary.", ""),
     ("Documents", "h"),
     ("Room tags and mode labels: Arch Combined Tender, sheets AR-IP-01-LB3-001 to AR-IP-01-07-001, issue as shown in the Sources column.", ""),
     ("AHU tags and served rooms: air-side department schematics, Equipment Schedule SCH/1 (Corr 5), Appendix D ACMV for Common Areas, and the DD Booklets, as cited for each room.", ""),
@@ -199,111 +163,134 @@ README = [
 
 
 def build_xlsx(storeys: List[str], out: Path) -> dict:
+    from ..workbook import conf, styles as wstyles
+    from ..workbook.styles import install_styles
+    wstyles.FOOTER_DEPT = "AHU zone schedule"
+    date = conf.revision_date()
     rooms = load_rooms(storeys)
     units = build_units(rooms)
     tender = Tender()
     wb = Workbook()
+    install_styles(wb)
     ws = wb.active
     ws.title = "README"
-    ws.column_dimensions["A"].width = 120
+    ws.column_dimensions["A"].width = 2
+    ws.column_dimensions["B"].width = 150
     r = 1
     for text, kind in README:
-        c = ws.cell(row=r, column=1, value=text)
-        c.alignment = Alignment(wrap_text=True, vertical="top")
         if kind == "t":
-            c.font = Font(name=SANS, size=16, bold=True, color=INK)
+            c = ws.cell(row=r, column=2, value=text)
+            c.style = "Title"
             ws.row_dimensions[r].height = 28
         elif kind == "h":
             r += 1
-            c = ws.cell(row=r, column=1, value=text)
-            c.font = Font(name=SANS, size=11, bold=True, color=INK)
-            c.border = Border(bottom=Side(style="thin", color=RULE))
+            c = ws.cell(row=r, column=2, value=text)
+            c.style = "Section"
         else:
-            c.font = _font(size=10)
+            c = ws.cell(row=r, column=2, value=text)
+            c.style = "TextWrap"
+            ws.row_dimensions[r].height = 15.0 * max(1, -(-len(text) // 165)) + 2
         r += 1
-    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
-    ws.page_setup.orientation = "landscape"
-    ws.page_setup.paperSize = ws.PAPERSIZE_A3
-    ws.page_setup.fitToHeight = 0
-    ws.sheet_view.showGridLines = False
-    ws.freeze_panes = "A2"
+    from ..workbook.styles import setup_sheet
+    setup_sheet(ws, "README", rev="A", date=date, project=_project(), print_rows="1:1", last_col=2, last_row=r, zoom=100)
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 1
 
     # ---- AHU summary -----------------------------------------------------------------------------
     sm = wb.create_sheet("AHU summary")
-    heads = ["AHU or FCU tag", "Type", "Departments", "Storeys served", "Plant level", "Rooms", "Area (m2)", "Lowest room confidence",
-             "Tender airflow (L/s)", "Tender airflow source", "Calculated airflow (L/s)", "Reduction (L/s)", "Reduction (%)", "Remarks"]
-    widths = [30, 7, 38, 14, 22, 8, 11, 11, 12, 46, 13, 12, 11, 70]
+    heads = ["AHU or FCU tag", "Type", "Departments", "Storeys served", "Plant level", "Rooms", "Area (m²)", "Lowest room confidence",
+             "Tender airflow (L/s)", "Tender airflow source", "Calculated airflow (L/s)", "Reduction (L/s)", "Reduction (%)", "Remarks", "Code",
+             "Calculated airflow source ID", "Rooms counted in the department workbooks", "Area counted in the department workbooks (m²)", "Room list of the unit"]
+    widths = [26, 7, 30, 12, 24, 8, 10, 11, 12, 40, 12, 12, 11, 62, 6, 16, 12, 12, 40]
     _head(sm, 1, heads, widths)
     n_no_tender = 0
+    tender_conf: List[dict] = []
     order = sorted(units, key=lambda z: (min(ALL_STOREYS.index(s) for s in units[z]["storeys"]), z))
     for i, zk in enumerate(order, 2):
         u = units[zk]
         tags = sorted(u["tags"])
-        val, src = tender.find(tags)
+        lk = tender.lookup(tags)
+        val, src = lk["value"], lk["text"]
+        if lk.get("others"):
+            tender_conf.append(dict(lk, tag=u["tag"]))
         if val is None:
             n_no_tender += 1
         typ = re.match(r"^([A-Z]+)", tags[0]).group(1)
         row = [u["tag"], typ, "; ".join(sorted(u["depts"])) or "no information", ", ".join(u["storeys"]), plant_level(tags[0]), u["n"], round(u["area"], 1), u["conf"],
                val, src, None,
-               '=IF(OR(I%d="",K%d=""),"",I%d-K%d)' % (i, i, i, i),
-               '=IF(OR(I%d="",K%d="",I%d=0),"",(I%d-K%d)/I%d)' % (i, i, i, i, i, i),
-               ('=IF(I{r}="",J{r}&".",IF(K{r}="","Tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). Calculated airflow not yet entered.",'
-                'IF(K{r}>I{r},"VERIFY: increase from "&TEXT(I{r},"#,##0")&" to "&TEXT(K{r},"#,##0")&" L/s (+"&TEXT((K{r}-I{r})/I{r}*100,"0.0")&" %) against tender ("&J{r}&").",'
-                '"Reduced "&TEXT(I{r},"#,##0")&" -> "&TEXT(K{r},"#,##0")&" L/s (-"&TEXT((I{r}-K{r})/I{r}*100,"0.0")&" %) against tender ("&J{r}&").")))').format(r=i)]
+               '=IF(OR(I%d="",K%d="",S%d<>""),"",I%d-K%d)' % (i, i, i, i, i),
+               '=IF(OR(L%d="",I%d=0),"",L%d/I%d)' % (i, i, i, i),
+               ('=(IF(I{r}="",J{r}&".",IF(K{r}="","Tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). Calculated airflow not available.",'
+                'IF(K{r}>I{r},"VERIFY: increase from "&TEXT(I{r},"#,##0")&" to "&TEXT(K{r},"#,##0")&" L/s (+"&TEXT((K{r}-I{r})/I{r},"0.0 %")&") against tender ("&J{r}&").",'
+                'IF(S{r}<>"",S{r}&". Tender "&TEXT(I{r},"#,##0")&" L/s ("&J{r}&"). Calculated for the counted rooms: "&TEXT(K{r},"#,##0")&" L/s. No reduction is stated until the room list of the unit is complete.",'
+                '"Reduced "&TEXT(I{r},"#,##0")&" to "&TEXT(K{r},"#,##0")&" L/s (−"&TEXT((I{r}-K{r})/I{r},"0.0 %")&") against tender ("&J{r}&")."))))&" "&"' + THERMAL_NOTE + '"').format(r=i),
+               "D" if val is not None else None, None, None, None, None]
+        styles_ = ["Tag", "Text", "TextWrap", "Text", "TextWrap", "Calc", "Calc", "Calc", "Input", "TextWrap", "Input", "Calc", "Calc", "Remark", "Code", "Tag", "Calc", "Calc", "TextWrap"]
         for j, v in enumerate(row, 1):
             c = sm.cell(row=i, column=j, value=v)
-            c.font = _font(mono=(j == 1))
-            c.alignment = Alignment(vertical="top", wrap_text=j in (3, 10, 14))
-        sm.cell(row=i, column=9).number_format = "#,##0"
-        sm.cell(row=i, column=11).number_format = "#,##0"
-        sm.cell(row=i, column=11).font = Font(name=SANS, size=9, color="1F4FBF")
-        sm.cell(row=i, column=12).number_format = "#,##0;-#,##0"
-        sm.cell(row=i, column=13).number_format = "0.0%"
-        sm.cell(row=i, column=7).number_format = "#,##0.0"
-        sm.cell(row=i, column=8).number_format = "0.00"
-        if i % 2:
-            for j in range(1, len(heads) + 1):
-                sm.cell(row=i, column=j).fill = PatternFill("solid", fgColor=BAND)
+            c.style = styles_[j - 1]
+            if styles_[j - 1] in ("TextWrap", "Remark"):
+                c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True, indent=1)
+            elif styles_[j - 1] in ("Text", "Tag"):
+                c.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        sm.cell(row=i, column=6).number_format = _FMT_INT
+        sm.cell(row=i, column=7).number_format = _FMT_D1
+        sm.cell(row=i, column=8).number_format = _FMT_D2
+        sm.cell(row=i, column=9).number_format = _FMT_INT
+        sm.cell(row=i, column=11).number_format = _FMT_INT
+        sm.cell(row=i, column=12).number_format = _FMT_INT
+        sm.cell(row=i, column=13).number_format = _FMT_PCT
+        sm.row_dimensions[i].height = 28
     last = len(order) + 1
     sm.freeze_panes = "B2"
     sm.auto_filter.ref = "A1:%s%d" % (get_column_letter(len(heads)), last)
     sm.conditional_formatting.add("N2:N%d" % last, FormulaRule(formula=['LEFT($N2,6)="VERIFY"'], fill=PatternFill("solid", bgColor=AMBER, fgColor=AMBER)))
     sm.conditional_formatting.add("H2:H%d" % last, FormulaRule(formula=["$H2<0.9"], fill=PatternFill("solid", bgColor=AMBER, fgColor=AMBER)))
-    _print_setup(sm, len(heads), last, 1, "AHU summary")
+    sm.conditional_formatting.add("A2:S%d" % last, FormulaRule(formula=["MOD(ROW(),2)=0"], fill=PatternFill("solid", bgColor="FFF4F4F4", fgColor="FFF4F4F4")))
+    _print_setup(sm, len(heads), last, 1, "AHU summary", date)
 
     # ---- storey sheets ---------------------------------------------------------------------------
-    rheads = ["Room ID", "Room tag", "Room name", "Storey", "Department", "System / class", "Area (m2)", "Confidence", "Sources", "Remarks"]
-    rwidths = [11, 24, 28, 7, 28, 30, 10, 11, 70, 80]
+    rheads = ["Room ID", "Room tag", "Room name", "Storey", "Department", "System / class", "Area (m²)", "Confidence", "Sources", "Remarks", "Code"]
+    rwidths = [12, 24, 26, 8, 22, 28, 10, 11, 50, 60, 6]
     counts = {}
     for k in storeys:
         w = wb.create_sheet(k)
         _head(w, 1, rheads, rwidths)
         rows = rooms[k]
+        grids = {r["room_id"]: (r.get("grid_location") or r.get("grid_location_label_point") or "") for r in common.read_csv_dicts(common.resolve_paths()["registers"] / ("room_polygons_%s.csv" % k))}
         for i, a in enumerate(rows, 2):
             cls = a["class"].strip() or "no information"
-            vals = [a["room_id"], a["room_tag"], a["room_name"], k, tc.clean_dept(a["department"]) or "no information", cls, _num(a["area_m2"]), _num(a["confidence"]),
-                    "; ".join(tc.split_citations(a["sources"])), tc.clean_note(a["notes"])]
+            g_ = grids.get(a["room_id"], "")
+            note = tc.clean_note(a["notes"], cls, g_)
+            if "CATH-0" in cls:
+                note = (note + " " + cath_tag_note(cls)).strip()
+            vals = [a["room_id"], a["room_tag"], a["room_name"], k, tc.clean_dept(a["department"], cls) or "no information", cls, (_num(a["area_m2"]) or None), _num(a["confidence"]),
+                    "; ".join(tc.split_citations(a["sources"], g_)), note, "D"]
+            sty = ["Tag", "Tag", "TextWrap", "Text", "TextWrap", "Tag", "Calc", "Calc", "TextWrap", "Remark", "Code"]
             for j, v in enumerate(vals, 1):
                 c = w.cell(row=i, column=j, value=v)
-                c.font = _font(mono=j in (1, 6))
-                c.alignment = Alignment(vertical="top", wrap_text=j in (2, 3, 5, 9, 10))
-            w.cell(row=i, column=7).number_format = "#,##0.0"
-            w.cell(row=i, column=8).number_format = "0.00"
-            if i % 2:
-                for j in range(1, len(rheads) + 1):
-                    w.cell(row=i, column=j).fill = PatternFill("solid", fgColor=BAND)
+                c.style = sty[j - 1]
+                if sty[j - 1] in ("TextWrap", "Remark"):
+                    c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True, indent=1)
+                elif sty[j - 1] in ("Text", "Tag"):
+                    c.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+            w.cell(row=i, column=7).number_format = _FMT_D1
+            w.cell(row=i, column=8).number_format = _FMT_D2
         lr = len(rows) + 1
         w.freeze_panes = "C2"
         w.auto_filter.ref = "A1:%s%d" % (get_column_letter(len(rheads)), lr)
         w.conditional_formatting.add("H2:H%d" % lr, FormulaRule(formula=["$H2<0.9"], fill=PatternFill("solid", bgColor=AMBER, fgColor=AMBER)))
         w.conditional_formatting.add("F2:F%d" % lr, FormulaRule(formula=['$F2="no information"'], font=Font(name=SANS, italic=True, color="6B7780")))
-        _print_setup(w, len(rheads), lr, 1, "%s  %s" % (k, storey_info(k)["storey_label"]))
+        w.conditional_formatting.add("A2:K%d" % lr, FormulaRule(formula=["MOD(ROW(),2)=0"], fill=PatternFill("solid", bgColor="FFF4F4F4", fgColor="FFF4F4F4")))
+        _print_setup(w, len(rheads), lr, 1, "%s  %s" % (k, storey_info(k)["storey_label"]), date)
         counts[k] = len(rows)
+    from ..workbook.tender_lookup import record_conflicts
+    n_conf = record_conflicts(tender_conf)
     wb.properties.creator = "AIGH IP ACMV design team"
     wb.properties.title = "AHU zone schedule, LB3 to L07"
     out.parent.mkdir(parents=True, exist_ok=True)
     wb.save(str(out))
-    return {"rooms_per_storey": counts, "units": len(units), "units_without_tender_airflow": n_no_tender}
+    return {"rooms_per_storey": counts, "units": len(units), "units_without_tender_airflow": n_no_tender, "tender_conflicts_listed": n_conf}
 
 
 # --------------------------------------------------------------------------- #
@@ -332,6 +319,22 @@ def check_coverage(storeys: List[str]) -> dict:
         res["ok"] &= item["ok"]
     res["rooms_total"] = sum(v["rooms_assigned"] for v in res["storeys"].values())
     return res
+
+
+def undrawn_tags(k: str) -> set:
+    """Display tags of the units of a storey whose rooms all have no outline on the plan: the PDF lists them as not drawn."""
+    P = common.resolve_paths()
+    polys = {r["room_id"] for r in common.read_csv_dicts(P["registers"] / ("room_polygons_%s.csv" % k)) if r["polygon_pv_wkt"]}
+    drawn, allk = set(), defaultdict(set)
+    for r in common.read_csv_dicts(P["registers"] / ("zone_assignment_%s.csv" % k)):
+        c = r["class"].strip()
+        if not c or c == "no information" or c.lower().startswith("review"):
+            continue
+        zk, _ = zone_key(c)
+        allk[zk].add(c)
+        if r["room_id"] in polys:
+            drawn.add(zk)
+    return {display_tag(allk[z]) for z in allk if z not in drawn}
 
 
 def check_pdf(storeys: List[str]) -> dict:
@@ -396,24 +399,23 @@ def check_pdf(storeys: List[str]) -> dict:
     cur = None
     idx: Dict[str, List[str]] = defaultdict(list)
     keys = set(storeys)
-    for line in text.splitlines():
-        m = re.match(r"^(\w+)\s{2}.*PDF page (\d+)$", line.strip())
-        if m and m.group(1) in keys:
-            cur = m.group(1)
-            continue
-        m = re.match(r"^(\S+)\s+(AHU|FCU|PAHU|MV|NV|CRAC)\s+rooms\s+\d+", line.strip())
-        if m and cur:
-            idx[cur].append(m.group(1))
     page_of = {}
-    for line in text.splitlines():
-        m = re.match(r"^(\w+)\s{2}.*PDF page (\d+)$", line.strip())
-        if m and m.group(1) in keys:
-            page_of[m.group(1)] = int(m.group(2))
+    for pn in idx_pages:                  # a storey heading is one span; a zone tag is a span in the monospaced face
+        for blk in doc[pn].get_text("dict")["blocks"]:
+            for ln in blk.get("lines", []):
+                for sp in ln["spans"]:
+                    t = sp["text"].strip()
+                    m = re.match(r"^(\w+)\s{2}.*PDF page (\d+)$", t)
+                    if m and m.group(1) in keys:
+                        cur = m.group(1)
+                        page_of[cur] = int(m.group(2))
+                    elif "Mono" in sp["font"] and cur and t:
+                        idx[cur].append(t)
     res["index_pages"] = [p + 1 for p in idx_pages]
     ok_idx = True
     for k in storeys:
         got = idx.get(k, [])
-        want = zone_by_page.get(page_of.get(k, -1), set())
+        want = zone_by_page.get(page_of.get(k, -1), set()) | (undrawn_tags(k) & set(got))
         if sorted(got) != sorted(set(got)):
             prob.append("index %s lists a zone more than once: %s" % (k, [x for x, n in Counter(got).items() if n > 1]))
             ok_idx = False
@@ -426,16 +428,22 @@ def check_pdf(storeys: List[str]) -> dict:
     for k in storeys:
         asg = common.read_csv_dicts(P["registers"] / ("zone_assignment_%s.csv" % k))
         want = set()
+        grp = defaultdict(set)
         for r in asg:
             c = r["class"].strip()
             if c and c != "no information" and not c.lower().startswith("review"):
-                want.add(zone_key(c)[1] if AHU_RE.match(c) else c)
+                grp[zone_key(c)[0]].add(c)
+        disp_of = {zk: display_tag(v) for zk, v in grp.items()}
+        want = set(disp_of.values())
         got = set(idx.get(k, []))
+        undrawn_expected = undrawn_tags(k)
+        res.setdefault("not_drawn_units_listed_in_index", {})[k] = sorted(got & undrawn_expected)
+        got = got - undrawn_expected
         # rooms without a polygon do not draw a zone; a zone may be missing only when every room of the class has no polygon
         missing = want - got
         if missing:
             polys = {r["room_id"] for r in common.read_csv_dicts(P["registers"] / ("room_polygons_%s.csv" % k)) if r["polygon_pv_wkt"]}
-            only_nopoly = [m for m in missing if not any(r["room_id"] in polys and (zone_key(r["class"].strip())[1] if AHU_RE.match(r["class"].strip()) else r["class"].strip()) == m for r in asg)]
+            only_nopoly = [m for m in missing if not any(r["room_id"] in polys and disp_of.get(zone_key(r["class"].strip())[0]) == m for r in asg)]
             real = sorted(set(missing) - set(only_nopoly))
             if real:
                 prob.append("%s: classes in the assignment without a zone: %s" % (k, real))
@@ -471,6 +479,44 @@ def check_pdf(storeys: List[str]) -> dict:
     return res
 
 
+def check_fill(schedule: Path = None, master: Path = None) -> dict:
+    """The Calculated airflow of the AHU summary is filled for every tag that the master summary holds with a room supply, and the Sources sheet exists.
+    Fails when the filled count is 0 or differs from the number of tags common to both files that have a calculated airflow in the master summary."""
+    import openpyxl
+    P = common.resolve_paths()
+    schedule = schedule or P["zoning"] / "zone_schedule.xlsx"
+    master = master or Path("out/loads/workbooks/AHU_master_summary.xlsx")
+    res: dict = {"ok": False, "problems": []}
+    if not master.exists():
+        res["problems"].append("the master summary does not exist: the calculated airflow cannot be filled")
+        return res
+    mw = openpyxl.load_workbook(master, data_only=True)["AHU Master"]
+    mh = {str(c.value): i for i, c in enumerate(mw[5])}
+    m_calc = {str(r[0]): r[mh["Calculated airflow"]] for r in mw.iter_rows(min_row=7, values_only=True) if r[0] and r[0] != "TOTAL"}
+    wb = openpyxl.load_workbook(schedule, data_only=True)
+    sm = wb["AHU summary"]
+    heads = [c.value for c in sm[1]]
+    k = heads.index("Calculated airflow (L/s)")
+    rows = [r for r in sm.iter_rows(min_row=2, values_only=True) if r[0]]
+    common_tags = {str(r[0]) for r in rows if str(r[0]) in m_calc and isinstance(m_calc[str(r[0])], (int, float)) and m_calc[str(r[0])] > 0}
+    filled = {str(r[0]) for r in rows if r[k] is not None}
+    res.update(units=len(rows), filled=len(filled), expected=len(common_tags), sources_sheet="Sources" in wb.sheetnames)
+    if not filled:
+        res["problems"].append("the Calculated airflow is filled for 0 units")
+    if filled != common_tags and filled < common_tags:
+        res["problems"].append("units with a calculated airflow in the master summary and none in the schedule: " + ", ".join(sorted(common_tags - filled)[:6]))
+    if "Sources" not in wb.sheetnames:
+        res["problems"].append("the Sources sheet is missing")
+    ti = heads.index("Tender airflow (L/s)")
+    m_ten = {str(r[0]): r[mh["Tender airflow"]] for r in mw.iter_rows(min_row=7, values_only=True) if r[0] and r[0] != "TOTAL"}
+    diff = [str(r[0]) for r in rows if str(r[0]) in m_ten and (r[ti] if r[ti] is not None else None) != (m_ten[str(r[0])] if m_ten[str(r[0])] is not None else None)]
+    res["tender_differences"] = diff
+    if diff:
+        res["problems"].append(f"the tender airflow differs between the master summary and the schedule for {len(diff)} unit(s): " + ", ".join(diff[:6]))
+    res["ok"] = not res["problems"]
+    return res
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("what", choices=["schedule", "check", "all"])
@@ -481,10 +527,12 @@ def main(argv=None) -> int:
     if a.what in ("schedule", "all"):
         r = build_xlsx(storeys, P["zoning"] / "zone_schedule.xlsx")
         print(json.dumps(r))
+        from .fill_calculated import main as fill_main        # the fill is the last step of the schedule: a rebuilt schedule is never left empty
+        fill_main([])
     if a.what in ("check", "all"):
-        r = {"coverage": check_coverage(storeys), "pdf": check_pdf(storeys)}
+        r = {"coverage": check_coverage(storeys), "pdf": check_pdf(storeys), "fill": check_fill()}
         (P["qa"] / "zoning_deliverable_checks.json").write_text(json.dumps(r, indent=1, default=str))
-        print(json.dumps({"coverage_ok": r["coverage"]["ok"], "pdf_ok": r["pdf"]["ok"], "problems": r["pdf"]["problems"][:20]}, indent=1))
+        print(json.dumps({"coverage_ok": r["coverage"]["ok"], "pdf_ok": r["pdf"]["ok"], "fill_ok": r["fill"]["ok"], "problems": r["pdf"]["problems"][:20] + r["fill"]["problems"]}, indent=1))
     return 0
 
 

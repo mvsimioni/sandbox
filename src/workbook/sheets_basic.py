@@ -39,6 +39,20 @@ PRESSURE_METHOD = (
     "A cited document gives each stated value. The engineer sets the other values (code S).")
 
 
+def _value_fmt(v) -> str:
+    """Number format of one constant: whole numbers with thousands separator, otherwise the decimals the value needs (at most 4);
+    true minus sign and a dash for zero."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return "General"
+    if float(v) == int(v) and abs(v) < 1e12:
+        d = 0
+    else:
+        txt = f"{float(v):.6f}".rstrip("0")
+        d = min(max(len(txt.split(".")[1]), 1), 4)
+    body = "#,##0" + ("." + "0" * d if d else "")
+    return f'{body};"−"{body};"–"'
+
+
 def _tbl_name(ctx: Ctx, ws, name: str, col: str, r0: int, r1: int) -> None:
     ctx.define(name, f"'Basis of Design'!${col}${r0}:${col}${r1}")
 
@@ -93,9 +107,7 @@ def write_basis(ctx: Ctx) -> None:
             code, src = c.get("code", "S"), c.get("source", "")
             style = CODE_STYLES[code][0] if not blank(v) else "Assumption"
             put(ws, f"B{r}", c["label"], "Text")
-            cell = put(ws, f"C{r}", v, style, "General")
-            if isinstance(v, float) and 0.01 <= abs(v) < 1:
-                cell.number_format = "0.00##"
+            cell = put(ws, f"C{r}", v, style, _value_fmt(v))
             put(ws, f"D{r}", f"{c.get('unit', '')}  ({nm})", "Text")
             put(ws, f"E{r}", code, "Code")
             put(ws, f"F{r}", src, "Tag")
@@ -186,13 +198,15 @@ def write_basis(ctx: Ctx) -> None:
              "supply-to-room temperature difference. Supply is the larger case, not less than exhaust and pressure require. Round once, at the end.",
              "AHU outdoor air = outdoor-air fraction of the highest-standard room on the AHU × AHU supply airflow. Add duct leakage to the supply first. "
              "The plain sum and the multiple-space value of the example are shown beside it.",
-             "Outdoor air is capped at room supply. Transfer air from the adjacent spaces makes up any exhaust or pressure need beyond the supply. "
+             "Outdoor air is capped at room supply. An outdoor air that a criteria row gives per area or as a rate is a floor of the room supply. Transfer air from the adjacent spaces makes up any exhaust or pressure need beyond the supply. "
              "Areas are taken to 0.1 m² (named cell AreaDecimals). Airflows are calculated unrounded and rounded once at the end.",
              "Coil duty keeps the method of the Rev A AHU Summary. The outdoor-air load takes the room condition of the first supply room of the AHU, in room order. "
              "The example's own basis is shown beside the rule-based duty. That basis is the maximum of the sum and the multiple-space value. "
              "No change of method has been approved.",
-             "Tender airflow (Equipment Schedule Corr 5, else the tender air-side schematic) is information only. It is never a target or a limit. "
-             "Reduction = tender − calculated. Reduction (%) = (tender − calculated) ÷ tender. A calculated airflow above tender is marked VERIFY.",
+             "Tender airflow (Equipment Schedule Corr 5; for the MOT NSC units the MOT NSC Overall AC Equipment Schedule Corr 2; else the tender air-side schematic) is information only. It is never a target or a limit. "
+             "Reduction = tender − calculated. Reduction (%) = (tender − calculated) ÷ tender. A calculated airflow above tender is marked VERIFY. "
+             "A unit shows a reduction only when the rooms counted here reach the share ZoneCoverMin of the area that the zone schedule gives for the unit. "
+             "Otherwise the Remarks cell reads 'partial: n of m zoned rooms, x of y m²' and the reduction cells stay blank. The other departments on the unit are counted on the AHU master summary.",
              "Occupancy comes from the RDS. The default density by room use applies only where the RDS field is empty or the room has no RDS. "
              "It is rounded up to a whole person (red text, code A).",
              "Area used (selector AUTO, the default): the design area is the DPA designed area, else the SOA area. "
@@ -240,31 +254,43 @@ def write_basis_tail(ctx: Ctx) -> None:
         put(ws, f"B{r}", typ, "Tag")
         put(ws, f"C{r}", f'=COUNTIFS({FL.rng("type")},"{typ}",{FL.rng("status")},"OPEN")', "Link", "d0")
         r += 1
-    for k in ctx.data.get("key_flags", []):
+    for k in list(ctx.data.get("key_flags", [])) + ["Envelope gain is not assessed (no Envelope rows). It is not zero.",
+                                                     "Thermal load case: occupants only. Lighting, small power and equipment gains are not included, because no approved value is available."]:
         put(ws, f"B{r}", k, "TextWrap")
         ws.merge_cells(f"B{r}:G{r}")
         ws.row_dimensions[r].height = 15 * (1 + len(k) // 150)
         r += 1
     r += 1
-    put(ws, f"B{r}", "6  Assumptions to confirm (yellow cells)", "Section")
+    put(ws, f"B{r}", "6  Assumptions on constants and tables (yellow cells)", "Section")
     r += 1
-    for col, h in zip("BCDEFG", ("Item", "Value", "Where", "Code", "Source ID", "Room or tag")):
+    put(ws, f"B{r}", "Assumptions about single rooms are on Flags, one row for each room.", "Note")
+    r += 1
+    for col, h in zip("BCDEF", ("Item", "Value", "Section", "Code", "Source ID")):
         put(ws, f"{col}{r}", h, "HeaderLeft")
     r += 1
-    first = r
     for a in ctx.assumptions:
-        put(ws, f"B{r}", a["label"], "Text")
+        if a["sheet"] != "Basis of Design":
+            continue
+        put(ws, f"B{r}", str(a["label"]).replace("_", " "), "Text")
         v = a["value"]
-        put(ws, f"C{r}", v if isinstance(v, (int, float, str)) else str(v), "Text", "General").alignment = Alignment(horizontal="right")
-        c = put(ws, f"D{r}", f"{a['sheet']}!{a['cell']}", "Tag")
+        if v is None:
+            put(ws, f"C{r}", None, "Text")
+        elif isinstance(v, (int, float)) and not isinstance(v, bool):
+            put(ws, f"C{r}", v, "Calc", _value_fmt(v))
+        else:
+            put(ws, f"C{r}", str(v), "Text")
+            ws[f"C{r}"].alignment = Alignment(horizontal="left", vertical="center")
+        c = put(ws, f"D{r}", "Design constants" if ":" not in str(a["label"]) else "Design tables", "Text")
         link_to(c, a["sheet"], a["cell"])
         put(ws, f"E{r}", "A", "Code")
         put(ws, f"F{r}", a.get("src"), "Tag")
-        put(ws, f"G{r}", a.get("room"), "Tag")
+        if a.get("src"):
+            ctx.src_ranges.append(f"F{r}")
+            ctx.src_link(ws, f"F{r}", a["src"])
         r += 1
     ctx.bod_last = r
     setup_sheet(ws, ws.title, rev=ctx.rev, date=ctx.date, project=ctx.project, print_rows="1:2", last_col=7, last_row=r,
-                tab_colour="FF1F4E79", freeze="C4")
+                tab_colour="FF1F4E79")
 
 
 # --------------------------------------------------------------------------- #
@@ -292,6 +318,7 @@ def build_flag_rows(ctx: Ctx) -> List[Dict[str, Any]]:
     seen = set()
 
     def add(**kw) -> None:
+        kw["desc"] = re.sub(r"\s*\(\s*\)", "", kw["desc"])          # no empty brackets
         d0 = kw["desc"]
         first = re.split(r"(?<=[.!?])\s", d0, maxsplit=1)[0]
         if len(first.split()) > 25 and ": " in d0 and d0.startswith("Room "):
@@ -370,6 +397,8 @@ def build_flag_rows(ctx: Ctx) -> List[Dict[str, Any]]:
         if blank(r.get("ceiling_height_m")):
             add(type="CONFIRM", ref=n, desc=f"{who}: ceiling height is not set. Volume and air-change airflow are zero until it is given.{note('height')}",
                 status="OPEN", owner="ACMV engineer", src="", link=("Room Information", RI.local("h", gi)))
+        if gaps.get("equipment"):
+            add(type="VERIFY", ref=n, desc=f"{who}: {gaps['equipment']}", status="OPEN", owner="ACMV engineer", src="", link=("Room Information", RI.local("eqs", gi)))
         if gaps.get("occupancy"):
             add(type="VERIFY", ref=n, desc=f"{who}: {gaps['occupancy']}", status="OPEN", owner="ACMV engineer", src="",
                 link=("Room Information", RI.local("pfix", gi)))
@@ -425,8 +454,8 @@ def write_flags(ctx: Ctx, rows: List[Dict[str, Any]]) -> None:
     L = ctx.lay["FL"]
     title_block(ws, "Flags", "Assumptions and open items, each CONFIRM, VERIFY or ASSUMPTION, with status. Change the status to CLOSED or "
                 "ACCEPTED when resolved; the README counts the open ones.", ctx)
-    heads = [("id", "Flag", "", 8), ("type", "Type", "", 12), ("ref", "Reference", "", 26), ("desc", "Description", "", 90),
-             ("status", "Status", "", 11), ("owner", "Owner", "", 12), ("src", "Source ID", "", 12), ("note", "Note", "", 30)]
+    heads = [("id", "Flag", "", 8), ("type", "Type", "", 12), ("ref", "Reference", "", 26), ("desc", "Description", "", 120),
+             ("status", "Status", "", 11), ("owner", "Owner", "", 16), ("src", "Source ID", "", 12)]
     write_headers(ws, L, heads, 4, {"id": "FLAG"})
     for i, f in enumerate(rows):
         g = lambda k: L.local(k, i)
@@ -442,11 +471,10 @@ def write_flags(ctx: Ctx, rows: List[Dict[str, Any]]) -> None:
         if f.get("src"):
             ctx.src_ranges.append(g("src"))
             ctx.src_link(ws, g("src"), f["src"])
-        put(ws, g("note"), None, "Note")
     if ctx.n_flags:
         list_validation(ws, f"{L.col('type')}{L.first}:{L.col('type')}{L.last}", "ListFlagType")
         list_validation(ws, f"{L.col('status')}{L.first}:{L.col('status')}{L.last}", "ListFlagStatus")
-        band_rows(ws, f"A{L.first}:{L.col('note')}{L.last}")
+        band_rows(ws, f"A{L.first}:{L.col('src')}{L.last}")
         cf_text(ws, f"{L.col('status')}{L.first}:{L.col('status')}{L.last}", f"{L.col('status')}{L.first}", "OPEN", bold=False, fill="FFFFF2CC")
     # live outdoor-air rule flags: one row per room the rule separates (CONFIRM) or lists for Marcus (VERIFY)
     AF, AH, AH2, FC = ctx.lay["AF"], ctx.lay["AH"], ctx.lay["AH2"], ctx.lay["FC"]
@@ -481,13 +509,12 @@ def write_flags(ctx: Ctx, rows: List[Dict[str, Any]]) -> None:
         put(ws, g("status"), f'=IF({used},"OPEN","")', "Text")
         put(ws, g("owner"), f'=IF({used},"ACMV engineer","")', "Text")
         put(ws, g("src"), None, "Tag")
-        put(ws, g("note"), None, "Note")
     r = L.last + 2
     put(ws, f"A{r}", "Live", "Tag")
     put(ws, f"D{r}", (f'="Outdoor-air rule: "&COUNTIF({AF.rng("status")},"SEPARATE")&" room(s) proposed for separation onto an FCU; "'
                       f'&COUNTIF({AF.rng("status")},"LIST FOR REVIEW")&" clinical room(s) listed for review (see Airflow, last columns and the FCU tab)."'),
         "Calc").alignment = Alignment(horizontal="left")
-    _setup(ws, ctx, L, L.idx["note"], r, "4:6", f"B{L.first}", "FFC00000")
+    _setup(ws, ctx, L, L.idx["src"], r, "4:6", f"B{L.first}", "FFC00000")
 
 
 # --------------------------------------------------------------------------- #
@@ -496,14 +523,15 @@ def write_checks(ctx: Ctx) -> None:
     L = Layout("Checks", ["no", "desc", "value", "limit", "status", "note"], 7, 0)
     RI, CR, AF, PS, PU, FB, FB2, AH, FL = (ctx.lay[k] for k in ("RI", "CR", "AF", "PS", "PU", "FB", "FB2", "AH", "FL"))
     title_block(ws, "Checks", "Live reconciliations. PASS or FAIL are hard tests; VERIFY marks a finding to review; INFO is a count.", ctx)
-    heads = [("no", "No.", "", 6), ("desc", "Check", "", 80), ("value", "Value", "", 12), ("limit", "Limit or expected", "", 14),
+    heads = [("no", "No.", "", 6), ("desc", "Check", "", 80), ("value", "Value (unit in Note)", "", 14), ("limit", "Limit or expected (unit in Note)", "", 16),
              ("status", "Status", "", 10), ("note", "Note", "", 60)]
-    write_headers(ws, L, heads, 4, {"no": "RECONCILIATION"})
+    write_headers(ws, L, heads, 4, {"no": "RECONCILIATION"}, unit_row=False)
+    ws.row_dimensions[6].height = 4
     nr = len(ctx.rooms)
     err_ranges = []
     for st in ctx.storeys:
         E = ctx.eng_layouts[st]
-        err_ranges.append(f"'{E.sheet}'!$A${E.first}:${E.col('frac')}${E.last}")
+        err_ranges.append(f"'{E.sheet}'!$A${E.first}:${E.col('frac')}${E.last + 1}")
     for key in ("RI", "CR", "EN", "AF", "FB", "CP"):
         L_ = ctx.lay[key]
         err_ranges.append(f"'{L_.sheet}'!$A${L_.first}:${get_column_letter(L_.ncols)}${L_.last}")
@@ -512,7 +540,12 @@ def write_checks(ctx: Ctx) -> None:
     pl = ctx.lay["PL"]
     err_ranges.append(f"'Pressure'!$A${pl.first}:${get_column_letter(pl.ncols)}${pl.last}")
     ah, ah2 = ctx.lay["AH"], ctx.lay["AH2"]
-    err_ranges.append(f"'AHU'!$A${ah.first}:${get_column_letter(ah.ncols)}${ah2.last}")
+    err_ranges.append(f"'AHU'!$A${ah.first}:${get_column_letter(ah.ncols)}${ah2.last + 1}")
+    for sh in ("Fans", "VAV", "Venturi Valves", "Sources"):
+        w_ = ctx.wb[sh]
+        err_ranges.append(f"'{sh}'!$A$7:${get_column_letter(max(w_.max_column, 2))}${max(w_.max_row, 8) + 1}")
+    err_ranges.append(f"'Flags'!$A${FL.first}:${get_column_letter(FL.ncols)}${FL.last + 2}")
+    err_ranges.append("'Basis of Design'!$A$1:$G$400")
     fc = ctx.lay["FC"]
     err_ranges.append(f"'FCU'!$A${fc.first}:${get_column_letter(fc.ncols)}${fc.last}")
     err = "+".join(f"SUMPRODUCT(--ISERROR({r}))" for r in err_ranges)
@@ -531,25 +564,44 @@ def write_checks(ctx: Ctx) -> None:
     for sh, cols in by_sheet.items():
         for col, rws in cols.items():
             rws = sorted(set(rws))
-            runs, start, prev = [], rws[0], rws[0]
-            for x in rws[1:]:
-                if x != prev + 1:
-                    runs.append((start, prev))
-                    start = x
-                prev = x
-            runs.append((start, prev))
+            if sh != "Basis of Design":
+                runs = [(rws[0], rws[-1])]       # the whole table column: an ID added anywhere in it is tested
+            else:
+                runs, start, prev = [], rws[0], rws[0]
+                for x in rws[1:]:
+                    if x != prev + 1:
+                        runs.append((start, prev))
+                        start = x
+                    prev = x
+                runs.append((start, prev))
             for a, b in runs:
                 rg = f"'{sh}'!${col}${a}:${col}${b}"
                 src_terms.append(f"SUMPRODUCT(({rg}<>\"\")*(COUNTIF({ids},{rg})=0))")
-    unresolved = "+".join(src_terms) if src_terms else "0"
+    # one cell may not hold more than 8192 characters of formula: the terms go into helper cells (column H of Checks), the check sums them
+    src_chunks, cur, cur_len = [], [], 0
+    for t in src_terms:
+        if cur and cur_len + len(t) + 1 > 6000:
+            src_chunks.append(cur)
+            cur, cur_len = [], 0
+        cur.append(t)
+        cur_len += len(t) + 1
+    if cur:
+        src_chunks.append(cur)
+    helper_first = L.first
+    unresolved = f"SUM($H${helper_first}:$H${helper_first + len(src_chunks) - 1})" if src_chunks else "0"
     pa = ctx.lay["PS"]
     checks = [
         ("Total area used against the total design area (DPA, else SOA), within the tolerance", f"=SUM({RI.rng('area')})", f"=SUM({RI.rng('base')})",
          '=IF(ABS(C{r}-D{r})<=MAX(AreaTolM2,AreaTolPct*D{r}),"PASS","VERIFY")', "m²; the difference comes from the rooms listed on Flags"),
         ("Rooms whose design area (DPA, else SOA) and measured area disagree beyond tolerance", f'=COUNTIF({RI.rng("agree")},"NO")', 0, '=IF(C{r}=0,"PASS","VERIFY")', "list on Room Information"),
         ("Rooms whose final supply is below either airflow case or the pressure minimum", f'=COUNTIF({AF.rng("ok")},"FAIL")', 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
-        ("Rooms whose outdoor air is below the air-change minimum", f"=SUMPRODUCT(--({AF.rng('oa')}<{AF.rng('oa_air')}))", 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
-        ("Rooms whose outdoor air exceeds their supply", f"=SUMPRODUCT(--({AF.rng('oa')}>{AF.rng('supply')}))", 0, '=IF(C{r}=0,"PASS","FAIL")', "outdoor air is capped at supply; transfer air makes up the rest"),
+        ("Rooms with an AHU whose outdoor air is below the air-change minimum", f"=SUMPRODUCT(--({AF.rng('oa')}<{AF.rng('oa_air')}),--({AF.rng('supply')}>0),--({AF.rng('ahu')}<>\"\"))", 0, '=IF(C{r}=0,"PASS","FAIL")', "rooms with no AHU are counted in the check on rooms with no AHU; an exhaust-only room has no supply and takes transfer air"),
+        ("Rooms whose outdoor-air requirement is above their supply", f"=SUMPRODUCT(--({AF.rng('oa_air')}>{AF.rng('supply')}),--({AF.rng('supply')}>0))", 0, '=IF(C{r}=0,"PASS","VERIFY")', "outdoor air is capped at supply; transfer air makes up the rest"),
+        ("Rooms with a pressure target in Pa and no row on Pressure", f'=SUMPRODUCT(--ISNUMBER({CR.rng("pa")}),--(COUNTIF({PS.rng("node")},{RI.rng("no")})=0))', 0,
+         ('=IF(C{r}=0,"PASS",IF(SUMPRODUCT(--ISNUMBER(' + CR.rng("pa") + '),--(COUNTIF(' + PS.rng("node") + ',' + RI.rng("no") + ')=0),--(COUNTIFS(' + FL.rng("ref") + ',' + RI.rng("no") +
+          ',' + FL.rng("desc") + ',"*door data*")=0))>0,"FAIL","VERIFY"))'),
+         "no document gives the door data: the offset of these rooms is not calculated. FAIL if a room has no Flags row with the reason"),
+        ("Rooms fixed by the MOT specification", f"=SUM({AF.rng('fix')})", "information", '="INFO"', "rooms with specified airflows"),
         ("Specified (MOT) rooms where the calculation needs more supply than specified", f'=COUNTIF({AF.rng("ok")},"SPECIFIED")', 0,
          '=IF(C{r}=0,"PASS","VERIFY")', "specified airflows are not resized; listed for the MOT engineer"),
         ("Specified (MOT) rooms whose specified offset is below the offset needed", f'=COUNTIF({AF.rng("off_chk")},"SHORT")', 0,
@@ -562,24 +614,53 @@ def write_checks(ctx: Ctx) -> None:
         ("Room flow balances that do not close", f'=COUNTIF({FB.rng("status")},"FAIL")', 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
         ("AHU balances that do not close", f'=COUNTIF({FB2.rng("status")},"FAIL")' if ctx.ahus else "=0", 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
         ("AHU room supply equals the Airflow total of the rooms that have an AHU", f"=SUM({AH.rng('sa_room')})",
-         f"=SUMPRODUCT(--ISTEXT({AF.rng('ahu')}),{AF.rng('supply')})", '=IF(ABS(C{r}-D{r})<=BalTolLps,"PASS","FAIL")', "L/s"),
-        ("Room supply of rooms that have no AHU", f"=SUMPRODUCT(--NOT(ISTEXT({AF.rng('ahu')})),{AF.rng('supply')})", 0,
-         '=IF(C{r}<=BalTolLps,"PASS","VERIFY")', "L/s; the rooms are listed on Flags"),
+         f"=SUMPRODUCT(--(LEN({AF.rng('ahu')})>0),{AF.rng('supply')})", '=IF(ABS(C{r}-D{r})<=BalTolLps,"PASS","FAIL")', "L/s"),
+        ("Room supply of rooms that have no AHU and no system class", f"=SUMPRODUCT(--(LEN({AF.rng('ahu')})=0),--(LEN({RI.rng('systype')})=0),{AF.rng('supply')})", 0,
+         '=IF(C{r}<=BalTolLps,"PASS","FAIL")', "L/s; the rooms are listed on Flags"),
+        ("Room supply of rooms that have no AHU and a system class MV, NV or no information", f"=SUMPRODUCT(--(LEN({AF.rng('ahu')})=0),--(LEN({RI.rng('systype')})>0),{AF.rng('supply')})", 0,
+         '=IF(C{r}<=BalTolLps,"PASS","VERIFY")', "L/s; no unit carries this supply"),
         ("Formula errors in the calculation tabs", f"={err}", 0, '=IF(C{r}=0,"PASS","FAIL")', "error values are never masked"),
         ("Source IDs that do not resolve on Sources", f"={unresolved}", 0, '=IF(C{r}=0,"PASS","FAIL")', ""),
-        ("Rooms with a blank AHU, area or ceiling height", f'=SUMPRODUCT(({RI.rng("no")}<>"")*(({RI.rng("ahu")}="")+({RI.rng("area")}=0)+({RI.rng("h")}="")>0))', 0,
-         '=IF(C{r}=0,"PASS","VERIFY")', "listed on Flags"),
-        ("Rooms with no criteria row", f'=SUMPRODUCT(({CR.rng("no")}<>"")*({CR.rng("crit")}=""))', 0, '=IF(C{r}=0,"PASS","VERIFY")', "listed on Flags"),
+        ("Rooms with neither an AHU nor a system class", f'=SUMPRODUCT(({RI.rng("no")}<>"")*({RI.rng("ahu")}="")*({RI.rng("systype")}=""))', 0,
+         '=IF(C{r}=0,"PASS","FAIL")', "FCU, MV, NV and no information are system classes; listed on Flags"),
+        ("Rooms with a system class MV or NV and no unit", f'=SUMPRODUCT(({RI.rng("ahu")}="")*(({RI.rng("systype")}="MV")+({RI.rng("systype")}="NV")>0))', "information", '="INFO"',
+         "ventilation without a unit"),
+        ("Rooms with the system class no information and no unit", f'=SUMPRODUCT(({RI.rng("ahu")}="")*({RI.rng("systype")}="NO INFORMATION"))', 0,
+         '=IF(C{r}=0,"PASS","VERIFY")', "the zoning gives no evidence for these rooms"),
+        ("Rooms with no area", f'=SUMPRODUCT(({RI.rng("no")}<>"")*((({RI.rng("area")}="")+({RI.rng("area")}=0))>0))', 0, '=IF(C{r}=0,"PASS","FAIL")', "listed on Flags"),
+        ("Rooms with no ceiling height", f'=SUMPRODUCT(({RI.rng("no")}<>"")*({RI.rng("h")}=""))', 0, '=IF(C{r}=0,"PASS","FAIL")',
+         "a blank height is a fault: the default height is a flagged assumption"),
+        ("Rooms with no criteria row", f'=SUMPRODUCT(({CR.rng("no")}<>"")*({CR.rng("crit")}=""))', 0, '=IF(C{r}=0,"PASS","FAIL")',
+         "a room that takes the default for circulation counts as a room with a criteria row; listed on Flags"),
+        ("Rooms with no occupancy value (no RDS value and no room use for the default)", f'=COUNTIF({RI.rng("obasis")},"NOT SET")', 0, '=IF(C{r}=0,"PASS","VERIFY")', "listed on Flags"),
         ("Rooms separated by the outdoor-air rule", f'=COUNTIF({AF.rng("status")},"SEPARATE")', "information", '="INFO"', "see FCU"),
         ("Clinical rooms listed for review under the outdoor-air rule", f'=COUNTIF({AF.rng("status")},"LIST FOR REVIEW")', "information", '="INFO"', ""),
         ("Rooms the rule would still separate after four rounds", f"=SUM({AF.rng('trg4')})-SUM({AF.rng('lst4')})", 0, '=IF(C{r}<=0,"PASS","FAIL")', "rounds converged"),
         ("AHUs whose scheduled supply is below the calculated AHU supply", f'=SUMPRODUCT(({AH.rng("sched")}<>"")*({AH.rng("sched")}<{AH.rng("sa_ahu")}))', 0,
          '=IF(C{r}=0,"PASS","VERIFY")', ""),
+        ("AHUs whose room list is partial against the zone schedule", f'=COUNTIF({AH.rng("cov")},"partial*")' if ctx.ahus else "=0", "information", '="INFO"',
+         "units with no reduction shown; the zoned rooms and area are on the AHU tab"),
+        ("Rooms linked to a room box of the tender air-side schematics", f'=COUNT({ctx.lay["CP"].rng("sch_s")})', "information", '="INFO"',
+         "of the rooms on Room Information; the room boxes that match no room are on Flags"),
         ("Open flags", f'=COUNTIF({FL.rng("status")},"OPEN")', "information", '="INFO"', "see Flags"),
     ]
     L.n = len(checks)
+    # acceptance items of brief 8.6 (every room has an AHU or class, every criterion traces to the booklet, every pressure target is on Pressure or listed) and
+    # the supply that no unit carries; the other checks test arithmetic and balance
+    acceptance = ("Rooms with a pressure target", "Room supply of rooms that have no AHU", "Rooms with neither", "Rooms with the system class no information", "Rooms with no area",
+                  "Rooms with no ceiling height", "Rooms with no criteria row", "Rooms with no occupancy value")
+    ctx.chk_row = {}
+    put(ws, f"G{L.first - 2}", "Kind", "HeaderLeft")
+    ws.column_dimensions["G"].width = 14
     for i, (desc, val, lim, st, note) in enumerate(checks):
         r = L.row(i)
+        kind = "ACCEPTANCE" if desc.startswith(acceptance) else "CALCULATION"
+        put(ws, f"G{r}", kind, "Note")
+        for key, pre in (("press", "Rooms with a pressure target"), ("sup_none", "Room supply of rooms that have no AHU and no"), ("sup_cls", "Room supply of rooms that have no AHU and a"),
+                         ("sup_on", "AHU room supply equals"), ("no_unit", "Rooms with neither"), ("no_area", "Rooms with no area"), ("no_h", "Rooms with no ceiling height"),
+                         ("no_crit", "Rooms with no criteria row"), ("no_occ", "Rooms with no occupancy value")):
+            if desc.startswith(pre):
+                ctx.chk_row[key] = r
         put(ws, f"A{r}", i + 1, "Text", "d0")
         put(ws, f"B{r}", desc, "Text")
         put(ws, f"C{r}", val, "Calc", "d1" if i == 0 else "d0")
@@ -588,55 +669,86 @@ def write_checks(ctx: Ctx) -> None:
             ws[f"D{r}"].alignment = Alignment(horizontal="right")
         put(ws, f"E{r}", st.replace("{r}", str(r)), "Check")
         put(ws, f"F{r}", note, "Note")
+    if src_chunks:
+        put(ws, f"H{L.first - 1}", "Helper: source IDs not found on Sources", "Note")
+        ws.column_dimensions["H"].width = 14
+        ws.column_dimensions["H"].hidden = True
+        for j, chunk in enumerate(src_chunks):
+            put(ws, f"H{helper_first + j}", "=" + "+".join(chunk), "Calc", "d0")
     # first check formula referenced E{r}="" harmlessly; overall
     last = L.last
     cf_text(ws, f"E{L.first}:E{last}", f"E{L.first}", "FAIL")
     cf_text(ws, f"E{L.first}:E{last}", f"E{L.first}", "VERIFY", fill="FFFFF2CC")
     r = last + 2
-    put(ws, f"B{r}", "Overall", "Text")
-    put(ws, f"E{r}", f'=IF(COUNTIF(E{L.first}:E{last},"FAIL")=0,"PASS","FAIL")', "Check")
+    put(ws, f"B{r}", "Overall", "ResultText")
+    put(ws, f"E{r}", f'=IF(COUNTIF(E{L.first}:E{last},"FAIL")>0,"FAIL",IF(COUNTIF(E{L.first}:E{last},"VERIFY")>0,"VERIFY","PASS"))', "ResultCheck")
+    for col in "ACD":
+        put(ws, f"{col}{r}", None, "ResultText")
+    put(ws, f"F{r}", "FAIL if any check fails; VERIFY if none fails and some need review", "ResultText")
     cf_text(ws, f"E{r}", f"E{r}", "FAIL")
+    cf_text(ws, f"E{r}", f"E{r}", "VERIFY", fill="FFFFF2CC")
     ctx.checks_status = f"'Checks'!$E${r}"
     ctx.checks_range = f"'Checks'!$E${L.first}:$E${last}"
     ctx.checks_layout = L
     ctx.checks_rows = (L.first, last)
-    _setup(ws, ctx, L, 6, r, "4:6", f"C{L.first}", "FFC00000")
+    _setup(ws, ctx, L, 7, r, "4:6", f"C{L.first}", "FFC00000")
 
 
 def write_readme(ctx: Ctx) -> None:
+    from openpyxl.styles import Border, Font, PatternFill
+    from openpyxl.worksheet.pagebreak import Break
+    from .styles import FILL_FAIL, HAIR, OCC_NAME
     ws = ctx.wb["README"]
     d = ctx.data
-    for col, w in zip("ABCDEFG", (2, 24, 40, 44, 16, 14, 14)):
+    for col, w in zip("ABCDEFG", (2, 34, 58, 44, 16, 14, 14)):
         ws.column_dimensions[col].width = w
     ws.column_dimensions["H"].width = 40
     put(ws, "B1", f"{d['department'].get('number', '')}  {d['department'].get('name', '')}", "Title")
     put(ws, "B2", f"{ctx.project}: thermal load, airflow and pressure workbook", "Note")
+    ws.merge_cells("B2:H2")
+    ws.row_dimensions[2].height = 14
     r = 4
     put(ws, f"B{r}", "Purpose and scope", "Section")
     r += 1
     put(ws, f"B{r}", d.get("purpose", "This workbook calculates room loads, supply and outdoor airflow, pressure offsets and AHU totals for the "
-                                      "department. It uses the NDH / Rev A engine. Every input has a source."), "TextWrap")
+                                      "department. Every input has a source."), "TextWrap")
     ws.merge_cells(f"B{r}:H{r}")
-    ws.row_dimensions[r].height = 42
+    ws.row_dimensions[r].height = 30
     r += 2
     put(ws, f"B{r}", "Status (live)", "Section")
     r += 1
     FL = ctx.lay["FL"]
-    for label, f in (("Checks", f'=IF(COUNTIF({ctx.checks_range},"FAIL")=0,"ALL CHECKS PASS",COUNTIF({ctx.checks_range},"FAIL")&" CHECK(S) FAIL")'),
-                     ("Checks to verify", f'=COUNTIF({ctx.checks_range},"VERIFY")'),
+    ck = lambda k, col="C": f"'Checks'!${col}${ctx.chk_row[k]}"
+    RI_, AF_, CR_ = ctx.lay["RI"], ctx.lay["AF"], ctx.lay["CR"]
+    kind_rng = f"'Checks'!$G${ctx.checks_layout.first}:$G${ctx.checks_layout.last}"
+    on_unit = f'SUMPRODUCT(--(LEN({AF_.rng("ahu")})>0),{AF_.rng("supply")})'
+    tot_sup = f'SUM({AF_.rng("supply")})'
+    n_rooms = f'COUNTA({RI_.rng("no")})'
+    n_unit = f'SUMPRODUCT(--({RI_.rng("no")}<>""),--((LEN({RI_.rng("ahu")})+LEN({RI_.rng("systype")}))>0))'
+    n_crit = f'SUMPRODUCT(--({CR_.rng("no")}<>""),--({CR_.rng("crit")}<>""))'
+    acc_open = f'(SUMPRODUCT(--({kind_rng}="ACCEPTANCE"),--({ctx.checks_range}<>"PASS")))'
+    pct = lambda a, b: f'TEXT(IF({b}=0,0,{a}/{b}),"0.0 %")'
+    for label, f in (("Calculation checks", f'=COUNTIFS({kind_rng},"CALCULATION",{ctx.checks_range},"FAIL")&" FAIL, "&COUNTIFS({kind_rng},"CALCULATION",{ctx.checks_range},"VERIFY")&" TO VERIFY"'),
+                     ("Acceptance", f'=IF({acc_open}=0,"MET","NOT MET: "&{acc_open}&IF({acc_open}=1," item"," items")&" open")'),
+                     ("Rooms with an AHU or a system class", f'={n_unit}&" of "&{n_rooms}&" ("&{pct(n_unit, n_rooms)}&")"'),
+                     ("Room supply on an AHU", f'=TEXT({on_unit},"#,##0")&" of "&TEXT({tot_sup},"#,##0")&" L/s ("&{pct(on_unit, tot_sup)}&")"'),
+                     ("Rooms with a criteria row", f'={n_crit}&" of "&{n_rooms}&" ("&{pct(n_crit, n_rooms)}&")"'),
+                     ("Rooms with a pressure target and no Pressure row", f'={ck("press")}&" (no door data, listed on Flags)"'),
+                     ("Thermal load case", '="OCCUPANTS ONLY: lighting, small power, equipment and envelope not included"'),
                      ("Open flags", f'=COUNTIF({FL.rng("status")},"OPEN")'),
                      ("Rooms", f"=COUNTA({ctx.lay['RI'].rng('no')})")):
         put(ws, f"B{r}", label, "Text")
-        put(ws, f"C{r}", f, "Link").alignment = Alignment(horizontal="left")
+        put(ws, f"C{r}", f, "Calc", "d0").alignment = Alignment(horizontal="left", vertical="center")
         r += 1
     r += 1
     put(ws, f"B{r}", "How to read this workbook", "Section")
     r += 1
-    for t in ("Inputs are on Room Information, Criteria, Envelope, Pressure (doors) and the system tabs, each with a code and a source ID that "
-              "links to Sources. Results follow by formula; no value is pasted and no number is typed inside a formula.",
-              "The Room Zones tab of each storey is the load engine of the template. Airflow applies both cases to every room. Pressure "
-              "calculates the offset of every room with a pressure target. AHU totalises per AHU. Checks reconciles everything.",
-              "Unknown values are blank and listed on Flags. Yellow cells are assumptions to confirm."):
+    for t in ("Inputs are on Room Information, Criteria, Envelope, Pressure (doors) and the system tabs. Each input has a code and a source ID that "
+              "links to Sources. Results follow by formula. No value is pasted and no number is typed inside a formula.",
+              "The Room Zones tab of each storey calculates the room loads. Airflow applies both cases to every room. Pressure "
+              "calculates the offset of every room with a pressure target. AHU adds up the rooms of each AHU. Checks reconciles everything.",
+              "Unknown values are blank and are listed on Flags. Yellow cells are assumptions to confirm. On Room Information the Code and Source ID "
+              "columns and the system detail are grouped: use the outline buttons above the column letters to show them."):
         put(ws, f"B{r}", t, "TextWrap")
         ws.merge_cells(f"B{r}:H{r}")
         ws.row_dimensions[r].height = 30
@@ -652,21 +764,37 @@ def write_readme(ctx: Ctx) -> None:
     for code, (style, meaning) in CODE_STYLES.items():
         put(ws, f"B{r}", f"{code}   {style}" + ("  /  Total" if code == "R" else ""), "Tag")
         put(ws, f"C{r}", meaning, "Text")
-        sample = put(ws, f"D{r}", 123.4 if code not in ("K",) else "PASS", style, "d1")
+        put(ws, f"D{r}", 123.4 if code not in ("K",) else "PASS", style, "d1")
         put(ws, f"E{r}", appearance[code], "Text")
         r += 1
-    put(ws, f"B{r}", "Notes are grey italic at 8 pt. A failed check is bold on light red. Red text on light yellow (style Assumption-Occupancy, code A) is an occupancy taken from the default density, because the RDS gives no value. The Remarks column of Room Information states the note.", "Note")
+        if code == "A":
+            put(ws, f"B{r}", f"A   {OCC_NAME}", "Tag")
+            put(ws, f"C{r}", "Occupancy from the default density: the RDS gives no value", "Text")
+            put(ws, f"D{r}", 12, OCC_NAME, "d0")
+            put(ws, f"E{r}", "red text on light yellow", "Text")
+            r += 1
+        if code == "K":
+            put(ws, f"B{r}", "K   Check, failed", "Tag")
+            put(ws, f"C{r}", "A test that fails", "Text")
+            c = put(ws, f"D{r}", "FAIL", "Check")
+            c.font = Font(name="Arial", size=10, bold=True)
+            c.fill = PatternFill("solid", fgColor=FILL_FAIL)
+            put(ws, f"E{r}", "bold on light red", "Text")
+            r += 1
+    put(ws, f"B{r}", "Notes are grey italic at 8 pt. Remarks are black at 10 pt.", "Note")
+    ws.merge_cells(f"B{r}:H{r}")
     r += 2
+    ws.row_breaks.append(Break(id=r - 1))
     put(ws, f"B{r}", "Tab map", "Section")
     r += 1
     tabs = [("Basis of Design", "Document hierarchy, design conditions and named constants, criteria origin, conventions, key flags"),
             ("Room Information", "One row per room: inputs with code, source ID and remark"),
             ("Criteria", "Criteria row applied to each room, with its source"),
-            ("Envelope", "Façade segments per room, summed by the engine")]
-    tabs += [(ctx.sheet_for(s), f"Load engine of the template, {ctx.label(s)}") for s in ctx.storeys]
+            ("Envelope", "Façade segments per room, summed on the Room Zones tab")]
+    tabs += [(ctx.sheet_for(s), f"Room loads, {ctx.label(s)}") for s in ctx.storeys]
     tabs += [("Airflow", "Both airflow cases, governing case, exhaust, return, outdoor air, outdoor-air rule"),
              ("Pressure", "Pressure-offset method, suites, sensitivities and the known-answer test"),
-             ("AHU", "Airflow totalisation, outdoor air, coil duty"), ("FCU", "Rooms on fan coil units, including separated rooms"),
+             ("AHU", "Airflow totals, outdoor air, coil duty"), ("FCU", "Rooms on fan coil units, including separated rooms"),
              ("Fans", "Return, exhaust and outdoor-air fan duties"), ("VAV", "Terminals: maximum, minimum, turndown"),
              ("Venturi Valves", "Valve ranges from Pressure"), ("Flow Balance", "Air in against air out"),
              ("Airflow Comparison", "Calculated airflows against the tender airflows, room by room and AHU by AHU"), ("Checks", "Live reconciliations"),
@@ -679,13 +807,19 @@ def write_readme(ctx: Ctx) -> None:
     r += 1
     put(ws, f"B{r}", "Units and abbreviations", "Section")
     r += 1
-    for t in ("Airflow in L/s (m³/h on Pressure); pressure in Pa; power in kW (W in the engine); area m²; volume m³; temperature °C; "
-              "enthalpy kJ/kg. ACH air changes per hour. AHU air handling unit; PAHU primary AHU; FCU fan coil unit; VAV variable air volume; "
-              "OA outdoor air; SOA schedule of accommodation; DPA departmental planning.",):
+    for t in ("Units. Airflow: L/s on every tab, except the leakage and door flows on Pressure, which are in m³/h (each column header says so). "
+              "Pressure: Pa. Area: m². Volume: m³. Temperature: °C. Enthalpy: kJ/kg. Heat gain and room load: W. AHU, coil and fan duty: kW "
+              "(named cell WperkW converts W to kW).",
+              "Abbreviations. ACH: air changes per hour. AHU: air handling unit. PAHU: pre-cooled air handling unit (the term of the Contract documents, as the RFI-ME-0233 memo states). "
+              "FCU: fan coil unit. VAV: variable air volume. OA: outdoor air. SOA: schedule of accommodation. "
+              "DPA: as named in the source documents (no project document expands it). RDS: room data sheet. "
+              "RLS: room layout sheet. DD: developed design. MOT: major operating theatre (department 22). "
+              "MOT NSC: the modular operating theatres works package of the tender documents."):
         put(ws, f"B{r}", t, "TextWrap")
         ws.merge_cells(f"B{r}:H{r}")
         ws.row_dimensions[r].height = 42
-    r += 2
+        r += 1
+    r += 1
     put(ws, f"B{r}", "Revision", "Section")
     r += 1
     for col, h in zip("BCDEFG", ("Rev", "Date", "Description", "By", "Chk'd", "App'd")):

@@ -28,6 +28,7 @@ import pickle
 import re
 import sys
 import time
+from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -940,6 +941,33 @@ def zone_key(tag: str) -> Tuple[str, str]:
     return t, t
 
 
+_SCHEDULED: set = set()
+
+
+def scheduled_tags() -> set:
+    """Unit tags that a schedule prints: Equipment Schedule (Corr 5) air handling and fan coil rows, MOT NSC Overall AC Equipment Schedule rows."""
+    if not _SCHEDULED:
+        P = common.resolve_paths()
+        for name, col in (("ahu_schedule.csv", "tag_normalised"), ("equipment_schedule_air_handling.csv", "tag_normalised"), ("mot_ahu_schedule.csv", "tag")):
+            for r in common.read_csv_dicts(P["registers"] / name):
+                if r.get(col):
+                    _SCHEDULED.add(r[col].strip().replace("lSONP", "ISONP"))
+    return _SCHEDULED
+
+
+def display_tag(tags) -> str:
+    """Tag shown for a zone. A duty and standby pair shows as '...-01A/B'. A lone '...-01A' stays as written on the plan unless a schedule prints its B unit."""
+    ts = sorted({t.strip() for t in tags})
+    if len(ts) > 1:
+        return zone_key(ts[0])[1]
+    t = ts[0]
+    m = AHU_RE.match(t)
+    if not m or t.endswith("/B"):
+        return t
+    partner = m.group(1) + ("B" if m.group(2) == "A" else "A")
+    return m.group(1) + "A/B" if partner in scheduled_tags() else t
+
+
 def sample_colours() -> Dict[str, str]:
     """Governing AHU tag -> fill colour of the RFI-ME-0233 sample (pure red replaced by amber)."""
     P = common.resolve_paths()
@@ -952,24 +980,88 @@ def sample_colours() -> Dict[str, str]:
     return out
 
 
-def colour_for(tag_key: str, used: Optional[Dict[str, str]] = None) -> str:
-    """The same colour for an AHU on every page: sample colour when the sample has the AHU, else a hash-derived mid-saturation colour, never red."""
+_COLOUR_MAP: Dict[str, str] = {}
+
+
+def _lab(rgb: Tuple[float, float, float], opacity: float = 0.35) -> Tuple[float, float, float]:
+    """CIE Lab of a colour as it shows on white paper at the fill opacity of the zoning drawing."""
+    def lin(c: float) -> float:
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = [lin(opacity * c + (1.0 - opacity)) for c in rgb]
+    x, y, z = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047, 0.2126 * r + 0.7152 * g + 0.0722 * b, (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883
+    f = lambda t: t ** (1 / 3) if t > 0.008856 else 7.787 * t + 16 / 116
+    fx, fy, fz = f(x), f(y), f(z)
+    return 116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)
+
+
+def _candidate_colours() -> List[str]:
+    """Colours that stay apart at the fill opacity: hues every 15 degrees (red excluded), three saturation and value pairs."""
     import colorsys
+    out = []
+    for h in range(0, 360, 8):
+        if h >= 346 or h <= 14:
+            continue
+        for s_, v_ in ((0.9, 0.98), (1.0, 0.7), (0.55, 0.98), (1.0, 0.45), (0.3, 0.95), (0.75, 0.82)):
+            r, g, b = colorsys.hsv_to_rgb(h / 360.0, s_, v_)
+            out.append("#%02X%02X%02X" % (int(r * 255), int(g * 255), int(b * 255)))
+    return out
+
+
+def colour_map() -> Dict[str, str]:
+    """One colour for each AHU for the whole drawing. Units that share a storey get colours that are far apart as they show on the plan
+    (Lab distance at the fill opacity), so that neighbouring zones can be told apart. The RFI sample colours and the class colours are kept."""
+    if _COLOUR_MAP:
+        return _COLOUR_MAP
+    P = common.resolve_paths()
+    on_storey: Dict[str, set] = defaultdict(set)
+    for key in ALL_STOREYS:
+        path = P["registers"] / ("zone_assignment_%s.csv" % key)
+        if not path.exists():
+            continue
+        for r in common.read_csv_dicts(path):
+            cls = (r.get("class") or "").strip()
+            if not cls or cls.lower() in ("no information",) or cls.lower().startswith("review"):
+                continue
+            on_storey[zone_key(cls)[0]].add(key)
     samp = sample_colours()
-    if tag_key in samp:
-        return samp[tag_key]
-    if tag_key in CLASS_COLOURS:
-        return CLASS_COLOURS[tag_key]
-    h = int(hashlib.md5(tag_key.encode()).hexdigest(), 16)
-    sv = [(0.55, 0.85), (0.7, 0.75), (0.45, 0.95)][(h >> 8) % 3]
-    hue = 0.07 + 0.86 * (((h >> 16) % 997) / 997.0)       # 0.07 .. 0.93: stays clear of red at 0 / 1
-    avoid = [zn.hex_to_rgb(c) for c in list(samp.values()) + list(CLASS_COLOURS.values())]
-    for _ in range(40):
-        r, g, b = colorsys.hsv_to_rgb(hue, *sv)
-        if min(math.dist((r, g, b), a) for a in avoid) > 0.12:
-            break
-        hue = 0.07 + ((hue - 0.07 + 0.037) % 0.86)
-    return zn.avoid_pure_red("#%02X%02X%02X" % (int(r * 255), int(g * 255), int(b * 255)))
+    fixed = dict(CLASS_COLOURS)
+    cand = _candidate_colours()
+    labs = {c: _lab(zn.hex_to_rgb(c)) for c in cand + list(fixed.values())}
+    assigned: Dict[str, str] = dict(fixed)
+    use = Counter()
+    units = sorted((k for k in on_storey if k not in fixed), key=lambda k: (-len(on_storey[k]), k))
+    for k in units:
+        mates = [assigned[o] for o in assigned if (on_storey.get(o, set()) & on_storey[k]) or o in CLASS_COLOURS]
+        best, best_key = None, None
+        for c in cand:
+            d = min((math.dist(labs[c], labs[m]) for m in mates), default=999.0)
+            key_ = (round(min(d, 60.0), 1), -use[c])
+            if best_key is None or key_ > best_key:
+                best, best_key = c, key_
+        assigned[k] = best
+        use[best] += 1
+    for _ in range(4):                       # local search: move each unit to the colour that is farthest from the units it shares a storey with
+        for k in units:
+            mates = [assigned[o] for o in assigned if o != k and ((on_storey.get(o, set()) & on_storey[k]) or o in CLASS_COLOURS)]
+            cur = min((math.dist(labs[assigned[k]], labs[m]) for m in mates), default=999.0)
+            best, bd = assigned[k], cur
+            for c in cand:
+                d = min((math.dist(labs[c], labs[m]) for m in mates), default=999.0)
+                if d > bd + 0.05:
+                    best, bd = c, d
+            assigned[k] = best
+    _COLOUR_MAP.update(assigned)
+    return _COLOUR_MAP
+
+
+def colour_for(tag_key: str, used: Optional[Dict[str, str]] = None) -> str:
+    """The same colour for an AHU on every page (see ``colour_map``); a unit that no assignment table lists gets the farthest candidate colour."""
+    cm = colour_map()
+    if tag_key in cm:
+        return cm[tag_key]
+    import hashlib as _h
+    cand = _candidate_colours()
+    return cand[int(_h.md5(tag_key.encode()).hexdigest(), 16) % len(cand)]
 
 
 _SCHED_PLANT: Dict[str, str] = {}
@@ -1000,10 +1092,21 @@ def build_page_zones(key: str, info: dict, P: dict, k2: float) -> Tuple[List[zn.
     rooms_ann: List[dict] = []
     unclassified = {"n": 0, "area": 0.0}
     no_polygon = 0
+    nodraw: Dict[str, dict] = {}
     for a in arows:
         pr = prow.get(a["room_id"])
         if pr is None or not pr["polygon_pv_wkt"]:
             no_polygon += 1
+            cls0 = (a["class"] or "").strip()
+            if cls0 and cls0.lower() != "no information" and not cls0.lower().startswith("review"):
+                zk0, disp0 = zone_key(cls0)
+                nd = nodraw.setdefault(zk0, {"tags": set(), "n": 0, "depts": set(), "regions": set()})
+                nd["tags"].add(cls0)
+                nd["n"] += 1
+                if a["department"]:
+                    nd["depts"].add(tc.clean_dept(a["department"]))
+                if pr is not None and pr.get("region_kind"):
+                    nd["regions"].add(pr["region_kind"])
             continue
         poly = shapely.from_wkt(pr["polygon_pv_wkt"])
         area = float(pr["a_area_m2"] or 0.0)
@@ -1029,7 +1132,7 @@ def build_page_zones(key: str, info: dict, P: dict, k2: float) -> Tuple[List[zn.
     for zk in sorted(groups):
         g = groups[zk]
         tags = sorted(g["tags"])
-        disp = zone_key(tags[0])[1] if len(tags) > 1 or AHU_RE.match(tags[0]) else tags[0]
+        disp = display_tag(tags)
         parts: List[Polygon] = []
         u = shapely.union_all(g["polys"])
         for part in (list(u.geoms) if u.geom_type == "MultiPolygon" else [u]):
@@ -1042,13 +1145,25 @@ def build_page_zones(key: str, info: dict, P: dict, k2: float) -> Tuple[List[zn.
             plant_txt = schedule_plant_level(tags[0])
         depts = "; ".join(sorted(g["depts"]))
         if not depts:
-            depts = "not stated (class from the mode label on the plan)" if is_class else "no information (no department stated in the source documents)"
+            if is_class and zk in ("FCU", "DXFCU"):
+                depts = "not stated (class from Equipment Schedule (Corr 5): it lists fan coil units for this room type; the tag of the unit of each room is not known)"
+            else:
+                depts = "not stated (class from the mode label on the plan)" if is_class else "no information (no department stated in the source documents)"
         z = zn.Zone(key=zk, kind=zk if is_class else "AHU", source="zone assignment table", tag=disp, tag_basis="AHU tag from the source documents cited",
                     polygons_pv=parts, draw_polygons_pv=parts, fill_hex=colour_for(zk), departments=depts,
                     storey_served=key, plant_level=plant_txt, refs=tc.top_citations(g["src"], 4))
         zones.append(z)
         stats[z.key] = {"area_m2": g["area"], "poly_m2": sum(q.area for q in parts) * k2, "n_rooms": g["n"], "min_conf": min(g["confs"]) if g["confs"] else 0.0}
-    return zones, stats, rooms_ann, {"unclassified_rooms": unclassified["n"], "unclassified_area_m2": unclassified["area"], "n_rooms": len(arows), "rooms_no_polygon": no_polygon}
+    undrawn = []
+    for zk0, nd in sorted(nodraw.items()):
+        if zk0 in groups or zk0 in CLASS_COLOURS:
+            continue
+        t0 = sorted(nd["tags"])
+        reason = "Tags lie in an open region (no closed outline)."
+        undrawn.append({"tag": display_tag(t0), "key": zk0, "n_rooms": nd["n"],
+                        "departments": "; ".join(sorted(nd["depts"])) or "no information", "reason": reason, "colour": colour_for(zk0)})
+    return zones, stats, rooms_ann, {"unclassified_rooms": unclassified["n"], "unclassified_area_m2": unclassified["area"], "n_rooms": len(arows), "rooms_no_polygon": no_polygon,
+                                      "undrawn_units": undrawn}
 
 
 # --------------------------------------------------------------------------- #
@@ -1056,6 +1171,17 @@ def build_page_zones(key: str, info: dict, P: dict, k2: float) -> Tuple[List[zn.
 # --------------------------------------------------------------------------- #
 def out_pdf_path(storeys: Sequence[str]) -> Path:
     return common.resolve_paths()["zoning"] / ("AIGH_IP_AHU_Zoning_%s-%s.pdf" % (storeys[0], storeys[-1]))
+
+
+_TENDER = []
+
+
+def _tender():
+    """Tender airflow lookup of the zone schedule (Equipment Schedule Corr 5, then the tender air-side schematic)."""
+    if not _TENDER:
+        from .deliver import Tender
+        _TENDER.append(Tender())
+    return _TENDER[0]
 
 
 def stage_pdf(storeys: Sequence[str]) -> dict:
@@ -1069,11 +1195,21 @@ def stage_pdf(storeys: Sequence[str]) -> dict:
         cb = pickle.load((P["work"] / "calibrate.pkl").open("rb"))["cal_bg"]
         k2 = cb.area_scale_mm2_per_pt2() / 1e6
         zones, stats, rooms_ann, summ = build_page_zones(key, info, P, k2)
+        airflow = {}
+        for z_ in zones:
+            v_, _src = _tender().find([z_.tag])
+            if v_ is not None:
+                airflow[z_.tag] = v_
+            if z_.kind == "AHU":
+                z_.tender_text = ("%s L/s (%s)" % ("{:,.0f}".format(v_), _src)) if v_ is not None else _src
+        for ud_ in summ.get("undrawn_units", []):
+            v_, _src = _tender().find([ud_["tag"]])
+            ud_["airflow"] = v_
         for zk, st_ in stats.items():          # a zone drawn from the union of its rooms: polygon area and room-area sum agree (guards the unit of poly_m2)
             if st_["area_m2"] > 0 and abs(st_["poly_m2"] - st_["area_m2"]) > 0.02 * st_["area_m2"] + 1.0:
                 area_warnings.append("%s zone %s: polygon %.1f m2 vs rooms %.1f m2" % (key, zk, st_["poly_m2"], st_["area_m2"]))
         specs.append({"key": key, "label": info["storey_label"], "drawing": info["drawing"], "page_index": info["page0"], "zones": zones, "zone_stats": stats,
-                      "rooms": rooms_ann, "unclassified": summ,
+                      "rooms": rooms_ann, "unclassified": summ, "airflow": airflow, "undrawn": summ.get("undrawn_units", []),
                       "legend_title": "AHU zoning, %s (%s): AHU zones and ventilation classes" % (info["storey_label"], info["drawing"]),
                       "sheet_note": "Each zone is the sum of the rooms that one AHU or one class serves. Fill opacity 0.35. Each AHU or class has its own layer. Room outlines are on the layer 'Rooms (measured)' (off). "
                                     "%d rooms have no information and are not filled (%.0f m2). %d room tags have no closed area on the plan and are not drawn." % (

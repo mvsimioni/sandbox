@@ -46,13 +46,18 @@ def area_code(tag: str) -> str:
 
 
 def area_match(a: str, b: str) -> bool:
-    a, b = re.sub(r"^\d+", "", a or ""), re.sub(r"^\d+", "", b or "")
+    """Two area codes of tags belong to one area when they are equal, or when one is the start of the other (at least four characters, for example CSSD and
+    CSSDDCN). A leading storey number must be the same: 02COR and 05COR are two areas. A shared word alone (COR, STAFF) is not a match."""
+    a, b = (a or "").strip(), (b or "").strip()
     if not a or not b:
+        return False
+    da, db = re.match(r"^\d+", a), re.match(r"^\d+", b)
+    if (da or db) and (da.group(0) if da else "") != (db.group(0) if db else ""):
         return False
     if a == b:
         return True
     short, long_ = sorted((a, b), key=len)
-    return len(short) >= 4 and long_.startswith(short)
+    return len(re.sub(r"^\d+", "", short)) >= 4 and long_.startswith(short)
 
 
 def clean_tag(tag: str) -> str:
@@ -167,7 +172,7 @@ def department_fans(root: Path, ahu_tags: List[str], rooms: List[Dict[str, Any]]
                         rm["prov"]["exhaust_fan"] = ["D", sid]
                 why = f"exhaust of {len(served)} room(s) of this workbook"
             else:
-                flags.append(dict(type="VERIFY", ref=tag, text=f"Fan {tag} ({first['desc']}) is tied to this department by its tag, but no room of this workbook "
+                flags.append(dict(type="VERIFY", ref=tag, text=f"Fan {tag} ({first['desc'] or 'no description'}) is tied to this department by its tag, but no room of this workbook "
                                   "is tied to it. Its required airflow is not calculated.", source=sid))
         row = dict(tag=tag, type=ctype, serves=serves, scheduled_lps=lps, code="D", source=sid, tender_source_text=src_text if lps is not None else None,
                    remark="; ".join(x for x in (first["desc"], first["loc"], why) if x))

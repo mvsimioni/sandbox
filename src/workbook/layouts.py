@@ -41,7 +41,7 @@ def ri_spec() -> Spec:
     s += [("vol", "Volume", "m³", 9)]
     s += trip("pfix", "Occupancy, stated", "persons", 9)
     s += trip("dens", "Occupancy density", "persons / 100 m²", 10)
-    s += [("obasis", "Occupancy source", "", 15), ("people", "Occupancy used", "persons", 9)]
+    s += [("obasis", "Occupancy source", "", 19), ("people", "Occupancy used", "persons", 9)]
     s += trip("iof", "Intermittent occupancy factor", "–", 10)
     s += trip("act", "Activity", "", 16)
     s += trip("hours", "Operation time", "h / day", 10)
@@ -118,9 +118,9 @@ ENG: List[Tuple[str, str, str, float, str, str]] = [
     ("inf_w", "Infiltration", "W", 9, "C", "SENSIBLE LOAD"),
     ("lat_ppl_wp", "Latent per person", "W", 8, "C", "LATENT LOAD"), ("lat_ppl", "People", "W", 9, "C", "LATENT LOAD"),
     ("lat_eq", "Equipment", "W", 9, "L", "LATENT LOAD"), ("lat_inf_w", "Infiltration", "W", 9, "C", "LATENT LOAD"),
-    ("sens", "Room sensible load", "W", 10, "R", "TOTAL COOLING LOAD"), ("sens_wm2", "Sensible", "W/m²", 8, "C", "TOTAL COOLING LOAD"),
-    ("lat", "Room latent load", "W", 10, "R", "TOTAL COOLING LOAD"), ("lat_wm2", "Latent", "W/m²", 8, "C", "TOTAL COOLING LOAD"),
-    ("tot", "Total cooling", "W", 10, "R", "TOTAL COOLING LOAD"), ("tot_wm2", "Total", "W/m²", 8, "C", "TOTAL COOLING LOAD"),
+    ("sens", "Room sensible load", "W", 10, "C", "TOTAL COOLING LOAD"), ("sens_wm2", "Sensible", "W/m²", 8, "C", "TOTAL COOLING LOAD"),
+    ("lat", "Room latent load", "W", 10, "C", "TOTAL COOLING LOAD"), ("lat_wm2", "Latent", "W/m²", 8, "C", "TOTAL COOLING LOAD"),
+    ("tot", "Total cooling", "W", 10, "C", "TOTAL COOLING LOAD"), ("tot_wm2", "Total", "W/m²", 8, "C", "TOTAL COOLING LOAD"),
     ("troom", "Design room temperature", "°C", 9, "C", "ROOM COOLING SUPPLY AIR CHECK"),
     ("hroom", "Design room enthalpy", "kJ/kg", 9, "C", "ROOM COOLING SUPPLY AIR CHECK"),
     ("tsup", "Supply air temperature", "°C", 9, "L", "ROOM COOLING SUPPLY AIR CHECK"),
@@ -188,7 +188,7 @@ def build_layouts(ctx: Ctx) -> None:
     n = len(ctx.rooms)
     ctx.lay["RI"] = Layout("Room Information", [k for k, *_ in ri_spec()], FIRST, n)
     ctx.lay["CR"] = Layout("Criteria", [k for k, *_ in cr_spec()], FIRST, n)
-    ctx.lay["EN"] = Layout("Envelope", [k for k, *_ in en_spec()], FIRST, len(ctx.env_rows))
+    ctx.lay["EN"] = Layout("Envelope", [k for k, *_ in en_spec()], FIRST, len(ctx.env_rows) + 50)   # 50 spare rows: rows added later are summed
     ctx.lay["AF"] = Layout("Airflow", [k for k, *_ in af_spec()], FIRST, n)
     keys = [e[0] for e in ENG]
     ctx.eng_layouts = {}
@@ -214,8 +214,8 @@ def build_layouts(ctx: Ctx) -> None:
     ctx.lay["FB"] = Layout("Flow Balance", FB_KEYS, FIRST, n)
     ctx.lay["FB2"] = Layout("Flow Balance", FB2_KEYS, FIRST + n + 6, len(ctx.ahus))
     ctx.lay["CP"] = Layout("Airflow Comparison", CP_KEYS, FIRST, n)
-    ctx.lay["CP2"] = Layout("Airflow Comparison", CP2_KEYS, FIRST + n + 6, len(ctx.ahus))
-    ctx.lay["CP3"] = Layout("Airflow Comparison", CP3_KEYS, FIRST + n + len(ctx.ahus) + 12, len(ctx.references))
+    ctx.lay["CP2"] = Layout("Comparison by AHU", CP2_KEYS, FIRST, len(ctx.ahus))
+    ctx.lay["CP3"] = Layout("Reference Rows", CP3_KEYS, FIRST, len(ctx.references))
     ctx.lay["SO"] = Layout("Sources", ["id", "doc", "issue", "page", "loc", "text", "method", "conf"], 7, len(ctx.sources))
 
 
@@ -223,7 +223,7 @@ AHU_KEYS = ["ahu", "type", "n", "area", "area_sup", "vol", "noh", "sa_room", "le
             "vou", "vps", "xs", "zd", "ev", "vot", "oa_ms", "ret", "exh", "relief",
             "sens", "lat", "rt", "rh", "oa_sens", "oa_lat", "fan", "coil_s", "coil_l", "coil", "wm2",
             "oa_sens_ms", "oa_lat_ms", "coil_s_ms", "coil_l_ms", "coil_ms", "req_t", "sched", "sched_oa",
-            "sched_c", "sched_s", "tsrc", "red", "redp", "rem"]
+            "sched_c", "sched_s", "tsrc", "zr", "za", "zc", "zs", "cov", "red", "redp", "rem", "nfix", "area_ok"]
 FCU_KEYS = ["k", "no", "name", "ahu", "why", "area", "sens_kw", "lat_kw", "supply", "oa", "oasrc", "oaby", "oacond", "oa_t", "oa_h",
             "oa_sens", "oa_lat", "coil_s", "coil_l", "coil", "cap_sched", "cap_drawn", "cap", "flag",
             "tender", "tsrc", "calc", "red", "redp", "rem"]
@@ -234,7 +234,7 @@ VEN_KEYS = ["tag", "room", "role", "d1", "d2", "off", "design", "tight", "ratio"
 FB_KEYS = ["no", "name", "ahu", "supply", "oa", "exhaust", "ret", "extract", "leak_in", "leak_out", "inn", "out", "net",
            "close", "status", "ach"]
 FB2_KEYS = ["ahu", "supply", "oa", "exhaust", "ret", "relief", "net_ach", "area", "vol", "sum_net", "close", "status", "note"]
-CP_KEYS = ["no", "name", "ahu", "calc_s", "sch_s", "d_s", "dp_s", "calc_r", "sch_r", "d_r", "calc_e", "sch_e", "d_e",
+CP_KEYS = ["no", "name", "ahu", "sch_s", "calc_s", "d_s", "dp_s", "sch_r", "calc_r", "d_r", "sch_e", "calc_e", "d_e",
            "pa_calc", "pa_sch", "flag", "code", "src", "tsrc", "remark"]
-CP2_KEYS = ["ahu", "calc", "sched", "tsrc", "d_sched", "dp_sched", "sch", "d", "dp", "flag", "code", "src", "remark"]
+CP2_KEYS = ["ahu", "sched", "calc", "d_sched", "dp_sched", "tsrc", "sch", "d", "dp", "flag", "code", "src", "remark"]
 CP3_KEYS = ["label", "flow", "m3h", "ach", "oa", "diff", "pct", "code", "src", "remark"]

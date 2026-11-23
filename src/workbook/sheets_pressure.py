@@ -49,7 +49,7 @@ def write_pressure(ctx: Ctx) -> None:
     title_block(ws, "Pressure", "Project method for rooms with a pressure target. Envelope: Q = limit × surface × (ΔP ÷ reference)^n. "
                 "Door gaps: Q = Cd × A × √(2 ΔP ÷ ρ) × 3600. Air flows from high to low pressure. "
                 "Offset needed for a negative room = air in − air out. Offset needed for a positive room = air out − air in. "
-                "Spaces without a set pressure are solved in fixed Newton steps in the grouped helper columns.", ctx)
+                "Spaces without a set pressure are solved in fixed Newton steps in the grouped calculation columns.", ctx)
     # ---- node table headers
     spec = [(k, *PS_HEAD[k]) for k in PS.keys if k in PS_HEAD]
     write_headers(ws, PS, spec, 4, {"node": "SPACE", "set": "SET PRESSURE", "perim": "GEOMETRY", "supply": "MECHANICAL AIR",
