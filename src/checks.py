@@ -5,7 +5,7 @@
 exits 0 only when every non-SKIP check passes.  ``phase1`` checks the stage
 1A conversion (``state/convert_ledger.jsonl`` and the ``checks.json`` files
 the converter writes next to each sidecar); ``--scope converted`` limits it
-to the files converted so far.  Phases 2 to 5 are not yet implemented and
+to the files converted so far.  Phases 2 to 4 are in phase_checks.py and phase4_checks.py; phase 5 is not yet implemented and
 exit 2.
 
 Each check is a small function ``(ctx) -> (status, evidence)`` where status is
@@ -883,6 +883,23 @@ def _register_late_phases() -> None:
         Check("P3-03", "Seeded unit-tag errors are caught", pc.check_p3_seeded),
         Check("P3-04", "Structural text lint (reduced)", pc.check_p3_lint),
         Check("P3-05", "Outputs not older than inputs", pc.check_p3_fresh),
+    ]
+
+
+    from . import phase4_checks as p4
+    PHASE_CHECKS[4] = [
+        Check("P4-01", "Every unit of the zone schedule has a register tab and a drawing or a stated reason", p4.check_p4_units),
+        Check("P4-02", "App D tags appear exactly once (or are listed with a reason)", p4.check_p4_appd_tags),
+        Check("P4-03", "Every highlighted App D space is in exactly one box", p4.check_p4_appd_spaces),
+        Check("P4-04", "New-drawing values equal the register (DXF read-back)", p4.check_p4_values),
+        Check("P4-05", "No placeholder change ID on a new drawing", p4.check_p4_no_placeholder),
+        Check("P4-06", "No text overlaps text, a symbol or a duct", p4.check_p4_overlap),
+        Check("P4-07", "PDF and DXF hold the same entities", p4.check_p4_pdf_dxf),
+        Check("P4-08", "Every mark-up has a register row and the reverse", p4.check_p4_markup_register),
+        Check("P4-09", "Change IDs: change list equals update workbook", p4.check_p4_workbook_ids),
+        Check("P4-10", "Air in equals air out: room, AHU, system (1 % or 10 L/s)", p4.check_p4_balance),
+        Check("P4-11", "Drawing register matches the files on disk", p4.check_p4_drawing_register),
+        Check("P4-12", "Issue folder complete; README language", p4.check_p4_issue),
     ]
 
 

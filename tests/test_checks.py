@@ -159,7 +159,7 @@ def test_registry_has_twelve_phase0_checks() -> None:
 
 
 def test_other_phases_are_stubs(tree: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    for phase in range(4, 6):
+    for phase in range(5, 6):
         assert checks.main([f"phase{phase}"]) == 2
     assert "not implemented" in capsys.readouterr().err
     assert checks.main(["list"]) == 0

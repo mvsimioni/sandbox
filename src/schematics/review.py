@@ -45,6 +45,7 @@ OUT = ROOT / "out" / "schematics"
 
 INC_PCT = 0.05          # increase threshold, share of the drawn value
 INC_LPS = 10.0          # increase threshold, L/s
+MIN_INC_LPS = 5.0       # an increase of this size or less is not marked up (readable draft, D-071)
 RENAME_RATIO = 0.80     # name similarity that counts as "renamed"
 BAL_PCT = 0.01          # balance tolerance, share
 BAL_LPS = 10.0          # balance tolerance, L/s
@@ -224,6 +225,8 @@ def judge(drawn: Optional[float], req: Optional[float], d054: bool) -> Tuple[str
     diff = req - drawn
     big = abs(diff) > INC_PCT * abs(drawn) or abs(diff) > INC_LPS
     if diff > 0 and big:
+        if diff <= MIN_INC_LPS:
+            return "no change", "No mark-up: increase of 5 L/s or less; drawn value kept", False
         return "increase", "Mark up: increase", True
     if diff < 0 and big:
         if d054:
@@ -244,6 +247,95 @@ def jbox(text: Any) -> Optional[List[float]]:
         v = json.loads(text) if isinstance(text, str) else list(text)
         return [round(float(x), 1) for x in v] if len(v) == 4 else None
     except (ValueError, TypeError):
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# Text of a working sheet (page-view boxes), read once
+# --------------------------------------------------------------------------- #
+class SheetText:
+    """Text lines of the working sheets.  The model holds the label that lists the outdoor air of each AHU;
+    the drawn value is a separate line.  This reader finds the drawn lines (outdoor air, return fans, spill
+    labels, exhaust links) so that a mark-up sits on the value it changes."""
+
+    def __init__(self, root: Path):
+        self.dir = root / "data" / "source" / "Basis" / "Working Drawings"
+        self._c: Dict[str, List[Tuple[str, List[float]]]] = {}
+
+    def lines(self, sheet: str) -> List[Tuple[str, List[float]]]:
+        if sheet in self._c:
+            return self._c[sheet]
+        out: List[Tuple[str, List[float]]] = []
+        hits = sorted(self.dir.glob(sheet + "_*.pdf"))
+        if hits:
+            import pymupdf
+            doc = pymupdf.open(hits[0])
+            try:
+                for b in doc[0].get_text("dict")["blocks"]:
+                    for ln in b.get("lines", []):
+                        t = " ".join(sp["text"].strip() for sp in ln["spans"] if sp["text"].strip())
+                        if t:
+                            out.append((t, [round(float(x), 1) for x in ln["bbox"]]))
+            finally:
+                doc.close()
+        self._c[sheet] = out
+        return out
+
+    @staticmethod
+    def _dist(a: List[float], b: Optional[List[float]]) -> float:
+        if not b:
+            return 0.0
+        ax, ay, bx, by = (a[0] + a[2]) / 2, (a[1] + a[3]) / 2, (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+        return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+
+    def oa_box(self, sheet: str, value: Optional[float], near: Optional[List[float]]) -> Optional[List[float]]:
+        """Box of the drawn line 'OA nnn' with this value, the one nearest to the AHU tag."""
+        if value is None:
+            return None
+        c = []
+        for t, b in self.lines(sheet):
+            m = re.match(r"^OA\s*([\d,]+(?:\.\d+)?)\s*(?:L/S)?$", t, re.I)
+            if m and abs(float(m.group(1).replace(",", "")) - value) < 0.5:
+                c.append(b)
+        if not c:
+            return None
+        return min(c, key=lambda b: self._dist(b, near))
+
+    def raf_lines(self, sheet: str) -> List[Tuple[str, List[float]]]:
+        return [(t, b) for t, b in self.lines(sheet) if re.match(r"^RAF-[A-Z0-9]", t)]
+
+    def duty_near(self, sheet: str, box: List[float]) -> Optional[Tuple[float, List[float]]]:
+        """Value 'nnnn L/s' on a line directly under or beside a tag box."""
+        best = None
+        for t, b in self.lines(sheet):
+            m = re.match(r"^(?:[A-Z]{2,4}\s*)?([\d,]{2,7})\s*L/S(?:\s*\(.*\))?$", t, re.I)
+            if not m:
+                continue
+            dx = abs((b[0] + b[2]) / 2 - (box[0] + box[2]) / 2)
+            dy = b[1] - box[3]
+            if -3 <= dy <= 40 and dx <= 70:
+                d = dx + abs(dy)
+                if best is None or d < best[0]:
+                    best = (d, float(m.group(1).replace(",", "")), b)
+        return (best[1], best[2]) if best else None
+
+    def spill_labels(self, sheet: str) -> List[Tuple[Optional[float], List[float]]]:
+        out = []
+        for t, b in self.lines(sheet):
+            m = re.match(r"^SPILL AIR\s*([\d,]+(?:\.\d+)?|-)\s*L/S$", t, re.I)
+            if m:
+                v = m.group(1)
+                out.append((None if v == "-" else float(v.replace(",", "")), b))
+        return out
+
+    def exhaust_links(self, sheet: str) -> List[Tuple[str, List[float]]]:
+        """'CONNECTED TO ... EA nnnn' and similar lines that draw an exhaust connection."""
+        return [(t, b) for t, b in self.lines(sheet) if re.search(r"CONNECTED TO", t, re.I) and re.search(r"\bEA\b|EAF|HEPA", t, re.I)]
+
+    def has_tag(self, sheet: str, key_text: str) -> Optional[List[float]]:
+        for t, b in self.lines(sheet):
+            if key_text in t.replace(" ", ""):
+                return b
         return None
 
 
@@ -292,6 +384,10 @@ class Inputs:
         self.equip = read_csv(reg / "schematic_equipment.csv")
         self.plan_rooms = self._load_plan_rooms()
         self.mot_keys = self._load_mot_keys()
+        self.st = SheetText(root)
+        # sheets titled MOT ACMV: their units are MOT units (D-074, provisional: listed, not marked up)
+        self.mot_sheets = frozenset(sh for sh, v in model.get("sheets", {}).items()
+                                    if "MOT ACMV" in str(v.get("drive_rel_path") or ""))
         self.tender_summary = {r["sheet"]: r for r in read_csv(root / "out/qa/schematic_tender_vs_working_summary.csv")} \
             if (root / "out/qa/schematic_tender_vs_working_summary.csv").exists() else {}
 
@@ -332,6 +428,7 @@ class Inputs:
                 "plant": d["Plant level"], "rooms": d["Rooms"], "area": d["Area (m²)"],
                 "tender": d["Tender airflow (L/s)"], "tender_src": d["Tender airflow source"],
                 "calc": d["Calculated airflow (L/s)"], "reduction": d["Reduction (L/s)"],
+                "area_counted": num(d.get("Area counted in the department workbooks (m²)")),
                 "room_list": str(d["Room list of the unit"] or ""),
                 "complete": str(d["Room list of the unit"] or "").startswith("Complete"),
                 "keys": tag_keys(tag), "row": i,
@@ -415,7 +512,8 @@ class Inputs:
                 if not r[0]:
                     continue
                 d["fans"].append({
-                    "tag": str(r[0]), "type": r[1], "serves": r[2], "row": n,
+                    "tag": str(r[0]), "type": r[1], "serves": r[2], "also": r[3], "row": n,
+                    "dept": dept,
                     "required": num(r[head["Required airflow"]]),
                     "calc": num(r[head["Calculated airflow, drawn duty"]]),
                     "tender": num(r[head["Tender airflow"]]), "status": r[head["Status"]],
@@ -439,6 +537,13 @@ class Inputs:
             head = {h: i for i, h in enumerate(rows[4]) if h}
             for n, r in enumerate(rows[6:], start=7):
                 if r[0] is None:
+                    continue
+                # room table only: a node has a Type; the Suite totals and Known answers tables below have none
+                if str(r[head["Type"]] or "") not in ("ROOM", "SPACE", "EXTERNAL") or r[head["Type"]] is None:
+                    if d["pressure"]:
+                        break
+                    continue
+                if str(r[head["Type"]]) == "EXTERNAL":
                     continue
                 d["pressure"][str(r[0])] = {"set": num(r[head["Set pressure"]]), "row": n,
                                             "offset": num(r[head["Offset needed"]]) if "Offset needed" in head else None}
@@ -674,7 +779,8 @@ class Review:
                         u["systems"].append(s)
         # MOT theatre units: keys on a MOT NSC sheet or schedule and a theatre department (D-057)
         for u in i.units:
-            u["mot"] = bool(u["akeys"] & i.mot_keys) and bool(re.search(r"MOT|Operating Theatre", str(u["depts"])))
+            u["mot"] = bool(u["akeys"] & i.mot_keys) and (
+                bool(re.search(r"MOT|Operating Theatre", str(u["depts"]))) or any(x["sheet"] in i.mot_sheets for x in u["systems"]))
         # holders of a room name on a storey: (unit tag, list complete)
         self.zone_names: Dict[str, Dict[str, List[Tuple[str, bool]]]] = defaultdict(lambda: defaultdict(list))
         for u in i.units:
@@ -1093,10 +1199,46 @@ class Review:
         """Return fans drawn on the systems of the unit.  A return fan serves its system; its tag names the
         fan (RAF), not the AHU, so the match is by system and not by tag."""
         items = []
+        for tg, (s, f) in self.return_fans(u).items():
+            items.append((tg, f["duty"]["value"], f["duty"]))
+        return items
+
+    @staticmethod
+    def core(key: str) -> str:
+        """Unit name of a tag key without prefix, level and A/B letter: 'RAF:B-B2-B2PHAB-02' gives 'B2PHAB-02'."""
+        parts = key_only(key).split("-")
+        return (parts[-2] + "-" + re.sub(r"(/[A-Z]|[A-Z])$", "", parts[-1])) if len(parts) >= 2 else key_only(key)
+
+    def sheet_tags(self, u: Dict[str, Any], prefixes: Tuple[str, ...]) -> List[Tuple[Dict[str, Any], str, List[float]]]:
+        """Tag lines of the sheets of the unit whose unit name equals that of the unit (the text of the sheet,
+        read directly, because the model misses fans whose tag has no duty line)."""
+        cores = {self.core(k) for k in u["akeys"]}
+        out = []
+        for s in u["systems"]:
+            for t, b in self.i.st.lines(s["sheet"]):
+                m = re.match(r"^((?:%s)-[A-Z0-9][A-Za-z0-9\-]*(?:/[A-Z0-9]+)?)" % "|".join(prefixes), t)
+                if not m:
+                    continue
+                ks = tag_keys(m.group(1))
+                if any(self.core(k) in cores for k in ks):
+                    out.append((s, re.sub(r"\s+", "", m.group(1)), b))
+        return out
+
+    def return_fans(self, u: Dict[str, Any]) -> Dict[str, Tuple[Dict[str, Any], Dict[str, Any]]]:
+        """Return fans of the unit: those the model holds, else the RAF tags that the sheet prints."""
+        out: Dict[str, Tuple[Dict[str, Any], Dict[str, Any]]] = {}
         for s in u["systems"]:
             for f in s["return_air"]["fans"]:
-                items.append((f["tag"]["value"], f["duty"]["value"], f["duty"]))
-        return items
+                out.setdefault(f["tag"]["value"], (s, f))
+        if out:
+            return out
+        for s, tg, b in self.sheet_tags(u, ("RAF",)):
+            if tg in out:
+                continue
+            dn = self.i.st.duty_near(s["sheet"], b)
+            out[tg] = (s, {"tag": {"value": tg, "box": b},
+                           "duty": {"value": dn[0] if dn else None, "box": dn[1] if dn else b}, "type": "RETURN"})
+        return out
 
     def totals_block(self, u: Dict[str, Any], rows: List[Row], d054: bool, info: Dict[str, Any]) -> None:
         tag = u["tag"]
@@ -1132,16 +1274,39 @@ class Review:
                     sup_items.append((a["tag"]["value"], a["duty_supply_L_s"]["value"], a["duty_supply_L_s"]))
             for ln in s["outdoor_air"]["lines"]:
                 if tag_keys(ln["to"]) & keys:
-                    oa_items.append((ln["to"], ln["value_L_s"], ln))
+                    # the model's box is the label that lists the OA of each AHU; the mark-up goes on the drawn value
+                    atag = next((a["tag"].get("box") for a in s["ahus"] if tag_keys(a["tag"]["value"]) & tag_keys(ln["to"])), None)
+                    vb = self.i.st.oa_box(s["sheet"], ln["value_L_s"], atag)
+                    ref = dict(ln)
+                    if vb:
+                        ref["box"] = vb
+                        ref["box_level"] = "value"
+                    oa_items.append((ln["to"], ln["value_L_s"], ref))
             for ln in s["spill_relief"]["lines"]:
                 spill_vals.append((ln["value_L_s"], ln))
+        spill_path_drawn = bool(spill_vals)
+        if not spill_vals and u["systems"]:
+            # a spill label that the model did not link: the label nearest to the unit's AHU tag
+            best = None
+            for s in u["systems"]:
+                for v, b in self.i.st.spill_labels(s["sheet"]):
+                    d = SheetText._dist(b, tagbox)
+                    if best is None or d < best[0]:
+                        best = (d, v, b)
+            if best:
+                spill_path_drawn = True
+                if best[1] is not None:
+                    spill_vals.append((best[1], {"box": best[2]}))
         ret_items = self.system_return_items(u)
         sup_d, sup_refs = self._per_key_sum(sup_items)
         oa_d, oa_refs = self._per_key_sum(oa_items)
         ret_d, ret_refs = self._per_key_sum(ret_items)
         spill_d = sum(v for v, _ in spill_vals if v is not None) if any(v is not None for v, _ in spill_vals) else None
         info["drawn"] = {"supply": sup_d, "oa": oa_d, "return": ret_d, "spill": spill_d}
-        will_add_fan = (not ret_items and ret_req and ret_req > BAL_LPS
+        # once-through unit: the workbook recirculates no air, so a return fan is wrong; the spill needs a relief path
+        once_through = bool(have_wb and recirc is not None and recirc <= BAL_LPS)
+        info["once_through"] = once_through
+        will_add_fan = (not ret_items and not once_through and ret_req and ret_req > BAL_LPS
                         and spill_req and spill_req > BAL_LPS)
 
         def bx(refs):
@@ -1162,9 +1327,12 @@ class Review:
                 if req is None or req <= BAL_LPS:
                     return
                 if qty == "Return air":
-                    see = "see the return fan row" if will_add_fan else "the sheet draws no return fan and the spill is not more than 10 L/s"
+                    see = ("see the return fan row" if will_add_fan else
+                           "the unit takes 100 % outdoor air, so it has no return fan; see the spill path row" if once_through else
+                           "the sheet draws no return fan and the spill is not more than 10 L/s")
                 else:
-                    see = "see the spill path row"
+                    see = "see the spill path row" if not spill_path_drawn else \
+                        "the spill path is drawn and its value is not printed"
                 rows.append(mk(tag, "airflows", "AHU total", tag, qty, uom, "not drawn", req, "not drawn",
                                "No separate mark-up: " + see, False, sheet, page, tagbox,
                                f"Working drawing {sheet} p{page}; {src}", "Not drawn on the sheet. " + extra))
@@ -1173,8 +1341,9 @@ class Review:
             note = extra
             if drawn is not None and req is not None:
                 m = drawn - req
-                note = (f"Drawn duty covers the requirement. Margin {m:,.0f} {uom} ({m / req:.1%}). " if m >= 0 else
-                        f"Drawn duty does not cover the requirement. Short by {-m:,.0f} {uom} ({-m / req:.1%}). ") + extra
+                pc = (lambda x: f" ({x / req:.1%})" if req else "")
+                note = (f"Drawn duty covers the requirement. Margin {m:,.0f} {uom}{pc(m)}. " if m >= 0 else
+                        f"Drawn duty does not cover the requirement. Short by {-m:,.0f} {uom}{pc(-m)}. ") + extra
             elif drawn is None and req is not None:
                 note = "Not drawn on the sheet. " + extra
             if cls == "increase" and drawn:
@@ -1189,6 +1358,12 @@ class Review:
             info["counts"][cls] += 1
 
         part = alias_note + " " if alias_note else ""
+        cover = (u.get("area_counted") / u["area"]) if (u.get("area_counted") and u.get("area")) else None
+        info["cover"] = cover
+        if cover is not None and cover > 1.10:
+            part += (f"Room list not confirmed: the workbooks count {u['area_counted']:,.0f} m² for this unit and the zoning "
+                     f"gives {u['area']:,.0f} m² ({cover:.0%}). The increase can come from rooms that the unit does not serve. "
+                     "Check the room list before you apply it. ")
         if not u["complete"]:
             part += (f"The room list of the unit is not complete: the workbook value covers {len(u['links'])} of "
                      f"{u['rooms']} zoned rooms, so a margin is not a reduction. ")
@@ -1210,7 +1385,7 @@ class Review:
                            "Drawn value is the scheduled cooling duty, not a value printed on the sheet."))
             info["counts"]["not drawn on sheet"] += 1
         # missing: spill path
-        if spill_req and spill_req > BAL_LPS and spill_d is None:
+        if spill_req and spill_req > BAL_LPS and spill_d is None and not spill_path_drawn:
             mr = mk(tag, "new systems", "Missing system", tag, "Spill or relief path", "L/s", "not drawn", round(spill_req, 1),
                     "missing system", "Mark up: add a spill or relief path", True, sheet, page, tagbox, src_wb,
                     "Outdoor air is more than the exhaust and the offset air. Add a relief path with its louvre.")
@@ -1237,6 +1412,19 @@ class Review:
                 for k in tag_keys(str(w.get("exh_fan") or "")):
                     self._fr[k].append((dept, rn, w))
         return self._fr
+
+    def shared_fan(self, found: List[Tuple[str, Dict[str, Any]]]) -> Optional[float]:
+        """Total that the Fans tab ties to this fan and to at least one other fan of the same tab (same
+        serves, same second AHU, same required airflow): the total counts once for each fan."""
+        for dp, x in found:
+            if not x.get("required"):
+                continue
+            same = [y for y in self.i.wb[dp]["fans"] if y["tag"] != x["tag"] and y["serves"] == x["serves"]
+                    and y.get("also") == x.get("also") and y["required"] == x["required"]
+                    and str(y["type"]).upper() == str(x["type"]).upper()]
+            if same:
+                return x["calc"] or x["required"]
+        return None
 
     def fan_conflict(self, ks: Iterable[str], s: Dict[str, Any], req: Optional[float], drawn: Optional[float]) -> str:
         """Text when the workbook ties to the fan rooms that the sheet puts on other AHUs, or when the
@@ -1317,10 +1505,7 @@ class Review:
                 if lb["duty"]["value"] is not None:
                     iso_present = True
         # return fans: matched by system (a return fan tag names the fan, not the AHU)
-        ret_fans: Dict[str, Tuple[Dict[str, Any], Dict[str, Any]]] = {}
-        for s in u["systems"]:
-            for f in s["return_air"]["fans"]:
-                ret_fans.setdefault(f["tag"]["value"], (s, f))
+        ret_fans = self.return_fans(u)
         req = info.get("req", {})
         ret_req, spill_req = req.get("return"), req.get("spill")
         rest: Dict[str, Tuple[Dict[str, Any], Dict[str, Any]]] = {}
@@ -1336,13 +1521,23 @@ class Review:
                 continue
             drawn_v = f0["duty"]["value"]
             reqv = round(max(x["calc"] or 0 for _, x in found), 1)
+            shared = self.shared_fan(found)
+            if shared and ret_req is not None:
+                # the workbook ties one total to several fans: the requirement of this fan is the return air of
+                # the unit alone (the total is not split here)
+                reqv = round(ret_req, 1)
             j = judge(drawn_v, reqv, d054)
             cls, act, need = cls_map[j[0]], j[1], j[2]
             if cls == "to resize":
                 act = "Mark up: resize the fan"
+                if shared and ret_req is None:
+                    cls, act, need = "not established", "Query: workbook fan assignment to confirm", True
             elif cls == "adequate":
                 act, need = "No change", False
             note = keep
+            if shared:
+                note = (f"The Fans tab gives one total of {shared:,.0f} L/s to several fans (shared requirement). "
+                        "The value here is the return air of this unit alone. The split between the fans is to be confirmed. ") + keep
             if drawn_v is not None and j[0] in ("margin", "no change"):
                 note = f"Margin {drawn_v - reqv:,.0f} L/s. " + keep
             srcw = "; ".join(f"Workbook D{dp} tab Fans cell {x['cell']}" for dp, x in found[:2])
@@ -1369,7 +1564,7 @@ class Review:
                            s0["sheet"], s0["page"], f0["duty"].get("box") or f0["tag"].get("box"),
                            f"Working drawing {s0['sheet']} p{s0['page']}; Workbook AHU tab (return = recirculated + spill)", keep))
             info["counts"]["fan: " + cls] += 1
-        if not ret_fans and ret_req and ret_req > BAL_LPS and spill_req and spill_req > BAL_LPS:
+        if not ret_fans and not info.get("once_through") and ret_req and ret_req > BAL_LPS and spill_req and spill_req > BAL_LPS:
             mr = mk(tag, "fans", "Fan", "Return fan", "Return fan airflow", "L/s", "not drawn", round(ret_req, 1), "to add",
                     "Mark up: add a return fan", True, sheet, page, tagbox,
                     f"Working drawing {sheet} p{page}; Workbook AHU tab (return = recirculated + spill)",
@@ -1423,6 +1618,10 @@ class Review:
                 if w and w["exhaust"] and w["exhaust"] > 0.5:
                     exh_need += w["exhaust"]
                     exh_rooms.append(w["name"])
+        if not exh_present:
+            # exhaust fans and links that the sheet prints and the model did not read
+            exh_present = bool(self.sheet_tags(u, ("EAF", "TEAF", "TEF", "HPF"))) or \
+                any(self.i.st.exhaust_links(x["sheet"]) for x in u["systems"])
         if exh_need > BAL_LPS and not exh_present and not iso_present:
             mr = mk(tag, "new systems", "Missing system", tag, "Exhaust system", "L/s", "not drawn", round(exh_need, 1),
                     "missing system", "Mark up: add an exhaust fan and its ducts", True, sheet, page, tagbox,
@@ -1499,6 +1698,54 @@ class Review:
                     w = min(cl, key=lambda c: (not self.unit_by_tag[c[0]]["is_group"], c[0]))
                     point(w, cl)
         self.n_dedup = n_moved
+
+    def merge_shared_boxes(self) -> None:
+        """One drawn value, one mark-up.  Two rows that change the same drawn value (same sheet, box, drawn
+        value and quantity) become one: the same new value gives a pointer row; different new values give one
+        query that lists them.  A room that a group and its member both add is added once."""
+        uniq = list({id(r): r for r in self.rows}.values())
+        groups: Dict[Tuple[Any, ...], List[Row]] = defaultdict(list)
+        for r in uniq:
+            if r["needs_id"] and r["box"] and r["layer"] in ("airflows", "fans") and r["action"].startswith("Mark up") \
+                    and r["row_type"] in ("AHU total", "Fan"):
+                groups[(r["sheet"], r["box"], str(r["drawn"]), r["quantity"])].append(r)
+        n = 0
+        for lst in groups.values():
+            if len(lst) < 2:
+                continue
+            first = lst[0]
+            vals = {round(num(r["required"]) or 0.0, 0) for r in lst}
+            for r in lst[1:]:
+                r["ref"] = first
+                r["cls"] = "reviewed on another tab"
+                r["action"] = "No separate mark-up: the same drawn value is changed on another row"
+                r["needs_id"] = False
+                n += 1
+            if len(vals) > 1:
+                first["layer"] = "queries"
+                first["action"] = "Query: one drawn value, several requirements"
+                first["cls"] = "linked rooms differ"
+                first["_merged"] = lst
+        # rooms added by a group and by its member on one sheet
+        adds: Dict[Tuple[str, str], List[Row]] = defaultdict(list)
+        for r in uniq:
+            if r["needs_id"] and r["row_type"] == "Room" and "add the room" in r["action"]:
+                adds[(r["sheet"], nname(r["item"]))].append(r)
+        for lst in adds.values():
+            if len(lst) < 2:
+                continue
+            lst.sort(key=lambda r: (self.unit_by_tag.get(r["unit"], {}).get("is_group", False), r["unit"]))
+            first = lst[0]
+            for r in lst[1:]:
+                gu = self.unit_by_tag.get(r["unit"]) or {}
+                mem = {m["tag"] for m in gu.get("members", [])}
+                if gu.get("is_group") and first["unit"] in mem:
+                    r["ref"] = first
+                    r["cls"] = "reviewed on another tab"
+                    r["action"] = "No separate mark-up: the room is added by the row of its unit"
+                    r["needs_id"] = False
+                    n += 1
+        self.n_merged = n
 
     def review_untagged(self) -> None:
         for u in self.untagged:
@@ -2041,6 +2288,16 @@ class Review:
         # keep AHU rows with no scheduled counterpart or a different duty only for the count
         # ids
 
+    def list_mot_sheet_rows(self) -> None:
+        """Rows on a sheet titled MOT ACMV: listed, not marked up (D-072, D-074 provisional)."""
+        for r in {id(x): x for x in self.rows}.values():
+            if r["needs_id"] and r["sheet"] in self.i.mot_sheets:
+                r["note"] = (r["note"] + " " if r["note"] else "") + "Without this rule the action would be: " + \
+                    r["action"][0].lower() + r["action"][1:] + "."
+                r["needs_id"] = False
+                r["layer"] = "queries"
+                r["action"] = "List only (MOT): sheet with the MOT ACMV title; no mark-up"
+
     # -- change IDs -------------------------------------------------------------------- #
     def assign_ids(self) -> None:
         counters: Counter = Counter()
@@ -2055,6 +2312,10 @@ class Review:
             w = r.get("ref")
             if w is not None and w.get("change_id"):
                 r["action"] += f" (change ID {w['change_id']})"
+            mg = r.get("_merged")
+            if mg:
+                r["note"] = ((r["note"] + " ") if r["note"] else "") + "This drawn value is used by several rows with different new values: " + \
+                    "; ".join(f"{x['item']}: {fmt(num(x['required']), 0)} L/s" for x in mg) + ". Confirm the one value."
 
 
 # --------------------------------------------------------------------------- #
@@ -2064,10 +2325,12 @@ def run_review(root: Path = ROOT) -> Review:
     rv = Review(Inputs(root))
     rv.review_all()
     rv.dedupe_boxes()
+    rv.merge_shared_boxes()
     rv.missing_global()
     rv.consistency()
     rv.appd_review()
     rv.mot_review()
+    rv.list_mot_sheet_rows()
     rv.assign_ids()
     return rv
 

@@ -46,6 +46,12 @@ SHEET_W, SHEET_H = 1188.084, 841.0864
 PT = 25.4 / 72.0
 STRIP_X0 = 1072.0          # right strip with notes, key plan and title block
 STYLE = "IPNARROW"
+X0_PAGE = 46.0              # left edge of the drawing area
+X_MAX = STRIP_X0 - 12.0     # right edge of the drawing area
+Y_TOP = 822.0               # top of the drawing area
+Y_MIN = 104.0               # bottom of the drawing area (the legend band is below it)
+SHELF_GAP = 24.0            # between two bands (a level line sits in the gap)
+ORD = {2: "2ND", 3: "3RD", 4: "4TH", 5: "5TH", 6: "6TH", 7: "7TH"}
 WF = 0.85                   # width factor, as the condensed type of the working drawings
 H = 3.0                     # body text height (mm)
 HT = 3.8                    # tag text height
@@ -105,6 +111,9 @@ def wrap(text: str, h: float, width: float) -> List[str]:
 # --------------------------------------------------------------------------- #
 # Data
 # --------------------------------------------------------------------------- #
+csv.field_size_limit(10 ** 9)
+
+
 def read_csv(p: Path) -> List[Dict[str, str]]:
     with open(p, encoding="utf-8", newline="") as fh:
         return list(csv.DictReader(fh))
@@ -156,9 +165,27 @@ def load_inputs(storey: int) -> Dict[str, Any]:
         m = re.match(r"Space (\d+):", r["item"])
         if r["sheet"] == "App D" and m and r["quantity"] == "Storey %d" % storey:
             sp_q[int(m.group(1))].append(r)
+    # highlighted spaces with no equipment: their query row, matched on page and box
+    un_q: Dict[int, List[Dict[str, str]]] = defaultdict(list)
+    for u in unserved:
+        sp0 = u["spaces"][0]
+        for r in chg:
+            if r["sheet"] == "App D" and "space has no fan" in r["action"] and r["page"] == str(sp0["page"]):
+                try:
+                    bb = [float(v) for v in r["bbox"].strip("[]").split(",")]
+                except ValueError:
+                    continue
+                if all(abs(a - b) < 0.6 for a, b in zip(bb, sp0["box"])):
+                    un_q[int(sp0["annotation_index"])].append(r)
+    air_rows = {r["item"]: r for r in chg if r["sheet"] == "App D" and r["layer_type"] == "airflows"
+                and r["quantity"] == "Storey %d" % storey}
+    sched_only = [r for r in chg if r["sheet"] == "App D" and r["layer_type"] == "queries"
+                  and r["quantity"] == "Level %02d" % storey and "on no App D layout" in r["action"]]
+    equip_rows = [r for r in read_csv(REG / "appd_equipment.csv") if r["storey"] == str(storey)]
     fan_types = {r["tag_as_written"]: r.get("Fan Type (1)", "") for r in read_csv(REG / "equipment_schedule_fans.csv")}
     return dict(appd=appd, systems=systems, unserved=unserved, new_rows=new_rows, q_rows=q_rows,
-                spaces=spaces, recon=recon, chg=chg, d00=d00_cells(storey), sp_q=sp_q, fan_types=fan_types)
+                spaces=spaces, recon=recon, chg=chg, d00=d00_cells(storey), sp_q=sp_q, fan_types=fan_types,
+                un_q=un_q, equip_rows=equip_rows, air_rows=air_rows, sched_only=sched_only)
 
 
 def d00_cells(storey: int) -> Dict[int, Dict[str, Any]]:
@@ -205,20 +232,19 @@ def plan_sheet(inp: Dict[str, Any], storey: int) -> Dict[str, Any]:
                     assigned[sp["annotation_index"]] = s["system_id"]
     for u in inp["unserved"]:
         assigned.setdefault(u["spaces"][0]["annotation_index"], "UNSERVED")
-    # tags by space
+    # tags by space, from the registers: inside = tags whose space is this space; near = tags within 60 pt, not inside
     inside: Dict[int, List[str]] = defaultdict(list)
     near: Dict[int, List[str]] = defaultdict(list)
-    for s in systems:
-        for sp in s["spaces"]:
-            tgt = inside if sp["relation"] == "equipment inside or nearest" else near
-            for e in s["equipment"]:
-                if e["space_ref"] == sp["space_ref"] and sp["relation"] == "equipment inside or nearest":
-                    if e["tag_as_written"] not in inside[sp["annotation_index"]]:
-                        inside[sp["annotation_index"]].append(e["tag_as_written"])
-            if sp["relation"] != "equipment inside or nearest":
-                for e in s["equipment"]:
-                    if e["tag_as_written"] not in near[sp["annotation_index"]]:
-                        near[sp["annotation_index"]].append(e["tag_as_written"])
+    for e in inp["equip_rows"]:
+        if e["space_annotation_index"] not in ("", None):
+            i = int(float(e["space_annotation_index"]))
+            if e["tag_as_written"] not in inside[i]:
+                inside[i].append(e["tag_as_written"])
+    for i, sp in inp["spaces"].items():
+        for part in (sp["equipment_tags_within_60pt"] or "").split(";"):
+            mm = re.match(r"\s*(\S+)\s*\[ann", part)
+            if mm and mm.group(1) not in inside[i] and mm.group(1) not in near[i]:
+                near[i].append(mm.group(1))
     return dict(systems=systems, assigned=assigned, inside=inside, near=near)
 
 
@@ -249,8 +275,11 @@ def legend_symbols() -> Dict[str, Any]:
 # DXF building
 # --------------------------------------------------------------------------- #
 class Sheet:
-    def __init__(self, storey: int, number: str):
+    def __init__(self, storey: int, number: str, idx: int = 1, total: int = 1, numbers: Optional[List[str]] = None):
         self.storey, self.number = storey, number
+        self.idx, self.total, self.numbers = idx, total, numbers or [number]
+        self.shown: set = set()
+        self.ins: List[Tuple[float, float, float, float, str]] = []
         self.doc = ezdxf.new("R2018", setup=True)
         self.doc.units = ezdxf.units.MM
         self.msp = self.doc.modelspace()
@@ -382,6 +411,8 @@ def make_blocks(sh: Sheet, sym: Dict[str, Any]) -> None:
     # labelled box (for symbols the legend does not have)
     lb = doc.blocks.new("BOX_LABELLED")
     lb.add_lwpolyline([(0, 0), (1, 0), (1, 1), (0, 1)], close=True, dxfattribs=dict(layer="IP-EQUIP", lineweight=25))
+    fcu = doc.blocks.new("SYM_FCU")        # legend symbol FAN COIL UNIT: a plain rectangle, as the legend cell
+    fcu.add_lwpolyline([(0, 0), (1, 0), (1, 1), (0, 1)], close=True, dxfattribs=dict(layer="IP-EQUIP", lineweight=35))
     rb = doc.blocks.new("ROOMBOX")
     rb.add_lwpolyline([(0, 0), (1, 0), (1, 1), (0, 1)], close=True, dxfattribs=dict(layer="IP-ROOMBOX", lineweight=25))
     # level mark (triangle) as on the working drawings
@@ -390,6 +421,8 @@ def make_blocks(sh: Sheet, sym: Dict[str, Any]) -> None:
 
 
 def insert(sh: Sheet, block: str, x: float, y: float, sx: float, sy: float, layer: str, rot: float = 0.0):
+    if block in ("ROOMBOX", "SYM_AHU", "SYM_FCU", "BOX_LABELLED"):
+        sh.ins.append((x, y, x + sx, y + sy, block))
     sh.msp.add_blockref(block, (x, y), dxfattribs=dict(layer=layer, xscale=sx, yscale=sy, rotation=rot))
 
 
@@ -407,10 +440,22 @@ PITCH = 74.0
 GAP = 6.0
 
 
-def box_content(inp, plan, sp_idx: int, system: Dict[str, Any]) -> Dict[str, Any]:
+NOCHG = "CH-APPD-NONE"      # the change register has no row for this item (listed in the report)
+
+
+def system_chg(inp, system: Dict[str, Any]) -> str:
+    r = inp["new_rows"].get(system["system_id"])
+    return r["change_id"] if r else NOCHG
+
+
+def box_content(inp, plan, sp_idx: int, system: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     sp = inp["spaces"][sp_idx]
-    nrow = inp["new_rows"][system["system_id"]]
-    return dict(idx=sp_idx, sp=sp, chg=nrow["change_id"], system=system, name=box_name(inp, sp_idx),
+    if system is None:           # highlighted space with no equipment on the layout
+        uq = inp["un_q"].get(sp_idx, [])
+        return dict(idx=sp_idx, sp=sp, chg=uq[0]["change_id"] if uq else NOCHG, system=None,
+                    name=box_name(inp, sp_idx), queries=list(uq) + inp["sp_q"].get(sp_idx, []), relation="",
+                    tags_in=[], tags_near=[])
+    return dict(idx=sp_idx, sp=sp, chg=system_chg(inp, system), system=system, name=box_name(inp, sp_idx),
                 queries=inp["sp_q"].get(sp_idx, []),
                 relation=next((x["relation"] for x in system["spaces"] if x["annotation_index"] == sp_idx), ""),
                 tags_in=plan["inside"].get(sp_idx, []), tags_near=plan["near"].get(sp_idx, []))
@@ -472,14 +517,15 @@ def draw_box(sh: Sheet, c: Dict[str, Any], x: float, y_top: float, h_box: float,
     if c["tags_near"]:
         v = Value("tags_near", ", ".join(c["tags_near"]), chg, src, owner)
         y = sh.value_text(ix, y, v, H, w, owner=owner, label="NEAR", label_w=tw("NEAR", HS) + 2.0) - 0.8
-    for q in inp["sp_q"].get(idx, []):
+    for q in c["queries"]:
         for ln in wrap("QUERY %s: %s. %s" % (q["change_id"], q["action"].replace("Query: ", ""), q["note"]), HS, w):
             sh.text(ix, y - HS, ln, HS, "IP-QUERY", owner=owner + ":q")
             y -= HS * LP
     v = Value("change_id", chg, chg, src, owner)
     sh.values.append(v)
     sh.text(ix, y_top - h_box + 1.2 + HS * LP, "CHG " + chg, HS, "IP-ANNO-ID", v, owner=owner)
-    sh.text(ix, y_top - h_box + 1.2, "APP D SPACE %d" % idx + (", TAG NEAR" if c["relation"] != "equipment inside or nearest" else ""),
+    sh.text(ix, y_top - h_box + 1.2, "APP D SPACE %d" % idx + (", NO EQUIPMENT" if c["system"] is None else
+                                      (", TAG NEAR" if c["relation"] != "equipment inside or nearest" else "")),
             HS, "IP-ANNO-ID", owner=owner)
 
 
@@ -501,18 +547,22 @@ def box_height(c: Dict[str, Any]) -> float:
     return round(lines + 0.5 + nq * HS * LP, 1)
 
 
+KIND_ORDER = ["SA", "RA", "OA", "EA", "TEA"]
+FEEDS = {"OAF": ["OA"], "EAF": ["EA"], "TEAF": ["TEA"], "FCU": ["SA", "RA"], "AHU": ["SA", "RA"],
+         "OAF/EAF": ["OA", "EA"], "other": ["OA", "EA"]}
+
+
+def tag_feeds(tag: str, etype: str) -> List[str]:
+    if tag.startswith("OAF/EAF"):
+        return FEEDS["OAF/EAF"]
+    return FEEDS.get(etype, ["EA"])
+
+
 def duct_pair(system: Dict[str, Any]) -> List[str]:
-    kinds = {e["type"] for e in system["equipment"]}
-    if "AHU" in kinds:
-        return ["SA", "RA"]
-    out = []
-    if "OAF" in kinds or "OAF/EAF" in kinds:
-        out.append("OA")
-    if "EAF" in kinds or "OAF/EAF" in kinds:
-        out.append("EA")
-    if "TEAF" in kinds:
-        out.append("TEA")
-    return out
+    kinds = set()
+    for e in system["equipment"]:
+        kinds.update(tag_feeds(e["tag_as_written"], e["type"]))
+    return [k for k in KIND_ORDER if k in kinds]
 
 
 def equipment_values(inp, system, e) -> Dict[str, Any]:
@@ -534,6 +584,7 @@ def draw_fan_box(sh: Sheet, inp, system, tag: str, etype: str, x: float, y_top: 
     owner = "eq:" + tag
     src = "Appendix D, p5, tag as written; schedule row %s" % (r.get("schedule_pages") and ("p" + r["schedule_pages"]) or "none")
     blk = fan_symbol(inp, tag, system)
+    is_fcu = etype == "FCU"
     xo = 14.0 if blk else 1.6
     lines: List[Tuple[str, Optional[Value], float]] = []
     vtag = Value("tag", tag, chg, src, owner)
@@ -542,9 +593,19 @@ def draw_fan_box(sh: Sheet, inp, system, tag: str, etype: str, x: float, y_top: 
         ftype = "AXIAL" if blk == "SYM_FAN_AXIAL" else "CENTRIFUGAL"
         v = Value("fan_type", ftype, chg, "Equipment schedule, column Fan Type", owner)
         lines.append(("FAN TYPE %s" % ftype, v, H))
-    if r.get("airflow"):
+    if r.get("airflow") and is_fcu:
+        v = Value("supply_airflow_L_s", fnum(r["airflow"]), chg, src, owner)
+        lines.append(("SUPPLY AIRFLOW %s L/s" % v.text, v, H))
+    elif r.get("airflow"):
         v = Value("airflow_L_s", fnum(r["airflow"]), chg, src, owner)
         lines.append(("MIN AIRFLOW %s L/s" % v.text, v, H))
+    ar = inp["air_rows"].get(tag)
+    if ar:      # D-072: the workbook value is larger than the scheduled duty, show it
+        cid = ar["change_id"]
+        v = Value("workbook_airflow_L_s", fnum(ar["required"]), cid, ar["source"], owner)
+        lines.append(("WORKBOOK AIRFLOW %s L/s" % v.text, v, H))
+        vc2 = Value("change_id", cid, cid, ar["source"], owner)
+        lines.append(("CHG " + cid, vc2, HS))
     if r.get("static_pressure_Pa"):
         v = Value("static_pressure_Pa", fnum(r["static_pressure_Pa"]), chg, src, owner)
         lines.append(("MIN STATIC PRESSURE %s Pa" % v.text, v, H))
@@ -568,6 +629,9 @@ def draw_fan_box(sh: Sheet, inp, system, tag: str, etype: str, x: float, y_top: 
         sxw = sy * sh.sym_aspect[blk]
         insert(sh, blk, x + 1.0, y_top - ht / 2 - sy / 2, sxw, sy, "IP-EQUIP")
         sh.symbols.append((x + 1.0, y_top - ht / 2 - sy / 2, x + 1.0 + sxw, y_top - ht / 2 + sy / 2, "legend fan"))
+    elif is_fcu:
+        insert(sh, "SYM_FCU", x, y_top - ht, w, ht, "IP-EQUIP")
+        sh.symbols.append((x, y_top - ht, x + w, y_top, "legend FCU"))
     else:
         insert(sh, "BOX_LABELLED", x, y_top - ht, w, ht, "IP-EQUIP")
         sh.symbols.append((x, y_top - ht, x + w, y_top, "labelled box"))
@@ -592,74 +656,220 @@ def draw_fan_box(sh: Sheet, inp, system, tag: str, etype: str, x: float, y_top: 
     return ht
 
 
-def build(storey: int, number: str) -> Tuple[Sheet, Dict[str, Any]]:
-    Value._n = 0
-    inp = load_inputs(storey)
-    plan = plan_sheet(inp, storey)
-    sym = legend_symbols()
-    sh = Sheet(storey, number)
-    make_blocks(sh, sym)
-    frame(sh)
+def draw_unserved_group(sh, inp, plan, bx, gx, ytop, ncols) -> None:
+    """Highlighted spaces with no fan, FCU or AHU on the layout: boxes with no duct line."""
+    sh.text(gx, ytop - 3.0, "HIGHLIGHTED SPACES WITH NO FAN, FCU OR AHU ON THE LAYOUT. NO DUCT IS DRAWN.", 3.0, "IP-NOTES",
+            owner="unserved")
+    y = ytop - 9.0
+    bottoms = []
+    for rr in range(math.ceil(len(bx) / ncols)):
+        chunk = bx[rr * ncols:(rr + 1) * ncols]
+        hrow = max(box_height(c) for c in chunk)
+        for j, c in enumerate(chunk):
+            draw_box(sh, c, gx + j * PITCH, y, hrow, inp, plan)
+        bottoms.append(y - hrow)
+        y -= hrow + 10.0
+    sh.last_bottom = min(bottoms) - 1.0
+
+
+def draw_sched_table(sh, inp, rows, gx, ytop) -> None:
+    """Scheduled for the common areas of this storey, on no App D layout: listed with the reason, not drawn."""
+    colw = 250.0
+    ncol = 1 if len(rows) <= 12 else (2 if len(rows) <= 44 else 3)
+    per = math.ceil(len(rows) / ncol)
+    head = ("SCHEDULED FOR THE COMMON AREAS OF THIS STOREY, ON NO APP D LAYOUT. NOT DRAWN: NO SPACE IS TIED TO THEM "
+            "ON THE LAYOUT.")
+    y0 = ytop
+    for i, ln in enumerate(wrap(head, 3.0, ncol * colw - 4)):
+        sh.text(gx, y0 - 3.0 - i * 4.4, ln, 3.0, "IP-NOTES", owner="schedtable")
+    y0 -= 3.0 + 4.4 * len(wrap(head, 3.0, ncol * colw - 4)) + 3.0
+    bottoms = [y0]
+    for c in range(ncol):
+        y = y0
+        for r in rows[c * per:(c + 1) * per]:
+            x = gx + c * colw
+            owner = "sched:" + r["item"]
+            vt = Value("sched_only_tag", r["item"], r["change_id"], r["source"], owner)
+            vc = Value("change_id", r["change_id"], r["change_id"], r["source"], owner)
+            sh.values += [vt, vc]
+            sh.text(x, y - H, r["item"], H, "IP-ROOMTEXT", vt, owner=owner)
+            sh.text(x + 66, y - H, "CHG " + r["change_id"], HS, "IP-ANNO-ID", vc, owner=owner)
+            pg = re.search(r"p([\d+]+)\s*$", r["source"])
+            sh.text(x + 98, y - H, "SCHEDULE P" + (pg.group(1) if pg else "-"), HS, "IP-ANNO-ID", owner=owner)
+            lines = wrap(r["note"], HS, colw - 134)
+            for i, ln in enumerate(lines):
+                sh.text(x + 130, y - HS - i * HS * LP, ln, HS, "IP-ROOMTEXT", owner=owner)
+            y -= max(H * LP, len(lines) * HS * LP) + 1.6
+        bottoms.append(y)
+    sh.last_bottom = min(bottoms) - 1.0
+
+
+class Block:
+    """One piece of the sheet: a system with its boxes, drawn at a given top-left corner."""
+
+    def __init__(self, bid: str, kind: str, draw, spaces: Sequence[int], tags: Sequence[str]):
+        self.bid, self.kind, self.draw = bid, kind, draw
+        self.spaces, self.tags = list(spaces), list(tags)
+        self.w = self.h = self.xmin = 0.0
+
+
+def measure(scratch: "Sheet", blk: Block) -> None:
+    scratch.msp.delete_all_entities()
+    scratch.texts, scratch.ducts, scratch.symbols, scratch.ins, scratch.values = [], [], [], [], []
+    n0 = Value._n
+    blk.draw(scratch, 0.0, 0.0)
+    Value._n = n0
+    xs, ys = [], []
+    for t in scratch.texts:
+        xs += [t["x0"], t["x1"]]
+        ys += [t["y0"], t["y1"]]
+    for (p0, p1) in scratch.ducts:
+        xs += [p0[0], p1[0]]
+        ys += [p0[1], p1[1]]
+    for (x0, y0, x1, y1, _n) in scratch.ins:
+        xs += [x0, x1]
+        ys += [y0, y1]
+    blk.xmin = min(xs) - 1.0
+    blk.w = max(xs) - min(xs) + 2.0
+    blk.h = (0.0 - min(ys)) + 1.0
+
+
+def build_blocks(inp, plan, scratch) -> Tuple[List[Block], Dict[str, Any]]:
     systems = plan["systems"]
     by_id = {s["system_id"]: s for s in systems}
     boxes: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for idx in sorted(plan["assigned"]):
         sid = plan["assigned"][idx]
-        if sid == "UNSERVED":
-            continue
-        boxes[sid].append(box_content(inp, plan, idx, by_id[sid]))
-    ahu_sys = [s for s in systems if s["kind"] == "appd_ahu_system"]
-    fan_sys = [s for s in systems if s["kind"] != "appd_ahu_system"]
-    X0 = 46.0
-    layout_info: Dict[str, Any] = {"groups": []}
-
+        boxes[sid].append(box_content(inp, plan, idx, None if sid == "UNSERVED" else by_id[sid]))
     qmap: Dict[str, List[Dict[str, str]]] = defaultdict(list)
     for q in inp["q_rows"]:
         qmap[q["item"]].append(q)
-    # ---- group A: AHU systems
-    ytop = 822.0
-    gx = X0
-    ncols = 6
-    level_lines: List[Tuple[float, str]] = []
-    ymin_a = ytop
-    for s in ahu_sys:
-        bx = boxes[s["system_id"]]
-        draw_ahu_group(sh, inp, plan, s, bx, gx, ytop, ncols, qmap)
-        ymin_a = min(ymin_a, sh.last_bottom)
-        gx += ncols * PITCH + 20
-    yB = ymin_a - 24
-    # ---- group B: fan systems
-    gx = X0
-    y_bot_b = yB
-    row_bottom = yB
-    for s in fan_sys:
-        bx = boxes[s["system_id"]]
-        need = max(80.0 + 4, max(1, len(bx)) * PITCH)
-        if gx > X0 and gx + need > STRIP_X0 - 12:       # next band
-            yB = row_bottom - 14
-            gx = X0
-            row_bottom = yB
-        draw_fan_group(sh, inp, plan, s, bx, gx, yB, qmap)
-        row_bottom = min(row_bottom, sh.last_bottom)
-        y_bot_b = min(y_bot_b, sh.last_bottom)
-        gx += need + GAP
-    sh.band_bottom = y_bot_b
-    levels(sh, ymin_a, y_bot_b, yB, X0)
-    strip(sh, inp, plan, sym)
-    key_plan(sh, inp, plan)
-    legend_list(sh, sym, y_bot_b)
-    caption(sh)
-    return sh, dict(inp=inp, plan=plan, sym=sym)
+    hmax = Y_TOP - Y_MIN
+    out: List[Block] = []
+    for s in systems:
+        sid = s["system_id"]
+        bx = boxes[sid]
+        spaces = [c["idx"] for c in bx]
+        tags = sorted({e["tag_as_written"] for e in s["equipment"]})
+        if s["kind"] == "appd_ahu_system":
+            chosen = None
+            for nc in range(6, 14):
+                blk = Block(sid, "ahu", lambda sh, gx, yt, s=s, bx=bx, nc=nc: draw_ahu_group(sh, inp, plan, s, bx, gx, yt, nc, qmap),
+                            spaces, tags)
+                measure(scratch, blk)
+                chosen = blk
+                if blk.h <= hmax * 0.75 and blk.w <= X_MAX - X0_PAGE:
+                    break
+            out.append(chosen)
+        else:
+            blk = Block(sid, "fan", lambda sh, gx, yt, s=s, bx=bx: draw_fan_group(sh, inp, plan, s, bx, gx, yt, qmap),
+                        spaces, tags)
+            measure(scratch, blk)
+            out.append(blk)
+    if boxes.get("UNSERVED"):
+        bx = boxes["UNSERVED"]
+        for nc in range(6, 14):
+            blk = Block("UNSERVED", "unserved", lambda sh, gx, yt, bx=bx, nc=nc: draw_unserved_group(sh, inp, plan, bx, gx, yt, nc),
+                        [c["idx"] for c in bx], [])
+            measure(scratch, blk)
+            if blk.h <= hmax * 0.75 and blk.w <= X_MAX - X0_PAGE:
+                break
+        out.append(blk)
+    if inp["sched_only"]:
+        rows = sorted(inp["sched_only"], key=lambda r: r["item"])
+        blk = Block("SCHEDTABLE", "table", lambda sh, gx, yt: draw_sched_table(sh, inp, rows, gx, yt), [],
+                    [r["item"] for r in rows])
+        measure(scratch, blk)
+        out.append(blk)
+    return out, dict(boxes=boxes, qmap=qmap)
+
+
+def paginate(blocks: List[Block]) -> List[List[List[Tuple[Block, float]]]]:
+    """Sheets of bands (shelves) of blocks.  A band is a list of (block, x of its left edge)."""
+    ahu = sorted([b for b in blocks if b.kind == "ahu"], key=lambda b: (-b.h, b.bid))
+    fans = sorted([b for b in blocks if b.kind == "fan"], key=lambda b: (-round(b.h / 30.0), b.bid))
+    rest_u = [b for b in blocks if b.kind == "unserved"]
+    rest_t = [b for b in blocks if b.kind == "table"]
+    order = ahu + fans + rest_u + rest_t
+    sheets: List[List[List[Tuple[Block, float]]]] = []
+    bands: List[List[Tuple[Block, float]]] = []
+    band: List[Tuple[Block, float]] = []
+    y_top = Y_TOP
+    x = X0_PAGE
+    row_h = 0.0
+
+    def new_sheet():
+        nonlocal bands, band, y_top, x, row_h
+        if band:
+            bands.append(band)
+        if bands:
+            sheets.append(bands)
+        bands, band, y_top, x, row_h = [], [], Y_TOP, X0_PAGE, 0.0
+    for b in order:
+        gapx = 8.0
+        fits_here = band and x + b.w <= X_MAX and y_top - max(row_h, b.h) >= Y_MIN
+        if not fits_here and band:
+            ny = y_top - row_h - SHELF_GAP
+            if ny - b.h >= Y_MIN and b.w <= X_MAX - X0_PAGE:
+                bands.append(band)
+                band, y_top, x, row_h = [], ny, X0_PAGE, 0.0
+            else:
+                new_sheet()
+        band.append((b, x))
+        x += b.w + gapx
+        row_h = max(row_h, b.h)
+    if band:
+        bands.append(band)
+    if bands:
+        sheets.append(bands)
+    return sheets
+
+
+def build_storey(storey: int, numbers_fn) -> List[Tuple["Sheet", Dict[str, Any]]]:
+    """All sheets of one storey.  numbers_fn(n_sheets) returns the provisional drawing numbers."""
+    inp = load_inputs(storey)
+    plan = plan_sheet(inp, storey)
+    sym = legend_symbols()
+    scratch = Sheet(storey, "SCRATCH")
+    make_blocks(scratch, sym)
+    blocks, extra = build_blocks(inp, plan, scratch)
+    sheets_layout = paginate(blocks)
+    numbers = numbers_fn(len(sheets_layout))
+    out = []
+    for i, bands in enumerate(sheets_layout):
+        Value._n = 0
+        sh = Sheet(storey, numbers[i], i + 1, len(sheets_layout), numbers)
+        make_blocks(sh, sym)
+        frame(sh)
+        y_top = Y_TOP
+        level_ys: List[float] = []
+        for band in bands:
+            hmax = max(b.h for b, _x in band)
+            for b, bx0 in band:
+                b.draw(sh, bx0 - b.xmin, y_top)
+                sh.shown.update(b.spaces)
+            level_ys.append(y_top - hmax - 6.0)
+            y_top = y_top - hmax - SHELF_GAP
+        sh.band_bottom = level_ys[-1] + 6.0
+        levels(sh, level_ys)
+        sh.sched_rows = bool(inp["sched_only"]) and any(b.kind == "table" for band in bands for b, _ in band)
+        sh.block_ids = [b.bid for band in bands for b, _ in band]
+        strip(sh, inp, plan, sym)
+        key_plan(sh, inp, plan)
+        legend_list(sh, sym, sh.band_bottom)
+        caption(sh)
+        out.append((sh, dict(inp=inp, plan=plan, sym=sym, blocks=[b for band in bands for b, _ in band])))
+    return out
 
 
 def draw_ahu_group(sh, inp, plan, s, bx, gx, ytop, ncols, qmap) -> None:
-    chg = inp["new_rows"][s["system_id"]]["change_id"]
+    chg = system_chg(inp, s)
     tag = s["equipment"][0]["tag_as_written"]
     r = inp["recon"].get(tag, {})
     owner = "eq:" + tag
     src = "Appendix D, p5, tag as written; schedule row p%s" % (r.get("schedule_pages") or "none")
-    width = ncols * PITCH
     aw, ah = 130.0, 54.0
+    width = max(min(ncols, len(bx)) * PITCH, aw + 130)
     ax = gx + (width - aw) / 2
     ay = ytop - ah
     insert(sh, "SYM_AHU", ax, ay, aw, ah, "IP-EQUIP")
@@ -763,24 +973,25 @@ def draw_ahu_group(sh, inp, plan, s, bx, gx, ytop, ncols, qmap) -> None:
 
 
 def draw_fan_group(sh, inp, plan, s, bx, gx, ytop, qmap) -> None:
-    chg = inp["new_rows"][s["system_id"]]["change_id"]
+    """Fans, FCUs and the other single pieces of equipment of one system, with the ducts they feed and the
+    room boxes under them.  Each fan or FCU box is drawn once, at the system."""
+    chg = system_chg(inp, s)
     ducts = duct_pair(s)
     n = max(1, len(bx))
-    width = max(n * PITCH - (PITCH - BW), 84.0)
     fw = 80.0
+    width = max(n * PITCH - (PITCH - BW), 96.0)
     fx = gx + (width - fw) / 2
-    # equipment: one fan box per distinct tag, OA first then EA/TEA
+    ORDER = {"FCU": 0, "OAF": 1, "EAF": 2, "TEAF": 2}
     tags: List[Tuple[str, str]] = []
-    for e in sorted(s["equipment"], key=lambda e: {"OAF": 0, "EAF": 1, "TEAF": 1}.get(e["type"], 2)):
+    for e in sorted(s["equipment"], key=lambda e: ORDER.get(e["type"], 3)):
         if (e["tag_as_written"], e["type"]) not in tags:
             tags.append((e["tag_as_written"], e["type"]))
     y = ytop
-    fan_edges: List[Tuple[str, float, float]] = []   # duct kind, box bottom y, box mid y
+    fan_edges: List[Tuple[List[str], float, float]] = []   # duct kinds fed, box bottom y, box mid y
     for tag, et in tags:
         q = [r for r in qmap.get(tag, [])]
         ht = draw_fan_box(sh, inp, s, tag, et, fx, y, fw, chg, q)
-        kind = "OA" if et == "OAF" else ("TEA" if et == "TEAF" else "EA")
-        fan_edges.append((kind, y - ht, y - ht / 2))
+        fan_edges.append((tag_feeds(tag, et), y - ht, y - ht / 2))
         y -= ht + 4.0
     bottom_fans = y + 4.0
     hdr = {}
@@ -790,19 +1001,35 @@ def draw_fan_group(sh, inp, plan, s, bx, gx, ytop, qmap) -> None:
         yh -= 5.0
     x_right = gx + width - 4
     x_left = gx + 1.0
-    # fan feeders
-    lastk = [k for k, _, _ in fan_edges][-1] if fan_edges else None
-    for idx, (k, ybot, ymid) in enumerate(fan_edges):
-        if idx == len(fan_edges) - 1:
+    for idx, (kinds, ybot, ymid) in enumerate(fan_edges):
+        last = idx == len(fan_edges) - 1
+        if last and len(kinds) == 1:
+            k = kinds[0]
             xs = fx + fw / 2 + (6 if len(fan_edges) > 1 else 0)
             sh.line((xs, ybot), (xs, hdr[k]), DUCT_LAYER[k])
             sh.line((min(xs, x_left + 3), hdr[k]), (x_right, hdr[k]), DUCT_LAYER[k])
-        else:
-            xs = fx - 1.2 + (0 if k == "OA" else 0)
-            sh.line((fx, ymid), (xs, ymid), DUCT_LAYER[k])
-            sh.line((xs, ymid), (xs, hdr[k]), DUCT_LAYER[k])
+            continue
+        for j, k in enumerate(kinds):
+            xs = fx - 1.2 - 2.4 * ducts.index(k)
+            yy = ymid + (j - (len(kinds) - 1) / 2.0) * 2.4
+            sh.line((fx, yy), (xs, yy), DUCT_LAYER[k])
+            sh.line((xs, yy), (xs, hdr[k]), DUCT_LAYER[k])
             sh.line((xs, hdr[k]), (x_right, hdr[k]), DUCT_LAYER[k])
     yb_top = yh - 12.0
+    if not bx:
+        # no room box under this system: its spaces are boxed under other systems
+        owners = []
+        for sp in s["spaces"]:
+            o = plan["assigned"].get(sp["annotation_index"], "")
+            owners.append("%d (UNDER %s)" % (sp["annotation_index"], o.replace("APPD:", "")))
+        txt = "NO ROOM BOX HERE. SPACES SERVED, BOXED ELSEWHERE ON THE STOREY: " + "; ".join(owners) if owners else \
+            "NO SPACE IS TIED TO THIS EQUIPMENT ON THE LAYOUT"
+        yy = yh - 4.0
+        for ln in wrap(txt, HS, width - 4):
+            sh.text(gx + 2, yy - HS, ln, HS, "IP-NOTES", owner="nobox")
+            yy -= HS * LP
+        sh.last_bottom = yy - 1.0
+        return
     hrow = max([box_height(c) for c in bx] or [40.0])
     for j, c in enumerate(bx):
         x = gx + j * PITCH
@@ -812,22 +1039,26 @@ def draw_fan_group(sh, inp, plan, s, bx, gx, ytop, qmap) -> None:
             xk = x + 8 + 6 * m
             sh.line((xk, hdr[k]), (xk, yb_top), DUCT_LAYER[k], dashed)
     sh.last_bottom = yb_top - hrow - 1.0
-    # duct kind labels at the left end of the first header
 
 
-def levels(sh: Sheet, ymin_a: float, y_bot_b: float, yB: float, X0: float) -> None:
-    """Level lines and labels in the left margin, as on the working drawings."""
-    def mark(y: float, label: str):
+def levels(sh: Sheet, ys: List[float]) -> None:
+    """Level lines and labels in the left margin, as on the working drawings: one under each band."""
+    label = "%s STOREY LEVEL" % ORD[sh.storey]
+
+    def mark(y: float):
         sh.msp.add_line((14, y), (STRIP_X0 - 8, y), dxfattribs=dict(layer="IP-LEVELS", linetype="DASHED", ltscale=4.0))
         insert(sh, "LEVEL_MARK", 14, y - 1.0, 1.0, 1.0, "IP-LEVELS")
         sh.text(20, y + 1.2, label, 2.8, "IP-LEVELS", owner="level")
-    mark(ymin_a - 6.0, "4TH STOREY LEVEL")
-    mark(y_bot_b - 6.0, "4TH STOREY LEVEL")
-    sh.text(14, 828.0, "PLANT AND SERVED LEVEL: 4TH STOREY (FROM THE TAGS, B-04)", 2.8, "IP-LEVELS", owner="level")
+    for y in ys:
+        mark(y)
+    sh.text(14, 828.0, "PLANT AND SERVED LEVEL: %s STOREY (FROM THE TAGS, B-%02d)" % (ORD[sh.storey], sh.storey), 2.8,
+            "IP-LEVELS", owner="level")
 
 
 def caption(sh: Sheet) -> None:
-    t = "COMMON AREAS (APPENDIX D) - 4TH STOREY AIR-SIDE SCHEMATIC"
+    t = "COMMON AREAS (APPENDIX D) - %s STOREY AIR-SIDE SCHEMATIC" % ORD[sh.storey]
+    if sh.total > 1:
+        t += " - SHEET %d OF %d" % (sh.idx, sh.total)
     sh.text(14, 16.0, t, 5.0, "IP-TITLE", owner="caption")
     sh.msp.add_line((14, 13.5), (14 + tw(t, 5.0), 13.5), dxfattribs=dict(layer="IP-TITLE", lineweight=50))
 
@@ -867,8 +1098,10 @@ def strip(sh: Sheet, inp, plan, sym) -> None:
     cell(x0 + 3 * cw, x1, y, y + 11, "DRAWN", None)
     y += 11
     # drawing title
-    title = ["ACMV SERVICES", "INPATIENT 4TH STOREY AIR-SIDE", "SCHEMATIC - COMMON AREAS", "(APPENDIX D)"]
-    ht = 3.6 + 4 * 5.6 + 2
+    title = ["ACMV SERVICES", "INPATIENT %s STOREY AIR-SIDE" % ORD[sh.storey], "SCHEMATIC - COMMON AREAS", "(APPENDIX D)"]
+    if sh.total > 1:
+        title.append("SHEET %d OF %d" % (sh.idx, sh.total))
+    ht = 3.6 + len(title) * 5.6 + 2
     sh.rect(x0, y, x1, y + ht, "IP-TITLE")
     sh.text(x0 + 1.0, y + ht - 3.2, "DRAWING TITLE", HS, "IP-TITLE", owner="title")
     for i, t in enumerate(title):
@@ -898,14 +1131,17 @@ def strip(sh: Sheet, inp, plan, sym) -> None:
     # --- notes (top of the strip)
     notes = [
         "THIS SHEET HAS A PROVISIONAL NUMBER. THE DRAWING OFFICE MUST CONFIRM IT.",
-        "THE SHEET SHOWS THE COMMON-AREA SYSTEMS OF THE 4TH STOREY IN APPENDIX D. IT SHALL BE READ WITH THE ACMV NOTES AND LEGEND SHEETS IP-BH-00001 AND IP-BH-00002.",
+        "THE SHEET SHOWS COMMON-AREA SYSTEMS OF THE %s STOREY IN APPENDIX D. IT SHALL BE READ WITH THE ACMV NOTES AND LEGEND SHEETS IP-BH-00001 AND IP-BH-00002." % ORD[sh.storey]
+        + ("" if sh.total == 1 else " THE STOREY IS ON %d SHEETS: %s. EACH SYSTEM IS ON ONE SHEET." % (sh.total, ", ".join(sh.numbers))),
         "THE AREAS, MODES AND EQUIPMENT TAGS ARE AS WRITTEN IN APPENDIX D. THE DUTIES AND FAN TYPES ARE AS WRITTEN IN THE EQUIPMENT SCHEDULE.",
         "EACH VALUE HAS A CHANGE ID. THE CHANGE ID GIVES THE ENTRY IN THE SCHEMATIC UPDATE REGISTER.",
         "SPACE NAMES, SUPPLY, RETURN AND EXHAUST AIRFLOWS AND PRESSURES ARE FROM THE COMMON-AREAS WORKBOOK (D00). A VALUE THAT THE WORKBOOK DOES NOT GIVE IS SHOWN AS NOT GIVEN.",
         "APPENDIX D DOES NOT SHOW THE OUTDOOR-AIR INTAKE OR THE EXHAUST DISCHARGE. THEY ARE NOT DRAWN.",
         "A DASHED DUCT LINE SHOWS A SPACE WITH A TAG NEAR IT, NOT INSIDE IT.",
         "THE PLANT LEVEL AND THE SERVED LEVEL COME FROM THE TAGS.",
-        "THE SYMBOLS FOLLOW IP-BH-00002. A FAN WITH A TYPE IN THE SCHEDULE HAS THE LEGEND SYMBOL. A LABELLED BOX SHOWS A FAN WITH NO TYPE.",
+        "THE SYMBOLS FOLLOW IP-BH-00002. A FAN WITH A TYPE IN THE SCHEDULE HAS THE LEGEND SYMBOL. A LABELLED BOX SHOWS A FAN WITH NO TYPE. AN FCU HAS THE LEGEND SYMBOL FOR A FAN COIL UNIT.",
+        "WORKBOOK AIRFLOW IS THE LARGER VALUE OF THE COMMON-AREAS WORKBOOK, SHOWN BESIDE THE SCHEDULE DUTY (D-072).",
+        "A SPACE IS IN ONE BOX ONLY. AN EQUIPMENT TAG IS DRAWN ONCE, AT ITS SYSTEM. THE TAGS LISTED IN A SPACE BOX ARE FOR REFERENCE.",
     ]
     yn = SHEET_H - 14.0
     sh.text(x0, yn - 2.8, "NOTES:", 2.8, "IP-NOTES", owner="notes")
@@ -923,7 +1159,7 @@ def strip(sh: Sheet, inp, plan, sym) -> None:
 def key_plan(sh: Sheet, inp, plan) -> None:
     """Storey outline from the zoning polygons, with the App D spaces of this sheet filled."""
     st = "L%02d" % sh.storey
-    zr = read_csv(ROOT / "out" / "zoning" / "storeys" / st / "compat" / "registers" / ("room_polygons_%s_wkt.csv" % st))
+    zr = read_csv(REG / ("room_polygons_%s_wkt.csv" % st))
     zpoly = [swkt.loads(r["wall_face_wkt_mm"]) for r in zr if r["wall_face_wkt_mm"]]
     ap = {int(r["annotation_index"]): swkt.loads(r["polygon_building_mm_wkt"]) for r in read_csv(REG / "appd_outlines_mm.csv")
           if r["storey"] == st}
@@ -956,7 +1192,7 @@ def key_plan(sh: Sheet, inp, plan) -> None:
         for poly in (g.geoms if hasattr(g, "geoms") else [g]):
             sh.msp.add_lwpolyline(simp(poly.exterior.coords), close=True,
                                   dxfattribs=dict(layer="IP-KEYPLAN", lineweight=5))
-    shown = set(plan["assigned"])
+    shown = set(sh.shown)
     labels: List[Tuple[float, float, float, float]] = []
     for idx, g in ap.items():
         if idx not in shown:
@@ -988,8 +1224,8 @@ def key_plan(sh: Sheet, inp, plan) -> None:
             continue
         labels.append(r)
         sh.text(cx - w / 2, cy - h / 2, s, h, "IP-KEYPLAN-TEXT", owner="keyplan")
-    cap = ["KEY PLAN, 4TH STOREY (NTS)", "SPACES OF THIS SHEET IN ORANGE; NUMBER = APPENDIX D ANNOTATION",
-           "OUTLINES FROM THE ZONING ROOM POLYGONS (STOREY L04)"]
+    cap = ["KEY PLAN, %s STOREY (NTS)" % ORD[sh.storey], "SPACES OF THIS SHEET IN ORANGE; NUMBER = APPENDIX D ANNOTATION",
+           "OUTLINES FROM THE ZONING ROOM POLYGONS (STOREY L%02d)" % sh.storey]
     yy = top - 4.2
     sh.text(x0 + 1.0, yy, cap[0], 2.8, "IP-KEYPLAN-TEXT", owner="keyplan")
     for i, c in enumerate(cap[1:]):
@@ -1003,14 +1239,18 @@ def key_plan(sh: Sheet, inp, plan) -> None:
 
 def legend_list(sh: Sheet, sym, y_bot: float) -> None:
     """Symbols used (from the legend sheet) and the labelled boxes used (not in the legend)."""
-    x = 450.0
-    y = 235.0
+    x = 380.0
+    y = 96.0
     sh.text(x, y, "SYMBOLS USED (IP-BH-00002)", 3.0, "IP-LEGEND", owner="legend")
     y -= 7.0
     # AHU
     insert(sh, "SYM_AHU", x, y - 6, 18.0, 8.0, "IP-LEGEND")
     sh.symbols.append((x, y - 6, x + 18.0, y + 2, "legend AHU"))
     sh.text(x + 22, y - 3.6, "AIR HANDLING UNIT", H, "IP-LEGEND", owner="legend")
+    y -= 9.0
+    insert(sh, "SYM_FCU", x, y - 6, 18.0, 8.0, "IP-LEGEND")
+    sh.symbols.append((x, y - 6, x + 18.0, y + 2, "legend FCU"))
+    sh.text(x + 22, y - 3.6, "FAN COIL UNIT", H, "IP-LEGEND", owner="legend")
     for k in ("SA", "RA", "OA", "EA", "TEA"):
         y -= 9.0
         sh.msp.add_line((x, y), (x + 18, y), dxfattribs=dict(layer=DUCT_LAYER[k], lineweight=50))
@@ -1018,7 +1258,7 @@ def legend_list(sh: Sheet, sym, y_bot: float) -> None:
         sh.text(x + 22, y - 0.9, DUCT_NAME[k], H, "IP-LEGEND", owner="legend")
     y_col1 = y
     x += 230.0                      # second column
-    y = 235.0 - 7.0
+    y = 96.0 - 7.0
     insert(sh, "SYM_ARROW", x + 5, y, 8.0, 8.0, "IP-LEGEND")
     sh.symbols.append((x + 4.5, y - 2, x + 13.5, y + 2, "legend arrow"))
     sh.text(x + 22, y - 0.9, "AIRFLOW DIRECTION", H, "IP-LEGEND", owner="legend")
@@ -1141,55 +1381,89 @@ def render_pdf(dxf_path: Path, pdf_path: Path, png_path: Optional[Path] = None) 
     pdf.close()
 
 
-def free_number() -> str:
+def used_numbers() -> set:
     used = {m.group(1) for p in WORKING.glob("IP-BH-*") for m in [re.match(r"IP-BH-(\w{5})", p.name)] if m}
     tender = ROOT / "data" / "source" / "Basis" / "01 ACMV Tender Schematic"
     used |= {m.group(1) for p in tender.glob("IP-BH-*") for m in [re.match(r"IP-BH-(\w{5})", p.name)] if m}
     return used
 
 
+# Free numbers of the IP-BH-05xxx series.  Block 050n0..050n9 is the block of storey n in the working
+# drawings (05010 = 1st storey, 05040 = 4th storey).  The last n free numbers of the block are taken,
+# so the 4th storey keeps IP-BH-05049.  The 3rd-storey block has no free number: the next free block
+# above it (the 4th-storey block, 05043 to 05046) is used and the case is put to Marcus.
+BLOCK_ORDER = {4: [4], 2: [2], 3: [3, 4], 5: [5], 6: [6], 7: [7]}
+_TAKEN: set = set()
+
+
+def provisional_numbers(storey: int, n: int) -> List[str]:
+    used = used_numbers() | _TAKEN
+    if storey != 4:
+        used.add("05049")           # kept for the 4th storey (pilot number)
+    got: List[str] = []
+    for blk in BLOCK_ORDER[storey]:
+        free = [c for c in ("050%d%d" % (blk, d) for d in range(10)) if c not in used]
+        need = n - len(got)
+        take = free[-need:] if need > 0 else []
+        got = take + got if blk != BLOCK_ORDER[storey][0] else take
+        if len(got) >= n:
+            break
+    if len(got) < n:
+        raise RuntimeError("not enough free numbers for storey %d: need %d, got %s" % (storey, n, got))
+    _TAKEN.update(got)
+    return ["IP-BH-" + c for c in sorted(got)]
+
+
+def free_number() -> set:
+    return used_numbers()
+
+
 def provisional_number(storey: int) -> str:
-    used = free_number()
-    base = "0504" if storey == 4 else "050%d" % storey
-    for d in "9876543210":
-        cand = base + d
-        if cand not in used:
-            return "IP-BH-" + cand
-    raise RuntimeError("no free number in block %s" % base)
+    return provisional_numbers(storey, 1)[0]
 
 
-def run(storey: Optional[int] = None) -> Dict[str, Any]:
-    NEWDIR.mkdir(parents=True, exist_ok=True)
-    appd = model.build_appd()
-    if storey is None:
-        storey, why = choose_storey(appd)
-    else:
-        why = "storey given"
-    number = provisional_number(storey)
-    sh, ctx = build(storey, number)
-    dxf = NEWDIR / (number + "_P1.dxf")
-    pdf = NEWDIR / (number + "_P1.pdf")
-    png = NEWDIR / (number + "_P1.png")
+def write_sheet(sh: "Sheet") -> Dict[str, Any]:
+    dxf = NEWDIR / (sh.number + "_P1.dxf")
+    pdf = NEWDIR / (sh.number + "_P1.pdf")
+    png = NEWDIR / (sh.number + "_P1.png")
     sh.doc.saveas(dxf)
     render_pdf(dxf, pdf, png)
     vals = [dict(value_id=v.id, field=v.field, text=v.text, change_id=v.chg, source=v.src, owner=v.owner)
             for v in sh.values]
-    with open(NEWDIR / (number + "_P1_values.csv"), "w", encoding="utf-8", newline="") as fh:
+    with open(NEWDIR / (sh.number + "_P1_values.csv"), "w", encoding="utf-8", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=list(vals[0]))
         w.writeheader()
         w.writerows(vals)
-    return dict(storey=storey, why=why, number=number, dxf=dxf, pdf=pdf, png=png, sheet=sh, ctx=ctx)
+    return dict(dxf=dxf, pdf=pdf, png=png)
+
+
+def run(storey: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Build every sheet of one storey (default: the pilot storey 4)."""
+    NEWDIR.mkdir(parents=True, exist_ok=True)
+    storey = storey or 4
+    results = []
+    for sh, ctx in build_storey(storey, lambda n: provisional_numbers(storey, n)):
+        paths = write_sheet(sh)
+        results.append(dict(storey=storey, number=sh.number, sheet=sh, ctx=ctx, why="storey %d" % storey, **paths))
+    return results
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("cmd", choices=["run", "check"])
-    ap.add_argument("--storey", type=int, default=None)
+    ap.add_argument("--storey", type=int, action="append", default=None, help="storey 2 to 7; repeat; default all")
     ns = ap.parse_args(argv)
-    r = run(ns.storey)
-    print(r["why"], r["number"], r["dxf"], r["pdf"])
     from . import newdwg_check
-    return newdwg_check.main(r)
+    storeys = ns.storey or [4, 2, 3, 5, 6, 7]
+    rc = 0
+    allres = []
+    for st in storeys:
+        res = run(st)
+        for r in res:
+            print(r["number"], r["dxf"].name, r["pdf"].name)
+        rc |= newdwg_check.main_storey(res)
+        allres.append(res)
+    return rc
 
 
 if __name__ == "__main__":

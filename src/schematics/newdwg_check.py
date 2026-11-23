@@ -25,6 +25,7 @@ FMT = {
     "supply_airflow_L_s": ("SUPPLY AIRFLOW ", " L/s"),
     "outdoor_air": ("OUTDOOR AIRFLOW ", " L/s"),
     "external_resistance_Pa": ("EXTERNAL RESISTANCE ", " Pa"),
+    "workbook_airflow_L_s": ("WORKBOOK AIRFLOW ", " L/s"),
 }
 
 
@@ -74,16 +75,35 @@ def compare_registers(rb: Dict[str, Any], storey: int) -> Dict[str, Any]:
     d00 = nd.d00_cells(storey)
     errors: List[str] = []
     n_cmp = 0
+    no_chg: List[str] = []
+    sched_tags: List[str] = []
     spaces_on = set()
     tags_on: Counter = Counter()
     chg_on = set()
     for vid, v in vals.items():
         f, val, c = v["field"], v["value"], v["chg"]
         chg_on.add(c)
-        if c not in chg:
+        if f == "change_id" and val != c:
+            errors.append("%s: change ID text %r is not its change ID %r" % (vid, val, c))
+        if c == nd.NOCHG:
+            no_chg.append("%s %s %s" % (vid, f, v["display"][:40]))
+        elif c not in chg:
             errors.append("%s: change ID %s not in the register" % (vid, c))
         elif chg[c]["sheet"] != "App D":
             errors.append("%s: change ID %s is not an App D row" % (vid, c))
+        if f == "workbook_airflow_L_s":
+            n_cmp += 1
+            row = chg.get(c)
+            if not row or row["layer_type"] != "airflows" or nd.fnum(row["required"]) != val:
+                errors.append("%s: workbook airflow %r is not the required value of %s" % (vid, val, c))
+            continue
+        if f == "sched_only_tag":
+            n_cmp += 1
+            row = chg.get(c)
+            sched_tags.append(val)
+            if not row or row["item"] != val or "on no App D layout" not in row["action"]:
+                errors.append("%s: schedule-only tag %r does not match change row %s" % (vid, val, c))
+            continue
         m = re.match(r"Appendix D, (\S+), p(\d+), annotation (\d+)$", v["src"]) or \
             re.match(r"Workbook D00 tab \w+ cell (\w+); space (\d+)$", v["src"])
         if m:
@@ -104,7 +124,7 @@ def compare_registers(rb: Dict[str, Any], storey: int) -> Dict[str, Any]:
             def wbv(k):
                 x = d0.get(k)
                 return "not given" if x is None else nd.fnum(str(round(x, 1) if isinstance(x, float) else x))
-            exp = {"space_ref": "SPACE %d" % idx, "name": str(d0.get("name") or ""),
+            exp = {"space_ref": "SPACE %d" % idx, "name": nd.box_name({"d00": d00, "spaces": spaces}, idx),
                    "count": "1", "area_m2": nd.fnum(sp["printed_area_m2"] or sp["area_m2_at_1_250"]),
                    "mode": sp["mode_label"], "supply_L_s": wbv("supply"), "return_L_s": wbv("return"),
                    "exhaust_L_s": wbv("exhaust"), "pressure": wbv("pressure"), "change_id": c}
@@ -174,14 +194,18 @@ def compare_registers(rb: Dict[str, Any], storey: int) -> Dict[str, Any]:
     miss_tags = sorted({e["tag_as_written"] for e in equip} - drawn_tags_all)
     return dict(errors=errors, compared=n_cmp, spaces_in_register=len(spaces), spaces_on_drawing=len(spaces_on),
                 spaces_missing=missing_spaces, equipment_tags_in_register=len({e["tag_as_written"] for e in equip}),
-                equipment_tags_missing=miss_tags, change_ids_on_drawing=sorted(chg_on))
+                equipment_tags_missing=miss_tags, change_ids_on_drawing=sorted(chg_on),
+                spaces_on=sorted(spaces_on), tags_on=dict(tags_on), sched_only_on=sched_tags,
+                values_without_change_row=no_chg)
 
 
 def queries_on_drawing(rb, storey: int) -> Dict[str, Any]:
+    """Change IDs of the storey's query rows (and the schedule-only rows) that are in the text of this sheet."""
     chg = [r for r in csvrows(nd.OUT / "change_register.csv") if r["sheet"] == "App D" and r["layer_type"] == "queries"
-           and r["quantity"] == "Storey %d" % storey]
+           and r["quantity"] in ("Storey %d" % storey, "Level %02d" % storey)]
     joined = " ".join(t["s"] for t in rb["texts"])
-    return dict(query_rows=len(chg), missing=[r["change_id"] for r in chg if r["change_id"] not in joined])
+    return dict(query_rows=len(chg), found=sorted(r["change_id"] for r in chg if r["change_id"] in joined),
+                missing=[r["change_id"] for r in chg if r["change_id"] not in joined])
 
 
 def overlaps(rb) -> Dict[str, Any]:
@@ -203,7 +227,7 @@ def overlaps(rb) -> Dict[str, Any]:
     rects: List[Tuple[str, float, float, float, float]] = []
     for ins in msp.query("INSERT"):
         nme = ins.dxf.name
-        if nme in ("SYM_AHU", "BOX_LABELLED", "ROOMBOX"):
+        if nme in ("SYM_AHU", "SYM_FCU", "BOX_LABELLED", "ROOMBOX"):
             x, y = ins.dxf.insert.x, ins.dxf.insert.y
             rects.append((nme, x, y, x + ins.dxf.xscale, y + ins.dxf.yscale))
         elif nme == "SYM_ARROW":
@@ -226,6 +250,10 @@ def overlaps(rb) -> Dict[str, Any]:
         for t in texts:
             if seg_hits(xa, ya, xb, yb, t["x0"], t["y0"], t["x1"], t["y1"]):
                 errs.append("text/duct: %r" % t["s"][:30])
+    for t in texts:            # nothing across the strip line or outside the frame
+        if t["x0"] < nd.STRIP_X0 - 4 and t["x1"] > nd.STRIP_X0 - 4.2 or t["x1"] > nd.SHEET_W - 8 or t["x0"] < 8 \
+                or t["y0"] < 8 or t["y1"] > nd.SHEET_H - 8:
+            errs.append("text out of its area: %r" % t["s"][:30])
     return dict(errors=errs, texts=n, symbols=len(rects))
 
 
@@ -331,9 +359,10 @@ def pdf_vs_dxf(rb, pdf: Path) -> Dict[str, Any]:
                 identical=not (miss_t or extra_t or unmatched or left))
 
 
-def main(r: Dict[str, Any]) -> int:
+def sheet_report(r: Dict[str, Any]) -> Dict[str, Any]:
+    """Checks of one sheet: values against the registers, overlaps, PDF against DXF, sheet size."""
     rb = read_back(r["dxf"])
-    rep: Dict[str, Any] = dict(drawing=r["number"], storey=r["storey"], why=r["why"])
+    rep: Dict[str, Any] = dict(drawing=r["number"], storey=r["storey"])
     rep["register_comparison"] = compare_registers(rb, r["storey"])
     rep["queries"] = queries_on_drawing(rb, r["storey"])
     rep["overlap"] = overlaps(rb)
@@ -343,17 +372,88 @@ def main(r: Dict[str, Any]) -> int:
     wd = next(nd.WORKING.glob("IP-BH-05010*.pdf"))
     wp = pymupdf.open(wd)[0].rect
     rep["sheet_size_pt"] = dict(new=rep["pdf_vs_dxf"]["page_pt"], working=[round(wp.width, 1), round(wp.height, 1)])
-    ok = (not rep["register_comparison"]["errors"] and not rep["register_comparison"]["spaces_missing"]
-          and not rep["register_comparison"]["equipment_tags_missing"] and not rep["queries"]["missing"]
-          and not rep["overlap"]["errors"] and rep["pdf_vs_dxf"]["identical"]
-          and abs(rep["sheet_size_pt"]["new"][0] - rep["sheet_size_pt"]["working"][0]) < 1
-          and abs(rep["sheet_size_pt"]["new"][1] - rep["sheet_size_pt"]["working"][1]) < 1)
-    rep["pass"] = bool(ok)
-    outp = nd.NEWDIR / (r["number"] + "_P1_check.json")
-    outp.write_text(json.dumps(rep, indent=1, default=str))
-    short = dict(rep)
-    short["register_comparison"] = {k: (v if k != "change_ids_on_drawing" else len(v)) for k, v in rep["register_comparison"].items()}
-    short["register_comparison"]["errors"] = rep["register_comparison"]["errors"][:12]
-    short["overlap"] = dict(rep["overlap"], errors=rep["overlap"]["errors"][:15])
-    print(json.dumps(short, indent=1, default=str)[:6000])
-    return 0 if ok else 1
+    rep["sheet_pass"] = bool(not rep["register_comparison"]["errors"] and not rep["overlap"]["errors"]
+                             and rep["pdf_vs_dxf"]["identical"]
+                             and abs(rep["sheet_size_pt"]["new"][0] - rep["sheet_size_pt"]["working"][0]) < 1
+                             and abs(rep["sheet_size_pt"]["new"][1] - rep["sheet_size_pt"]["working"][1]) < 1)
+    rep["_texts"] = " ".join(t["s"] for t in rb["texts"])
+    return rep
+
+
+def main_storey(results: List[Dict[str, Any]]) -> int:
+    """All sheets of one storey: per-sheet checks and the coverage of spaces, tags, queries over the storey."""
+    storey = results[0]["storey"]
+    reps = [sheet_report(r) for r in results]
+    spaces = {int(r["annotation_index"]): r for r in csvrows(REG / "appd_spaces.csv") if r["storey"] == str(storey)}
+    recon = {r["appd_tag_as_written"]: r for r in csvrows(REG / "appd_schedule_reconciliation.csv")
+             if r["appd_storeys"] == str(storey)}
+    equip_tags = {e["tag_as_written"] for e in csvrows(REG / "appd_equipment.csv") if e["storey"] == str(storey)}
+    space_sheet: Dict[int, List[str]] = defaultdict(list)
+    tag_sheet: Dict[str, List[str]] = defaultdict(list)
+    sched_sheet: Dict[str, List[str]] = defaultdict(list)
+    for rep in reps:
+        rc = rep["register_comparison"]
+        for i in rc["spaces_on"]:
+            space_sheet[i].append(rep["drawing"])
+        for t, n in rc["tags_on"].items():
+            tag_sheet[t] += [rep["drawing"]] * n
+        for t in rc["sched_only_on"]:
+            sched_sheet[t].append(rep["drawing"])
+    joined = " ".join(rep["_texts"] for rep in reps)
+    qrows = [r for r in csvrows(nd.OUT / "change_register.csv") if r["sheet"] == "App D" and r["layer_type"] == "queries"
+             and r["quantity"] in ("Storey %d" % storey, "Level %02d" % storey)]
+    q_missing = [r["change_id"] for r in qrows if r["change_id"] not in joined]
+    cov = dict(
+        storey=storey, sheets=[r["number"] for r in results],
+        spaces_in_register=len(spaces),
+        spaces_not_in_exactly_one_box=sorted(i for i in spaces if len(space_sheet.get(i, [])) != 1),
+        spaces_on_unknown=sorted(i for i in space_sheet if i not in spaces),
+        tags_in_register=len(equip_tags | set(recon)),
+        tags_not_drawn_exactly_once=sorted(t for t in (equip_tags | set(recon)) if len(tag_sheet.get(t, [])) != 1),
+        tags_drawn_not_in_register=sorted(t for t in tag_sheet if t not in (equip_tags | set(recon))),
+        schedule_only_rows=len([r for r in qrows if "on no App D layout" in r["action"]]),
+        schedule_only_listed=len(sched_sheet),
+        queries_in_register=len(qrows), queries_missing=q_missing,
+        values_without_change_row=sorted({x for rep in reps for x in rep["register_comparison"]["values_without_change_row"]}),
+    )
+    cov["pass"] = bool(all(rep["sheet_pass"] for rep in reps) and not cov["spaces_not_in_exactly_one_box"]
+                       and not cov["spaces_on_unknown"] and not cov["tags_not_drawn_exactly_once"]
+                       and not cov["tags_drawn_not_in_register"] and not q_missing
+                       and cov["schedule_only_rows"] == cov["schedule_only_listed"])
+    # coverage table: every tag and space, with its drawing or the reason
+    rows = []
+    for t in sorted(equip_tags | set(recon)):
+        rr = recon.get(t, {})
+        rows.append(dict(kind="App D layout tag", item=t, schedule_form=rr.get("schedule_tag_as_written", "") or "not in the schedule",
+                         drawing=";".join(sorted(set(tag_sheet.get(t, [])))) or "NOT DRAWN",
+                         reason="drawn once at its system"))
+    for r in sorted(qrows, key=lambda r: r["item"]):
+        if "on no App D layout" in r["action"]:
+            rows.append(dict(kind="Schedule tag on no layout", item=r["item"], schedule_form=r["item"],
+                             drawing=";".join(sched_sheet.get(r["item"], [])) or "NOT LISTED",
+                             reason="not drawn: no App D layout shows it; listed in the table with %s" % r["change_id"]))
+    for i in sorted(spaces):
+        rows.append(dict(kind="Highlighted space", item="SPACE %d" % i, schedule_form="",
+                         drawing=";".join(space_sheet.get(i, [])) or "NOT IN A BOX", reason="room box"))
+    with open(nd.NEWDIR / ("appd_L%02d_coverage.csv" % storey), "w", encoding="utf-8", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    for r, rep in zip(results, reps):
+        rep.pop("_texts", None)
+        rc = rep["register_comparison"]
+        for k in ("spaces_on", "tags_on", "sched_only_on"):
+            rc.pop(k, None)
+        rep["storey_coverage"] = cov
+        rep["pass"] = bool(rep["sheet_pass"] and cov["pass"])
+        (nd.NEWDIR / (r["number"] + "_P1_check.json")).write_text(json.dumps(rep, indent=1, default=str))
+        rc2 = dict(rc, change_ids_on_drawing=len(rc["change_ids_on_drawing"]), errors=rc["errors"][:8])
+        print(r["number"], "values compared", rc["compared"], "errors", len(rc["errors"]), "overlap", len(rep["overlap"]["errors"]),
+              "pdf identical", rep["pdf_vs_dxf"]["identical"], "sheet pass", rep["sheet_pass"],
+              "spaces on sheet", rc["spaces_on_drawing"])
+        if rc["errors"]:
+            print("   ", rc["errors"][:6])
+        if rep["overlap"]["errors"]:
+            print("   ", rep["overlap"]["errors"][:8])
+    print("storey", storey, "coverage pass", cov["pass"], {k: v for k, v in cov.items() if k not in ("sheets",) and v not in ([], 0)})
+    return 0 if cov["pass"] else 1
