@@ -251,3 +251,12 @@ electrical_rooms:
   class: FCU_duty_standby
   tag_source_order: [equipment_schedule_corr5, airside_schematic, "FCU duty/standby (tag to confirm)"]
   list_changes_from: [plan_mode_label, earlier_assignment]
+
+# D-030..D-033 (Marcus, 23 Nov 2026)
+supply_floor_from_exhaust: none_without_pressure_offset      # D-030
+single_pass_rule:                                             # D-031
+  sets_ahu_oa_fraction_when: "100 % OA required for clean/sterile supply (single pass Y with air class 1 or HEPA, isolation, protective, theatre, or specified)"
+  dirty_rooms: {supply: recirculated_from_department_ahu, exhaust: dedicated, return: none, sets_fraction: false}
+  classification_status: ASSUMPTION
+ahu_balance: per_room_then_ahu                                # D-032: OA, recirculated, spill, supply adjusted at AHU
+oa_per_area_or_person_is_supply_floor: true                   # D-033
