@@ -50,7 +50,9 @@ TENDER_SC = 2.0                 # tender render, px per pt (44.1 mm per px at 1:
 BOOK_SC = 2.0                   # booklet render, px per pt
 BOOK_SCALES = [1.5, 1.0, 0.7, 0.5, 0.35]   # extra resize factors of the booklet render (the plan scale of a booklet differs from the tender)
 RANSAC_THR_PX = 3.0             # inlier threshold, tender px (about 130 mm)
-MIN_INLIERS = 15
+MIN_INLIERS = 8                 # feature inliers; the dense edge correlation below is the main independent check
+MIN_NCC = 0.18                  # edge correlation of the warped keyplan with the tender sheet at the fit
+NCC_RATIO = 1.6                 # ... and at least this multiple of the best correlation at shifts of 15 to 40 px (a wrong fit has no peak)
 MAX_RESIDUAL_MM = 1500.0        # task rule: reject fits above 1.5 m
 MIN_SPAN_FRAC = 0.2             # inliers must span this share of the keyplan width and height
 MIN_ROOM_OVERLAP = 0.30         # share of the zone area that must fall on tender room polygons (independent check)
@@ -695,66 +697,126 @@ class Tender:
 
     def render_gray(self):
         import pymupdf
-        pg = pymupdf.open(str(self.root / TENDER_PDF))[self.page_no - 1]
-        pm = pg.get_pixmap(matrix=pymupdf.Matrix(TENDER_SC, TENDER_SC), colorspace=pymupdf.csGRAY)
-        return np.frombuffer(pm.samples, np.uint8).reshape(pm.height, pm.width)
+        if getattr(self, "_gray", None) is None:
+            pg = pymupdf.open(str(self.root / TENDER_PDF))[self.page_no - 1]
+            pm = pg.get_pixmap(matrix=pymupdf.Matrix(TENDER_SC, TENDER_SC), colorspace=pymupdf.csGRAY)
+            self._gray = np.frombuffer(pm.samples, np.uint8).reshape(pm.height, pm.width)
+        return self._gray
 
     @property
     def mm_per_px(self) -> float:
         return float(math.sqrt(abs(np.linalg.det(self.A_pv_mm[:, :2])))) / TENDER_SC
 
 
+def _edge_map(g: np.ndarray) -> np.ndarray:
+    import cv2
+    b = cv2.GaussianBlur(g, (0, 0), 1.5).astype(np.float32)
+    return np.hypot(cv2.Sobel(b, cv2.CV_32F, 1, 0), cv2.Sobel(b, cv2.CV_32F, 0, 1))
+
+
+def _ncc(a: np.ndarray, b: np.ndarray, m: np.ndarray) -> float:
+    a, b = a[m], b[m]
+    a = a - a.mean()
+    b = b - b.mean()
+    d = math.sqrt(float((a * a).sum() * (b * b).sum()))
+    return float((a * b).sum() / d) if d > 0 else 0.0
+
+
+def verify_fit(tender_gray: np.ndarray, book_gray: np.ndarray, M: np.ndarray, s: float = 0.5) -> Tuple[float, float]:
+    """Independent check of a fit: normalised correlation of the edge maps of the warped keyplan and the tender sheet, at the fit and at
+    shifts of 15 to 40 px (at scale ``s``).  Returns (ncc at the fit, best ncc at a shift)."""
+    import cv2
+    Mw = compose(M, np.array([[s, 0, 0], [0, s, 0]]))
+    h, w = tender_gray.shape
+    W, H = int(w * s), int(h * s)
+    warped = cv2.warpAffine(book_gray, Mw, (W, H), flags=cv2.INTER_AREA, borderValue=0)
+    mask = cv2.warpAffine(np.full(book_gray.shape, 255, np.uint8), Mw, (W, H)) > 250
+    if mask.sum() < 2500:
+        return 0.0, 1.0
+    ts = cv2.resize(tender_gray, (W, H), interpolation=cv2.INTER_AREA)
+    ys, xs = np.where(mask)
+    y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+    ea = _edge_map(warped)[y0:y1, x0:x1]
+    et = _edge_map(ts)[y0:y1, x0:x1]
+    m = cv2.erode(mask[y0:y1, x0:x1].astype(np.uint8), np.ones((15, 15), np.uint8)) > 0
+    if m.sum() < 1000:
+        return 0.0, 1.0
+    n0 = _ncc(ea, et, m)
+    sh = []
+    for dy in range(-40, 41, 10):
+        for dx in range(-40, 41, 10):
+            if max(abs(dx), abs(dy)) < 15:
+                continue
+            sh.append(_ncc(ea, np.roll(et, (dy, dx), (0, 1)), m))
+    return n0, max(sh)
+
+
 def register_page(tender: Tender, gray: np.ndarray) -> dict:
-    """Register a rendered keyplan (grey, BOOK_SC px/pt) to the tender: returns a dict with M_px (keyplan px -> tender px), residual and checks."""
+    """Register a rendered keyplan (grey, BOOK_SC px/pt) to the tender: returns a dict with ``M`` (keyplan px -> tender px), residual and checks.
+
+    Candidates: the keyplan as rendered and contrast-equalised (CLAHE), each at several resize factors.  The three with most inliers are
+    checked by the edge correlation; the first that passes is taken."""
     import cv2
     pts_t, des_t = tender.features()
     sift = cv2.SIFT_create()
-    best = None
+    variants = [("raw", gray), ("clahe", cv2.createCLAHE(3.0, (8, 8)).apply(gray))]
+    cands = []
     log = []
-    for bs in BOOK_SCALES:
-        img = cv2.resize(gray, None, fx=bs, fy=bs, interpolation=cv2.INTER_AREA if bs < 1 else cv2.INTER_CUBIC)
-        kp, des = sift.detectAndCompute(img, None)
-        src, dst = match_features(kp, des, pts_t, des_t)
-        src = src / bs
-        if len(src) < MIN_INLIERS:
-            log.append("scale %.2f: %d matches" % (bs, len(src)))
-            continue
-        n, M, inl = ransac_similarity(src, dst, RANSAC_THR_PX, SCALE_RANGE[0], SCALE_RANGE[1])
-        if M is None:
-            log.append("scale %.2f: no similarity" % bs)
-            continue
-        M, inl = refine_similarity(src, dst, M, RANSAC_THR_PX)
-        log.append("scale %.2f: %d matches, %d inliers" % (bs, len(src), int(inl.sum())))
-        if best is None or inl.sum() > best["n"]:
-            best = {"n": int(inl.sum()), "M": M, "src": src[inl], "dst": dst[inl], "n_matches": len(src)}
-    res = {"ok": False, "log": "; ".join(log), "n_inliers": best["n"] if best else 0}
-    if not best:
-        res["reason"] = "no feature matches between the keyplan and the tender plan (%s)" % res["log"]
+    for vname, vimg in variants:
+        for bs in BOOK_SCALES:
+            img = cv2.resize(vimg, None, fx=bs, fy=bs, interpolation=cv2.INTER_AREA if bs < 1 else cv2.INTER_CUBIC)
+            kp, des = sift.detectAndCompute(img, None)
+            src, dst = match_features(kp, des, pts_t, des_t)
+            src = src / bs
+            if len(src) < MIN_INLIERS:
+                log.append("%s x%.2f: %d matches" % (vname, bs, len(src)))
+                continue
+            n, M, inl = ransac_similarity(src, dst, RANSAC_THR_PX, SCALE_RANGE[0], SCALE_RANGE[1])
+            if M is None:
+                log.append("%s x%.2f: no similarity" % (vname, bs))
+                continue
+            M, inl = refine_similarity(src, dst, M, RANSAC_THR_PX)
+            log.append("%s x%.2f: %d matches, %d inliers" % (vname, bs, len(src), int(inl.sum())))
+            if inl.sum() >= MIN_INLIERS:
+                cands.append({"n": int(inl.sum()), "M": M, "src": src[inl], "dst": dst[inl], "variant": "%s x%.2f" % (vname, bs)})
+    res = {"ok": False, "log": "; ".join(log), "n_inliers": max([c["n"] for c in cands], default=0)}
+    if not cands:
+        res["reason"] = "too few matching features between the keyplan and the tender sheet (best %d inliers, need %d)" % (res["n_inliers"], MIN_INLIERS)
         return res
-    M = best["M"]
+    cands.sort(key=lambda c: -c["n"])
     A = tender.A_pv_mm
-    # residual in building mm: both point sets through pv -> mm
-    mapped = apply_affine(M, best["src"]) / TENDER_SC
-    target = best["dst"] / TENDER_SC
-    d_mm = np.linalg.norm(apply_affine(A, mapped) - apply_affine(A, target), axis=1)
-    rms = float(np.sqrt((d_mm ** 2).mean()))
-    sx = best["src"]
-    span = (np.ptp(sx[:, 0]) / gray.shape[1], np.ptp(sx[:, 1]) / gray.shape[0])
-    scale_tp = math.hypot(M[0, 0], M[1, 0])           # tender px per keyplan px
-    rot = math.degrees(math.atan2(M[1, 0], M[0, 0]))
-    res.update({"M": M, "n_inliers": best["n"], "rms_mm": rms, "span": span, "scale_tender_per_book": scale_tp, "rot_deg": rot,
-                "mm_per_book_px": scale_tp * tender.mm_per_px})
-    reasons = []
-    if best["n"] < MIN_INLIERS:
-        reasons.append("only %d inlier features (need %d)" % (best["n"], MIN_INLIERS))
-    if rms > MAX_RESIDUAL_MM:
-        reasons.append("residual %.0f mm above %.0f mm" % (rms, MAX_RESIDUAL_MM))
-    if min(span) < MIN_SPAN_FRAC:
-        reasons.append("inliers span only %.0f%% x %.0f%% of the keyplan" % (100 * span[0], 100 * span[1]))
-    res["ok"] = not reasons
-    if reasons:
-        res["reason"] = "; ".join(reasons)
-    return res
+    tg = tender.render_gray()
+    why = []
+    for best in cands[:3]:
+        M = best["M"]
+        mapped = apply_affine(M, best["src"]) / TENDER_SC
+        target = best["dst"] / TENDER_SC
+        d_mm = np.linalg.norm(apply_affine(A, mapped) - apply_affine(A, target), axis=1)
+        rms = float(np.sqrt((d_mm ** 2).mean()))
+        sx = best["src"]
+        span = (float(np.ptp(sx[:, 0]) / gray.shape[1]), float(np.ptp(sx[:, 1]) / gray.shape[0]))
+        scale_tp = math.hypot(M[0, 0], M[1, 0])
+        n0, nsh = verify_fit(tg, variants[1][1], M)
+        r = {"ok": False, "log": res["log"], "M": M, "n_inliers": best["n"], "rms_mm": rms, "span": span, "scale_tender_per_book": scale_tp,
+             "rot_deg": math.degrees(math.atan2(M[1, 0], M[0, 0])), "mm_per_book_px": scale_tp * tender.mm_per_px, "ncc": n0, "ncc_shift_max": nsh,
+             "variant": best["variant"]}
+        reasons = []
+        if rms > MAX_RESIDUAL_MM:
+            reasons.append("residual %.0f mm above %.0f mm" % (rms, MAX_RESIDUAL_MM))
+        if min(span) < MIN_SPAN_FRAC:
+            reasons.append("inliers span only %.0f%% x %.0f%% of the keyplan" % (100 * span[0], 100 * span[1]))
+        if n0 < MIN_NCC or n0 < NCC_RATIO * nsh:
+            reasons.append("edge correlation %.2f at the fit against %.2f at shifted positions: no peak (need >= %.2f and >= %.1f x)" % (
+                n0, nsh, MIN_NCC, NCC_RATIO))
+        r["ok"] = not reasons
+        if reasons:
+            r["reason"] = "%s (%d inliers, %s)" % ("; ".join(reasons), best["n"], best["variant"])
+            why.append(r)
+            continue
+        return r
+    out = why[0]
+    out["reason"] = " | ".join(w["reason"] for w in why)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -1011,8 +1073,10 @@ def write_report(root: Path, results_by_key: Dict[str, List[dict]], tenders: Dic
              "(raster; flagged image-read and listed for a second read below).")
     L.append("- Registration: SIFT features of the rendered keyplan matched to the rendered tender sheet of the storey, similarity fit by RANSAC and "
              "refit on the inliers; tender page view tied to building mm by an affine fitted to the vertices of `room_polygons_<KEY>.csv`. "
-             "Rejected above %.0f mm residual, below %d inliers, if the inliers span less than %.0f%% of the keyplan, or if less than %.0f%% of the zone "
-             "area falls on tender rooms (independent check)." % (MAX_RESIDUAL_MM, MIN_INLIERS, 100 * MIN_SPAN_FRAC, 100 * MIN_ROOM_OVERLAP))
+             "Rejected above %.0f mm residual, below %d inliers, if the inliers span less than %.0f%% of the keyplan, if the edge correlation of the warped "
+             "keyplan with the tender sheet at the fit is below %.2f or below %.1f x its best value at shifts of 15 to 40 px (independent check: a wrong fit "
+             "has no correlation peak), or if less than %.0f%% of the zone area falls on tender rooms." % (
+                 MAX_RESIDUAL_MM, MIN_INLIERS, 100 * MIN_SPAN_FRAC, MIN_NCC, NCC_RATIO, 100 * MIN_ROOM_OVERLAP))
     L.append("- The fills of these pages are coloured by operating mode of the page legend (for example Recirculation, Single Pass, Recirculation with "
              "HEPA, AC, MV), not one colour per AHU. The AHU of a zone is read from the tag box whose leader line ends in the zone, else the tag printed "
              "inside the zone, else the nearest tag (confidence low). A zone without such a link has a blank AHU tag.")
@@ -1039,8 +1103,8 @@ def write_report(root: Path, results_by_key: Dict[str, List[dict]], tenders: Dic
     L.append("")
     L.append("## Per page result")
     L.append("")
-    L.append("| Storey | Booklet file | Page | Title as printed | Result | Zones | With AHU tag | Residual mm | Inliers | Scale mm/pt | Room overlap | Note |")
-    L.append("|---|---|---:|---|---|---:|---:|---:|---:|---:|---:|---|")
+    L.append("| Storey | Booklet file | Page | Title as printed | Result | Zones | With AHU tag | Residual mm | Inliers | Edge corr. fit / shifted | Scale mm/pt | Room overlap | Note |")
+    L.append("|---|---|---:|---|---|---:|---:|---:|---:|---|---:|---:|---|")
     for key in STOREYS:
         for r in results_by_key.get(key, []):
             i = r["info"]
@@ -1048,10 +1112,11 @@ def write_report(root: Path, results_by_key: Dict[str, List[dict]], tenders: Dic
             reg = r.get("reg", {})
             note = r.get("reason", "")
             if r["status"] == "registered":
-                note = (r.get("method", "")[:60])
-            L.append("| %s | %s | %d | %s | %s | %d | %d | %s | %s | %s | %s | %s |" % (
+                note = "%s; %s" % (r.get("method", "").split(" (")[0].split(",")[0], reg.get("variant", ""))
+            L.append("| %s | %s | %d | %s | %s | %d | %d | %s | %s | %s | %s | %s | %s |" % (
                 key, Path(i["file"]).name, i["page"], i["title"], r["status"], len(rows), sum(1 for x in rows if x["ahu_tag_as_printed"]),
                 ("%.0f" % reg["rms_mm"]) if "rms_mm" in reg else "", reg.get("n_inliers", ""),
+                ("%.2f / %.2f" % (reg["ncc"], reg["ncc_shift_max"])) if "ncc" in reg else "",
                 ("%.1f" % math.sqrt(abs(np.linalg.det(r["pt2mm"][:, :2])))) if "pt2mm" in r else "",
                 ("%.0f %%" % (100 * r["room_overlap"])) if "room_overlap" in r else "", note.replace("|", "/")))
     L.append("")

@@ -131,16 +131,8 @@ def _read(path: Path) -> List[Dict[str, str]]:
 
 
 def _regime(text: str) -> Optional[str]:
-    t = (text or "").upper()
-    if not t or t == "NA":
-        return None
-    if "-VE" in t or "NEGATIVE" in t or re.match(r"\s*-\s*\d", t):
-        return "NEGATIVE"
-    if "+VE" in t or "POSITIVE" in t or re.match(r"\s*\+\s*\d", t):
-        return "POSITIVE"
-    if "NEUTRAL" in t or t.strip() in ("0", "0 PA"):
-        return "NEUTRAL"
-    return None
+    from .presume import printed_regime
+    return printed_regime(text)
 
 
 def _pa(text: Optional[str]) -> Optional[float]:
@@ -1405,6 +1397,13 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
                 gaps["occupancy"] = ("Occupancy is not set. " + ("The RDS field is empty." if rds is not None else "No RDS row matches.") +
                                      (f" The density table has no value for this room use ({label.split(' (')[0]}). " if label else f" The room name '{d['name']}' does not say what the room is used for, so no room use fits it for the default density. ") +
                                      "Give the number of persons.")
+        if re.search(r"\.\.|\.$", number):
+            gaps["number"] = (f"The room number '{number}' in the DPA is incomplete: it ends in full stops where the storey and the room digits are missing. "
+                              "The number is kept as the DPA prints it. Confirm the room number.")
+        _c0 = room.get("criteria") or {}
+        if (_c0.get("oa_lps_per_person") or 0) > 0 and (room.get("occupancy_people") == 0 or room.get("occupancy_per_100m2") == 0):
+            gaps["oa_person"] = (f"The criteria row prints {_c0['oa_lps_per_person']:g} L/s of outdoor air per person. The occupancy of this room is 0 persons, so this rate gives no outdoor air "
+                                 "and the outdoor air is 0 unless another value sets it. Confirm the occupancy.")
         # D-025: plug load and lighting from the ASHRAE values of the room use (no project document gives them). Cells red, note in Remarks.
         lk, lwhy = load_use(d["name"])
         if lk and lk in plug_tab and lk in light_tab:

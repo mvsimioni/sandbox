@@ -43,9 +43,9 @@ def _reason_crit(room: Dict[str, Any]) -> str:
     if "plant room" in g:
         return "plant room: no row from the use class (open for Marcus)"
     if "negative-pressure or single-pass rows" in g:
-        return "the only rows with the main word of the name are negative-pressure or single-pass rows, and the name does not say toilet, dirty or isolation"
-    if "with the main word" in g:
-        return "no other department prints a row of the same use class with the main word of the name"
+        return "the only rows that print the same space are negative-pressure or single-pass rows, and the name does not say toilet, dirty or isolation"
+    if "for the same space in the use class" in g:
+        return "no other department prints the same space (the words of the name before its qualifier) in a row of the same use class"
     if "does not give a room use" in g:
         return "the room name gives no room use and no other department prints the name"
     if "no other department has a criteria row for the use class" in g:
@@ -66,6 +66,8 @@ def collect() -> Dict[str, Any]:
         names_crit: Dict[str, int] = collections.defaultdict(int)
         names_oa: Dict[str, int] = collections.defaultdict(int)
         names_area: Dict[str, int] = collections.defaultdict(int)
+        zero_person: List[str] = []
+        bad_number: List[str] = []
         for r in rooms:
             st["rooms"] += 1
             if r.get("ahu"):
@@ -82,7 +84,7 @@ def collect() -> Dict[str, Any]:
                 names_crit[r["name"]] += 1
             elif c.get("presumed"):
                 st["presumed"] += 1
-                if "main word" in (c.get("remark") or ""):
+                if "same space name" in (c.get("remark") or ""):
                     st["presumed_by_use"] += 1
             elif c.get("code") == "S":
                 st["mot"] += 1
@@ -93,6 +95,12 @@ def collect() -> Dict[str, Any]:
             if c and not any(c.get(k) not in (None, "", 0) for k in ("min_oa_ach", "oa_lps_per_person", "oa_lps_per_m2", "oa_specified_lps")):
                 st["no_oa"] += 1
                 names_oa[c.get("criteria_row") or ""] += 1
+            if (r.get("gaps") or {}).get("oa_person"):
+                st["oa_zero_person"] += 1
+                zero_person.append(f"D{num} {r['number']} {r['name']} ({c.get('criteria_row')}: {c.get('oa_lps_per_person'):g} L/s per person)")
+            if (r.get("gaps") or {}).get("number"):
+                st["incomplete_number"] += 1
+                bad_number.append(f"D{num} {r['number']}")
             if not (r.get("soa_area_m2") or r.get("dpa_area_m2") or r.get("measured_area_m2")):
                 st["no_area"] += 1
                 names_area[r["name"]] += 1
@@ -115,7 +123,7 @@ def collect() -> Dict[str, Any]:
                 st["p_rooms"] += 1
                 st["p_plan" if r["pressure"].get("perimeter_m") else "p_assumed"] += 1
         out[num] = dict(name=d["department"]["name"], st=st, res_unit=res_unit, res_crit=res_crit, res_occ=res_occ, res_load=res_load, names_crit=names_crit,
-                        names_oa=names_oa, names_area=names_area, stats=d.get("assemble_stats", {}))
+                        names_oa=names_oa, names_area=names_area, zero_person=zero_person, bad_number=bad_number, stats=d.get("assemble_stats", {}))
     return out
 
 
@@ -145,22 +153,27 @@ def d00_section() -> str:
     by_kind = collections.Counter()
     for r in pres:
         c = r["criteria"]
-        by_kind["circulation default" if c.get("criteria_row", "").startswith("Circulation default") else "booklet row of the same name (most frequent)" if "most frequent row" in (c.get("remark") or "") else "use class and main word"] += 1
+        by_kind["circulation default" if c.get("criteria_row", "").startswith("Circulation default") else "booklet row of the same name (most frequent)" if "most frequent row" in (c.get("remark") or "") else "use class and the same space name"] += 1
     L = ["## 3a. Common areas (D00): criteria\n",
          f"{len(rooms)} spaces. {len(pres)} take presumed criteria (italic green, Remarks 'Presumed criteria: taken from ...'): " + "; ".join(f"{n} {k}" for k, n in by_kind.most_common()) + f". {len(none)} have no criteria row. "
          "D00 has no booklet of its own, so every row of a booklet is a presumed row.\n"]
+    from ..workbook.assemble import room_use
+    from ..workbook.common_areas import plant_names
     groups: Dict[str, List[str]] = collections.defaultdict(list)
     for r in none:
         g = (r.get("gaps") or {}).get("criteria", "")
-        if g.startswith("Plant space"):
-            k = "plant or electrical space: no criteria row (the plant-room criteria are open for Marcus)"
-        elif "several names" in g:
+        nm = r["name"]
+        parts = [x for x in re.split(r"\s/\s", nm) if x.strip()]
+        use = room_use(nm)[0] if len(parts) < 2 else None
+        if g.startswith("Plant space") or use == "plant_room":
+            k = "plant, electrical or comms space: no criteria row (the plant-room criteria are open for Marcus)"
+        elif len(parts) >= 2 or "several names" in g:
             k = "outline with several names that do not give one room use"
-        elif "does not give a room use" in g or "gives no room use" in g or g.startswith("No booklet room type fits"):
-            k = "the name does not give a room use (abbreviation or word that no document explains)"
+        elif use is not None:
+            k = "the name gives a room use, but no other department prints the same space (see the room use in brackets)"
         else:
-            k = "other"
-        groups[k].append(r["name"])
+            k = "the name does not give a room use (abbreviation or word that no document explains)"
+        groups[k].append(nm if k.startswith("outline") or use is None or use == "plant_room" else f"{nm} [{use.replace('_', ' ')}]")
     for k, names in sorted(groups.items(), key=lambda kv: -len(kv[1])):
         cnt = collections.Counter(names)
         L.append(f"- {len(names)} spaces, {k}: " + ", ".join(f"{n} ({c})" for n, c in cnt.most_common(40)) + ("; and others" if len(cnt) > 40 else "") + ".")
@@ -176,10 +189,16 @@ def outdoor_air_section(data: Dict[str, Any]) -> str:
     for v in data.values():
         t.update(v["st"])
         rows.update(v["names_oa"])
+    zp = [x for v in data.values() for x in v["zero_person"]]
+    bn = [x for v in data.values() for x in v["bad_number"]]
     L = ["## 3b. Outdoor air of the criteria rows\n",
          f"{t['no_oa']} of the rooms with a criteria row have no outdoor-air value (no air-change value, no per-person or per-area rate, no specified value). "
          "The printed text of the row is a dash, NA, a standard reference (SS 553) or blank. The most frequent rows: " +
          ", ".join(f"{k} ({n})" for k, n in rows.most_common(12)) + ". For these rooms the outdoor air stays 0 and the Remarks of the criteria row show the printed text; no value is assumed.\n"]
+    L.append(f"Another group has a printed rate and still has no outdoor air: the row prints a rate per person and the occupancy of the room is 0 persons (an RDS value of 'n/a' or 0, D-018). "
+             f"{len(zp)} room(s): " + ("; ".join(zp) if zp else "none") + ". The outdoor air of each is 0, and each has a VERIFY flag on Flags that states the rate and the occupancy. The occupancy stays as the RDS gives it until Marcus or the room data sheet owner confirms it.\n")
+    L.append(f"Room numbers that the DPA prints incomplete (the number ends in full stops where digits are missing): {len(bn)} room(s): " + (", ".join(bn) if bn else "none") +
+             ". The number is kept as the DPA prints it, so those cells (Room Information, Sources, Flags, Basis of Design) show the full stops of the source. Each room has a VERIFY flag to confirm the number.\n")
     return "\n".join(L)
 
 

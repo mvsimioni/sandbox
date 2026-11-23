@@ -4,17 +4,19 @@ Order of the match (``presumed_criteria.match_order`` of the project configurati
 
 1. ``same_room_type_code``: a room data sheet of another department has the same room type code, and the room type that it names has a criteria row there;
 2. ``same_name``: a criteria row of another department prints the same room type name (or lists the name inside a multi-name row);
-3. ``same_use_class``: a criteria row of another department whose room type has the same room use (the use rules that give the default occupancy) AND the same
-   main word in the room type name (the last word of the room name before its qualifier: 'Toilet - Accessible' and 'Toilet', 'Office - Typical' and 'MMD Office').
-   A row that has only the use class in common ('Space for Roll Call' and a laboratory header row, 'Bay - Linen' and a dirty utility row) is not the same space and
-   is not taken: the room then has no criteria row and is listed with the reason.
+3. ``same_use_class``: a criteria row of another department prints the same space. The room type has the same room use (the use rules that give the default occupancy) AND the
+   same words before its qualifier: the content words of the room name before ' - ', a comma or a bracket are the same set as the content words of a name that the row prints,
+   with the level prefix and the words of the department name taken away ('Toilet - Accessible' and 'Toilets'; 'Office - Typical' and 'MMD Office'). One word that the two names
+   share is not enough ('Pre-op Hold' and 'Disposal Hold', 'Recipe Lab' and 'Computer Lab', 'Last Office (Hold)' and 'Office' are not the same space). A row at negative pressure
+   (printed '-ve', '-10 Pa', 'Negative') or on single pass is taken only for a room whose name says toilet, dirty or isolation. A row that is not the same space is not taken: the
+   room then has no criteria row and is listed with the reason.
 
 Before these steps the booklet of the room's own department is read (``find_own``): a row of the own booklet that prints the same space with a level or department
 prefix, or with a number in brackets ('L6 Admin Workspace Office' for 'Office - Typical'; 'Lecture Room (64)' for 'Lecture Room') is the row of the room. It is a
 mapped row of the own booklet (code A, to confirm), not a presumed row: D-026 applies only where the own department has no row for the space.
 
-Closest department: clinical rooms prefer clinical departments (departments 01 to 29 of the booklets, Laboratory Medicine included); then the closest room type name;
-then the department whose booklet prints most of the same room types as the booklet of the room's own department; then the lower department number. A plant room takes
+Closest department: clinical rooms prefer clinical departments (departments 01 to 29 of the booklets, Laboratory Medicine included); then the
+department whose booklet prints most of the same room types as the booklet of the room's own department; then the lower department number. A plant room takes
 a row only by the first two steps: no row is presumed for a plant room from its use class (the criteria of plant rooms are open for Marcus). The booklet and the page
 of the row stay as the source.
 """
@@ -35,7 +37,7 @@ CLINICAL_USES = {"patient_room", "medical_procedure", "operating_room", "recover
 
 STOP_WORDS = {"room", "rooms", "rm", "area", "bay", "type", "typical", "and", "the", "of", "for", "a", "an", "with", "no", "sqm", "m2", "future", "space", "zone", "up", "out", "in", "on", "off", "to", "at"}
 SYNONYM = {"ensuite": "toilet", "wc": "toilet", "lavatory": "toilet", "storeroom": "store", "storage": "store", "collaboration": "collab", "conference": "meeting",
-           "lect": "lecture", "cleaners": "cleaner"}
+           "lect": "lecture", "cleaners": "cleaner", "sanitary": "toilet"}
 
 
 def _norm(s: Optional[str]) -> str:
@@ -89,13 +91,39 @@ def _page(row: Dict[str, str]) -> float:
         return 0.0
 
 
+def printed_regime(text: Optional[str]) -> Optional[str]:
+    """Pressure regime of the printed text of a booklet row: NEGATIVE ('-ve', '- ve', 'Negative', '-10 Pa', '-5'), POSITIVE ('+ve', 'Positive', '+5', '30'), NEUTRAL or None.
+    A number with no sign is a positive pressure (the booklet prints '30' and '15' for the positive-pressure isolation rooms of the ICU)."""
+    t = (text or "").upper().strip()
+    if not t or t == "NA":
+        return None
+    if re.search(r"-\s*VE\b|NEGATIVE|^[-\u2212]\s*\d", t):
+        return "NEGATIVE"
+    if re.search(r"\+\s*VE\b|POSITIVE|^\+\s*\d|^\d+(?:\.\d+)?\s*(?:PA)?$", t) and not re.fullmatch(r"0(?:\.0+)?\s*(?:PA)?", t):
+        return "POSITIVE"
+    if "NEUTRAL" in t or "NEULTRAL" in t or re.fullmatch(r"0(?:\.0+)?\s*(?:PA)?", t):
+        return "NEUTRAL"
+    return None
+
+
 # A row at negative pressure or on single pass is a row for a toilet, a dirty or an isolation space. A room takes such a row from its use class only where its own
-# name says that it is such a space.
-HAZARD_CUE = re.compile(r"toilet|ensuite|\bwc\b|shower|change|bath|dirty|soiled|cleaner|disposal|sluice|isolation|\biso\b|\bnp\b|negative|decontam|waste|refuse|contamin|sanit|lavator|bedpan|specimen|gown", re.I)
+# name says that it is a toilet, a dirty space or an isolation space (the words below, as whole words).
+HAZARD_CUE = re.compile(r"\b(?:toilets?|ensuites?|wc|lavatory|lavatories|sanitary|dirty|isolation|iso)\b", re.I)
 
 
 def hazardous(row: Dict[str, str]) -> bool:
-    return str(row.get("single_pass") or "").upper().startswith("Y") or "NEG" in str(row.get("pressure_regime_as_printed") or "").upper()
+    """A row at negative pressure (printed regime '-ve', 'Negative', '-5', '-10 Pa', or a negative value in Pa) or on single pass."""
+    if str(row.get("single_pass") or "").upper().startswith("Y"):
+        return True
+    if printed_regime(row.get("pressure_regime_as_printed")) == "NEGATIVE":
+        return True
+    for k in ("pressure_pa", "pressure_pa_min", "pressure_pa_max"):
+        try:
+            if float(row.get(k) or "") < 0:
+                return True
+        except ValueError:
+            pass
+    return "NEG" in str(row.get("pressure_direction") or "").upper()
 
 
 _LEVEL = re.compile(r"^(?:L|B|LB)\d+\b\s*", re.I)
@@ -107,6 +135,36 @@ def _own_key(text: str, dept_words: set) -> Tuple[str, ...]:
     t = _LEVEL.sub("", t.strip())
     toks = [w for w in _tokens(t, drop_stop=False) if w not in dept_words and w not in ("room", "rm", "type", "typical")]
     return tuple(toks)
+
+
+_SITE = re.compile(r"^(?:L|B|LB)\d+(?:\s*/\s*(?:L|B|LB)?\d+)*\s+(?:IP\s+)?", re.I)
+
+
+def site_free(name: str) -> str:
+    """The room name without the level prefix and the inpatient tower tag: 'L2 IP Admin Workspace' gives 'Admin Workspace'."""
+    return _SITE.sub("", (name or "").strip()).strip()
+
+
+def space_key(name: str, drop: Optional[set] = None) -> frozenset:
+    """The words that make a room name one space: the content words of the name before its qualifier ('Toilet - Accessible' and 'Toilets' both give {toilet}), with the
+    level prefix, a number in brackets and the words in ``drop`` (the words of the department name) taken away where other words remain.
+    Two names are the same space only where these sets are equal: one word that two names share is not enough."""
+    t = re.sub(r"\(\s*\d+\s*\)", " ", _LEVEL.sub("", (name or "").strip()))
+    t = re.sub(r"\([^)]*\)", " ", t)                              # a qualifier in brackets is not part of the space
+    base = _base(t) or t
+    ws = _tokens(base) or _tokens(t)
+    if drop:
+        rest = [w for w in ws if w not in drop]
+        ws = rest or ws
+    return frozenset(ws)
+
+
+def _alt_names(row: Dict[str, str]) -> List[str]:
+    """The names that a booklet row prints, split at '/', ',', '&' and '|' outside brackets."""
+    t = re.sub(r"\([^)]*\)", lambda m: m.group(0).replace(",", ";").replace("/", ";"), row.get("room_type_as_printed") or "")
+    alts = [t] + [x for x in re.split(r"\s*/\s*|,\s*|\s+&\s+|\s*\|\s*", t) if x.strip()]
+    return [a.strip() for a in alts if a.strip()]
+
 
 
 class Presumption:
@@ -143,6 +201,16 @@ class Presumption:
                 words = [set(_tokens(a)) for a in alts]          # the words of each name that the row prints
                 for u in uses:
                     self.by_use[u].append((d, r, words))
+        # rows by room use class, with the space key of every name that the row prints (department words taken away)
+        self.by_space: Dict[str, List[Tuple[str, Dict[str, str], frozenset]]] = defaultdict(list)
+        for d, rs in self.by_dept.items():
+            for r in rs:
+                dw = set(_tokens(r.get("department_label") or "", drop_stop=False))
+                for a in _alt_names(r):
+                    u, _ = room_use(a)
+                    k = space_key(a, dw)
+                    if u and k:
+                        self.by_space[u].append((d, r, k))
         # room type codes of the room data sheets of every department, with the criteria row that the room type name has in that department
         self.by_code: Dict[str, List[Tuple[str, Dict[str, str]]]] = defaultdict(list)
         p = self.root / REG / "rds_rooms.csv"
@@ -177,6 +245,12 @@ class Presumption:
         want = _own_key(_base(name), set())
         if not want:
             return None
+        whole_space = False
+        if dwords and all(w in dwords or w == "ip" for w in want):
+            # the room is the workspace of the department itself ('L6 IP Admin Workspace' in the Admin Workspace booklet): the booklet prints its rows by use, and the
+            # open workspace of the level takes the office row of the level (the same row as the offices of the level)
+            want = ("office",)
+            whole_space = True
         lvl = None
         m = re.match(r"^L0*(\d+)$", storey or "")
         if m:
@@ -197,6 +271,10 @@ class Presumption:
         (rank, _pg), row, prefix, alt = cands[0]
         if row["room_type_as_printed"].strip().lower() == (name or "").strip().lower():
             return None            # the same name is matched elsewhere
+        if whole_space:
+            lead = "the room is the whole workspace of this department and the booklet prints no row for it by name; the booklet of this department prints the office row"
+            tail = f" for level {prefix[1:]}" if rank == 0 else (" for another level (" + prefix + ")" if rank == 2 else "")
+            return dict(row=row, how="same space in the booklet of this department", reason=lead + tail)
         if rank == 0:
             why = f"the booklet of this department prints the same space for level {prefix[1:]}"
         elif rank == 1:
@@ -223,7 +301,7 @@ class Presumption:
     def find(self, own_dept: str, name: str, code: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], str]:
         """({row, department, how, department_label}, reason). Reason is given when no row is found."""
         own = _dk(own_dept)
-        forms = list(dict.fromkeys([name, self.expand((name or "").lower())]))
+        forms = list(dict.fromkeys([name, site_free(name), self.expand((name or "").lower())]))
         use, _label = self.room_use(name)
         clinical = use in CLINICAL_USES
         plant = use == "plant_room"
@@ -250,24 +328,23 @@ class Presumption:
                     why.append("the room name does not give a room use, so no use class fits it")
                     continue
                 head = head_word(forms[-1])
-                mine = set(_tokens(forms[-1]))
-                pool = [(d, r, [x for x in w if head in x]) for d, r, w in self.by_use.get(use, []) if head and any(head in x for x in w)]
+                mine = space_key(site_free(forms[-1]))
+                pool = [(d, r) for d, r, k in self.by_space.get(use, []) if mine and k == mine]
                 n_before = len(pool)
                 if not HAZARD_CUE.search(forms[-1]):
                     pool = [x for x in pool if not hazardous(x[1])]
                 if not pool and n_before:
-                    why.append(f"the rows of the use class '{use.replace('_', ' ')}' with the main word '{head}' are negative-pressure or single-pass rows, and the room name does not say that it is a toilet, dirty or isolation space")
+                    why.append(f"the rows of the use class '{use.replace('_', ' ')}' that print the same space are negative-pressure or single-pass rows, and the room name does not say that it is a toilet, a dirty space or an isolation space")
                     continue
                 if not pool:
-                    other = [d for d, r, w in self.by_use.get(use, []) if d != own]
-                    why.append((f"no other department prints a row of the use class '{use.replace('_', ' ')}' with the main word '{head}' in its room type name"
+                    other = [d for d, r, k in self.by_space.get(use, []) if d != own]
+                    why.append((f"no other department prints a row for the same space in the use class '{use.replace('_', ' ')}' (name words: {' '.join(sorted(mine))})"
                                 if other else f"no other department has a criteria row for the use class '{use.replace('_', ' ')}'"))
                     continue
-                sc = {id(r): max(len(mine & x) + len(mine & x) / (len(mine | x) or 1) for x in w) for d, r, w in pool}      # most shared words first, then the closest name
-                hit = self._best(own, [(d, r) for d, r, w in pool], clinical, lambda r: sc.get(id(r), 0.0))
+                hit = self._best(own, pool, clinical)
                 if hit:
                     return dict(row=hit[1], department=hit[0],
-                                how=f"same use class ({use.replace('_', ' ')}) and the same main word '{head}' in the room type name"), ""
-                why.append(f"only the own department prints a row of the use class '{use.replace('_', ' ')}' with the main word '{head}'")
+                                how=f"same use class ({use.replace('_', ' ')}) and the same space name ({' '.join(sorted(mine))})"), ""
+                why.append(f"only the own department prints a row of the use class '{use.replace('_', ' ')}' for the same space")
         base = "no other department has a criteria row for this room type name or code"
         return None, base + ("; " + "; ".join(dict.fromkeys(why)) if why else "")

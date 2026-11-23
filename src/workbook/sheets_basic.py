@@ -217,7 +217,7 @@ def write_basis(ctx: Ctx) -> None:
              "(plug load: ASHRAE Handbook, Fundamentals, plug-load densities; lighting: ASHRAE 90.1 space-by-space lighting power density). The cells are red text (code A) and the Remarks column "
              "gives the value and the room use. Equipment gain is 0 W: no equipment list is in the scope, and the rooms led by equipment have a VERIFY flag. Envelope gain is not assessed. It is not zero.",
              "A room takes the row of its own department booklet where that booklet prints the same space (the same name, or the same name with a level or department prefix or a number in brackets; "
-             "the Remarks say which). A room with no such row takes the row of the same space in the closest other department (same room type code, then same name, then same use class and the same main word in the room type name; "
+             "the Remarks say which). A room with no such row takes the row of the same space in the closest other department (same room type code, then same name, then same use class and the same words in the room name before its qualifier, so that one shared word is not enough; a row at negative pressure or on single pass is taken only for a room whose name says that it is a toilet, a dirty space or an isolation space; "
              "clinical rooms prefer clinical departments). The cells of such a presumed row are italic green (code A). The booklet and the page of the row stay as the source, and the Remarks column says 'Presumed criteria'. "
              "A room that no other department covers has no criteria row and is listed on Flags with the reason.",
              "Area used (selector AUTO, the default): the design area is the DPA designed area, else the SOA area. "
@@ -406,6 +406,11 @@ def build_flag_rows(ctx: Ctx) -> List[Dict[str, Any]]:
                 link=("Room Information", RI.local("pfix", gi)))
         if gaps.get("occupancy_note"):
             add(type="VERIFY", ref=n, desc=f"{who}: {gaps['occupancy_note']}", status="OPEN", owner="ACMV engineer", src="",
+                link=("Room Information", RI.local("pfix", gi)))
+        if gaps.get("number"):
+            add(type="VERIFY", ref=n, desc=f"{who}: {gaps['number']}", status="OPEN", owner="ACMV engineer", src="", link=("Room Information", RI.local("pfix", gi)))
+        if gaps.get("oa_person"):
+            add(type="VERIFY", ref=n, desc=f"{who}: {gaps['oa_person']}", status="OPEN", owner="ACMV engineer", src=c.get("source", ""),
                 link=("Room Information", RI.local("pfix", gi)))
         if blank(r.get("ceiling_height_m")):
             add(type="CONFIRM", ref=n, desc=f"{who}: ceiling height is not set. Volume and air-change airflow are zero until it is given.{note('height')}",

@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 from . import conf
 from .common import ROOM_THERMAL_NOTE
-from .assemble import (REG, _expand_abbreviations, _f, _norm, _read, _tag_candidates, _tender_for_tag, criteria_from_row, criteria_text, load_use, load_zone_assignments,
+from .assemble import (REG, _sentence_case, _expand_abbreviations, _f, _norm, _read, _tag_candidates, _tender_for_tag, criteria_from_row, criteria_text, load_use, load_zone_assignments,
                        match_criteria, room_use, zone_key, zone_totals)
 from .linking import split_code
 from .presume import Presumption
@@ -339,7 +339,7 @@ def assemble_common_areas(root: Path = Path("."), with_others: bool = True) -> D
         else:
             room["gaps"]["loads"] = ("Lighting and small power are not set. The name does not say what the space is used for, so no ASHRAE room use fits it. Give the room use or the values.")
             n_loads_missing += 1
-        room["remark"] = room["remark"].rstrip(".") + ". " + ROOM_THERMAL_NOTE
+        room["remark"] = ". ".join(_sentence_case(x).rstrip(". ") for x in re.split(r";\s*", room["remark"]) if x.strip(". ")) + ". " + ROOM_THERMAL_NOTE      # clauses are sentences
         room["_space"] = s
         rooms.append(room)
 
