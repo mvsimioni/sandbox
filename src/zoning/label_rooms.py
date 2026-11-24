@@ -1,6 +1,6 @@
 """Label every room on the storey sheets of the per-storey zoning PDFs with its DPA room ID and room name (D-093, D-094).
 
-The labels are on their own layer 'Room IDs (DPA)' (on). A room is placed at its outline: its App D outline, else the one plan room it is linked to.
+The labels are unflattened markups (polygon on the room outline, subject = DPA ID; free-text label) on their own layer 'Room IDs (DPA)' (on). A room is placed at its outline: its App D outline, else the one plan room it is linked to.
 Rooms with no outline are listed in the PDF index text box of the sheet and are not placed.
 
 ``python3 -m src.zoning.label_rooms --dir out/issue/DRAFT_2026-11-24_R4/zoning``
@@ -35,34 +35,38 @@ def label(pdf: Path, storey: str) -> dict:
     doc = pymupdf.open(str(pdf))
     page = doc[doc.page_count - 1]                      # the storey sheet is the last page
     oc = doc.add_ocg("Room IDs (DPA)", on=True)
+    from src.zoning.write_pdf import _style_annot, _unrot_rect
     placed, unplaced = 0, []
     for num, info in sorted(rooms.items()):
         gs = geo.get(num)
         if not gs:
             unplaced.append(num)
             continue
+        contents = f"{num}\n{info['name']}\nUnit: {info['unit'] or 'none'}\nWorkbook: {info['wb']}"
+        tagname = re.sub(r"[^A-Za-z0-9]", "", num)
+        for k, g in enumerate(gs):                     # room outline: an unflattened polygon markup, subject = DPA room ID
+            pts = list(g.exterior.coords)[:-1]
+            if len(pts) < 3:
+                continue
+            a = page.add_polygon_annot(_unrot_pts(pts, page))
+            _style_annot(doc, a, f"room-{tagname}-{k}", num, contents, oc, None, (0.05, 0.15, 0.45), 1.0, None)
+            a.set_border(width=0.4)
+            a.update()
         g = max(gs, key=lambda q: q.area)
         p = g.representative_point()
         side = max(g.area, 1.0) ** 0.5
         fs = max(1.6, min(4.5, side / 9.0))
-        l1, l2 = num, (info["name"][:34] + ("…" if len(info["name"]) > 34 else ""))
-        w = max(pymupdf.get_text_length(l1, fontname="helv", fontsize=fs), pymupdf.get_text_length(l2, fontname="helv", fontsize=fs * 0.85))
-        h = fs * 2.1
-        # box in page view, then to the unrotated page
-        x0, y0 = p.x - w / 2 - 0.6, p.y - h / 2 - 0.4
-        corners = _unrot_pts([(x0, y0), (x0 + w + 1.2, y0 + h + 0.8)], page)
-        r = pymupdf.Rect(corners[0], corners[1])
-        r.normalize()
-        page.draw_rect(r, color=None, fill=(1, 1, 1), fill_opacity=0.78, oc=oc, overlay=True)
-        a = _unrot_pts([(p.x - w / 2, p.y - h / 2 + fs * 0.95)], page)[0]
-        b = _unrot_pts([(p.x - w / 2, p.y - h / 2 + fs * 1.95)], page)[0]
-        page.insert_text(a, l1, fontname="hebo", fontsize=fs, color=(0.05, 0.15, 0.45), rotate=page.rotation, oc=oc, overlay=True)
-        page.insert_text(b, l2, fontname="helv", fontsize=fs * 0.85, color=(0.15, 0.15, 0.15), rotate=page.rotation, oc=oc, overlay=True)
+        name = info["name"][:34] + ("…" if len(info["name"]) > 34 else "")
+        w = max(pymupdf.get_text_length(num, fontname="helv", fontsize=fs), pymupdf.get_text_length(name, fontname="helv", fontsize=fs)) + 2
+        h = fs * 2.6
+        ft = page.add_freetext_annot(_unrot_rect((p.x - w / 2, p.y - h / 2, p.x + w / 2, p.y + h / 2), page), f"{num}\n{name}", fontsize=fs, fontname="helv",
+                                     text_color=(0.05, 0.15, 0.45), fill_color=(1, 1, 1), rotate=page.rotation, align=1)
+        _style_annot(doc, ft, f"roomlabel-{tagname}", num, contents, oc, None, (0.05, 0.15, 0.45), 0.9, None)
         placed += 1
     note = (f"Room IDs (DPA): {placed} of {len(rooms)} rooms of the workbooks on {storey} are placed at their outline (App D outline or linked plan room). "
             f"{len(unplaced)} rooms have no outline on this plan and are not placed: see the room lists of the workbooks.")
-    a = _unrot_pts([(60, 40)], page)[0]
-    page.insert_text(a, note, fontname="helv", fontsize=14, color=(0.05, 0.15, 0.45), rotate=page.rotation, oc=oc, overlay=True)
+    nt = page.add_freetext_annot(_unrot_rect((40, 20, 2400, 52), page), note, fontsize=14, fontname="helv", text_color=(0.05, 0.15, 0.45), rotate=page.rotation)
+    _style_annot(doc, nt, f"roomids-note-{storey}", "Room IDs (DPA)", note, oc, None, (0.05, 0.15, 0.45), 1.0, None)
     tmp = pdf.with_suffix(".tmp.pdf")
     doc.save(str(tmp), garbage=4, deflate=True)
     doc.close()
