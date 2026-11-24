@@ -28,9 +28,7 @@ REG = ROOT / "out/registers"
 # (storey, point pv, row id, name, class, basis)
 OWN_SPACES = [("B2", (950.0, 1480.0), "B2-G001", "Trolley staging (open floor)", "AHU-B-B1-B2OFOO-02",
                "Equipment Schedule SCH/1 Corr 5: AHU-B-B1-B2OFOO-02 'Food Services (AGV, Staging)'; the open trolley bay west of the Plating Area "
-               "has no room outline or tag on the plan; assigned by the schedule description, to confirm (Marcus mark-up 24 Nov 2026)"),
-              ("L04", (1260.0, 1620.0), "L04-G003", "Open area east of the AHU plant room (natural ventilation)", "NV",
-               "Marcus mark-up 24 Nov 2026: this whole area is naturally ventilated")]
+               "has no room outline or tag on the plan; assigned by the schedule description, to confirm (Marcus mark-up 24 Nov 2026)")]
 FLAG = "outline extended over open floor with no room outline (gap fill), measured area unchanged"
 
 

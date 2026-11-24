@@ -41,6 +41,8 @@ def _affine(rows: List[Dict[str, str]]):
     for r in rows:
         if r["polygon_pv_wkt"] and r["polygon_building_mm_wkt"]:
             a, b = wkt.loads(r["polygon_pv_wkt"]), wkt.loads(r["polygon_building_mm_wkt"])
+            if a.geom_type != "Polygon" or b.geom_type != "Polygon":      # drawn or split outlines are not registration pairs
+                continue
             if len(a.exterior.coords) == len(b.exterior.coords):
                 src += list(a.exterior.coords)
                 dst += list(b.exterior.coords)

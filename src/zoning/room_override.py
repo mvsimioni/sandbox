@@ -21,8 +21,11 @@ DRAWN = {
 }
 # spaces with no room outline in the plan, drawn by inspection: row id -> (name, class, class kind, points pv, basis)
 NEW = {"B1-G001": ("AHU deck", "AHU spill (plant room)", "AHU spill",
-                   [(728, 1271), (1293, 1271), (1293, 1795), (793, 1795), (775, 1718), (881, 1712), (864, 1357), (734, 1357)],
-                   "Marcus mark-up 24 Nov 2026: AHU plant room (AHU deck) at B1; conditioned by spill air of its AHUs (D-036)")}
+                   [(726, 1270), (1300, 1270), (1300, 1805), (775, 1805), (775, 1702), (866, 1702), (866, 1358), (726, 1358)],
+                   "Marcus mark-up 24 Nov 2026: AHU plant room (AHU deck) at B1; conditioned by spill air of its AHUs (D-036)"),
+       "L04-G003": ("Open area east of the AHU plant room (natural ventilation)", "NV", "NV",
+                    [(1214, 1478), (1310, 1478), (1310, 1768), (1214, 1768)],
+                    "Marcus mark-up 24 Nov 2026: this whole area is naturally ventilated")}
 # a measured outline that leaks out of its room: split it (row id -> keep box, [(new row id, name, class, basis, box or None = the rest)])
 SPLITS = {
     "L04-R009": ([(1203, 380, 1482, 615), (1203, 380, 1535, 498)], [
@@ -190,7 +193,7 @@ def splits_and_plinths():
                 zr.append(z)
                 zby[nid] = z
             z.update(room_id=nid, storey=st, room_tag=name, room_name=name, **{"class": cls}, class_kind=kind, confidence="0.6",
-                     area_m2=n["a_area_m2"], department="MEP plant", method="D-101 drawn", notes=basis, basis="Marcus mark-up", ruling="D-101")
+                     area_m2=n["a_area_m2"], department=("MEP plant" if kind != "NV" else "Common areas"), method="D-101 drawn", notes=basis, basis="Marcus mark-up", ruling="D-101")
             out.append((nid, cls, round(g.area * k2, 1)))
         # plinths: an AHU plant room has no holes (equipment plinths are part of the room)
         nf = 0
