@@ -3,7 +3,8 @@ Marcus: the AHU serving the corridor has gaps).
 
 On a storey: the floor plate (closed rooms joined across 3 m, holes filled) less every room outline is the open floor. Thin bands (walls, under
 0.8 m wide) are removed by an opening of 0.4 m. Each open piece of 2 m2 or more is added to the outline of the neighbouring room whose class is an
-air handling or fan coil unit and that shares the longest edge with it. The measured area of that room is not changed (the added open floor is
+air handling or fan coil unit and that shares the longest edge with it. AHU plant rooms (spill air) never take open floor: their outline is
+the room with its plinths only (Marcus 24 Nov 2026: stair and lobby pockets were shown as plant room). The measured area of that room is not changed (the added open floor is
 shown on the zoning only) and the room says so in its flags. A piece with no such neighbour stays open.
 
 ``python3 -m src.zoning.gap_fill --storeys L05,L06``  (run after open_region and booklet_pod; idempotent: the added parts are kept apart)
@@ -105,12 +106,12 @@ def run(st: str) -> Dict[str, object]:
               and not (not shaft.is_empty and g.intersects(shaft) and g.intersection(shaft).area > 0.3 * g.area)]
     pieces = [g.difference(shaft) if not shaft.is_empty else g for g in pieces]
     pieces = [q for g in pieces for q in getattr(g, "geoms", [g]) if q.geom_type == "Polygon" and q.area * k2 >= 0.8]
-    tree_ids = [rid for rid in geo if kind.get(rid) in ("AHU", "FCU", "AHU spill", "CRAC")]
+    tree_ids = [rid for rid in geo if kind.get(rid) in ("AHU", "FCU", "CRAC")]
     added: Dict[str, List[Polygon]] = {}
     left = 0.0
     tagpts = {}
     for r in rows:
-        if r.get("tag_box_pv") and kind.get(r["room_id"]) in ("AHU", "FCU", "AHU spill", "CRAC") and r["room_id"] in geo:
+        if r.get("tag_box_pv") and kind.get(r["room_id"]) in ("AHU", "FCU", "CRAC") and r["room_id"] in geo:
             b = list(map(float, r["tag_box_pv"].split(",")))
             tagpts[r["room_id"]] = shapely.Point((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
     own_rows = []
@@ -122,7 +123,20 @@ def run(st: str) -> Dict[str, object]:
         if hit is not None:
             pieces = [pc for pc in pieces if pc is not hit]
             own_rows.append((rid_, name_, cls_, basis_, hit))
+    # plinths: open floor wholly inside the outer boundary of an AHU plant room is part of that plant room (only there may a plant room grow)
+    plant = {}
+    for rid, g in geo.items():
+        if kind.get(rid) == "AHU spill":
+            plant[rid] = shapely.union_all([Polygon(q.exterior) for q in getattr(g, "geoms", [g]) if q.geom_type == "Polygon"]).buffer(0.5 * m)
+    rest_pieces = []
     for pc in pieces:
+        host = next((rid for rid, hull in plant.items() if hull.contains(pc)), None)
+        if host is not None:
+            added.setdefault(host, []).append(pc)
+        else:
+            rest_pieces.append(pc)
+    pieces_left = rest_pieces
+    for pc in pieces_left:
         # a piece that holds the plan tag of a room is that room's open floor (e.g. the Plating Area tag in the B2 kitchen bay)
         own = [rid for rid, tp in tagpts.items() if pc.buffer(0.5 * m).contains(tp)]
         if own:

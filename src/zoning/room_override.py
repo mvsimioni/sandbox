@@ -19,6 +19,8 @@ REG = Path(__file__).resolve().parent.parent.parent / "out/registers"
 DRAWN = {
     "B3-R058": [(501, 762), (795, 762), (795, 1043), (778, 1043), (778, 1131), (799, 1131), (799, 1195), (611, 1195), (611, 1334), (501, 1334)],
 }
+# a room that reaches the facade over open floor the plan leaves outside every outline: row id -> (boxes pv, basis)
+EXTEND = {"L04-R239": ([(630, 1379, 700, 1520)], "Marcus 24 Nov 2026: the corridor has access to the facade (west facade between stair S.02 and the AHU plant room)")}
 # spaces with no room outline in the plan, drawn by inspection: row id -> (name, class, class kind, points pv, basis)
 NEW = {"B1-G001": ("AHU deck", "AHU spill (plant room)", "AHU spill",
                    [(726, 1270), (1300, 1270), (1300, 1805), (775, 1805), (775, 1702), (866, 1702), (866, 1358), (726, 1358)],
@@ -28,6 +30,7 @@ NEW = {"B1-G001": ("AHU deck", "AHU spill (plant room)", "AHU spill",
                     "Marcus mark-up 24 Nov 2026: this whole area is naturally ventilated")}
 # a measured outline that leaks out of its room: split it (row id -> keep box, [(new row id, name, class, basis, box or None = the rest)])
 SPLITS = {
+    "L04-R267": ([(712, 1456, 1214, 1775)], []),     # the plant room ends at the NV open area L04-G003 (Marcus 24 Nov 2026)
     "L04-R009": ([(1203, 380, 1482, 615), (1203, 380, 1535, 498)], [
         ("L04-G002", "Facade zone, ICU side", "NV", "assumed natural ventilation like the DI facade zone (same facade construction), to confirm", (1535, 380, 2075, 640)),
         ("L04-G001", "Facade zone, DI (MRI delivery route, AC ledge)", "NV", "Marcus 24 Nov 2026: the facade of the DI department is natural ventilation", None)]),
@@ -195,6 +198,27 @@ def splits_and_plinths():
             z.update(room_id=nid, storey=st, room_tag=name, room_name=name, **{"class": cls}, class_kind=kind, confidence="0.6",
                      area_m2=n["a_area_m2"], department=("MEP plant" if kind != "NV" else "Common areas"), method="D-101 drawn", notes=basis, basis="Marcus mark-up", ruling="D-101")
             out.append((nid, cls, round(g.area * k2, 1)))
+        for rid, (boxes, basis) in EXTEND.items():
+            if not rid.startswith(st) or rid not in by:
+                continue
+            r = by[rid]
+            if not r.get("polygon_pv_orig_wkt"):
+                g0 = shapely.make_valid(wkt.loads(r["polygon_pv_wkt"])).buffer(0)
+                if r.get("gap_fill_pv_wkt"):
+                    g0 = g0.difference(wkt.loads(r["gap_fill_pv_wkt"]).buffer(0.4)).buffer(0)
+                r["polygon_pv_orig_wkt"] = shapely.to_wkt(g0, rounding_precision=2)
+            g0 = wkt.loads(r["polygon_pv_orig_wkt"])
+            ext = shapely.union_all([shapely.box(*b) for b in boxes])
+            others = shapely.union_all([shapely.make_valid(wkt.loads(q["polygon_pv_wkt"])).buffer(0) for q in rows
+                                        if q["polygon_pv_wkt"] and q["room_id"] != rid and "-T" not in q["room_id"]
+                                        and shapely.make_valid(wkt.loads(q["polygon_pv_wkt"])).intersects(ext)])
+            add = ext.difference(others.buffer(0.2)) if not others.is_empty else ext
+            g = shapely.make_valid(shapely.union_all([g0, add])).buffer(0)
+            r["polygon_pv_wkt"] = shapely.to_wkt(g, rounding_precision=2)
+            r["gap_fill_pv_wkt"] = ""
+            if "extended to the facade" not in (r.get("flags") or ""):
+                r["flags"] = ((r.get("flags") or "") + " | outline extended to the facade (D-101): " + basis).strip(" |")
+            out.append((rid, "extended to the facade", round(add.area * k2, 1)))
         # plinths: an AHU plant room has no holes (equipment plinths are part of the room)
         nf = 0
         for r in rows:
