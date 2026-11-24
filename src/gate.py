@@ -61,6 +61,24 @@ OVERRIDE = {
     "D-068": ("(one ordered build, trace)", "workbook/regenerate.py; gate.py; phase_checks.py", "test_fix_pass.py"),
     "D-069": ("(readiness gate, seeded test)", "gate.py; phase_checks.py", "test_fix_pass.py"),
     "D-071": ("(expedite: wording, coverage notice)", "workbook/clean.py; workbook/envelope.py", "test_fix_pass.py"),
+    # Phase 4, council C4 (D-072 to D-088): readers in the schematic build, proving tests in the phase 4 checks
+    "D-072": ("(update rule 5 % or 10 L/s)", "schematics/review.py; phase4_c4.py", "test_phase4_c4.py"),
+    "D-073": ("(fan-out of all schematics)", "schematics/build_all.py", "test_phase4_c4.py"),
+    "D-074": ("(MOT sheets listed; closed by D-082)", "schematics/review.py; phase4_c4.py", "test_phase4_c4.py"),
+    "D-075": ("(council C4 rulings)", "schematics/build_all.py", "test_phase4_c4.py"),
+    "D-076": ("(added rooms drawn with criteria table)", "schematics/review.py; phase4_c4.py", "test_phase4_c4.py"),
+    "D-077": ("(one disposition per drawn entity)", "schematics/review.py; phase4_c4.py", "test_phase4_c4.py"),
+    "D-078": ("(negative lookup before add; OA anchor)", "phase4_c4.py", "test_phase4_c4.py"),
+    "D-079": ("(one home per unit)", "phase4_c4.py", "test_phase4_c4.py"),
+    "D-080": ("(fan ownership; pair counted once)", "phase4_c4.py", "test_phase4_c4.py"),
+    "D-081": ("(pressure rows are queries)", "phase4_c4.py", "test_phase4_c4.py"),
+    "D-082": ("(MOT listed, not marked up)", "phase4_c4.py", "test_phase4_c4.py"),
+    "D-083": ("(input gate for unit-level rows)", "phase4_c4.py", "test_phase4_c4.py"),
+    "D-084": ("(room increases need an established link)", "phase4_c4.py", "test_phase4_c4.py"),
+    "D-085": ("(sheet against approved zoning)", "phase4_c4.py", "test_phase4_c4.py"),
+    "D-086": ("(wording by script; word list)", "phase4_c4.py; schematics/build_all.py", "test_phase4_c4.py"),
+    "D-087": ("(one build, stable IDs, staged issue)", "schematics/build_all.py; phase4_c4.py; phase4_seeded.py", "test_phase4_c4.py"),
+    "D-088": ("(acceptance: a wrong query is acceptable)", "schematics/build_all.py; phase4_seeded.py", "test_phase4_c4.py"),
 }
 CALC_RANGE = range(11, 68)  # decisions that change a value: a missing reader is a FAIL there
 

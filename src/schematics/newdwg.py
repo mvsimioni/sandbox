@@ -17,6 +17,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import re
 import sys
 from collections import OrderedDict, defaultdict
@@ -32,11 +33,13 @@ from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
 from ezdxf.fonts import fonts as ezfonts
 
 from . import model
+from . import drawings_common as dc
 
 ROOT = Path(__file__).resolve().parents[2]
 REG = ROOT / "out" / "registers"
 OUT = ROOT / "out" / "schematics"
-NEWDIR = OUT / "new_drawings"
+NEWDIR = Path(os.environ["SCHEMATICS_NEWDIR"]) if os.environ.get("SCHEMATICS_NEWDIR") else OUT / "new_drawings"
+NUMBER_LEDGER = NEWDIR.parent / "new_drawing_numbers.csv"     # numbers of withdrawn drawings: never used again
 LEGEND_PDF = ROOT / "data" / "source" / "Basis" / "Working Drawings" / "IP-BH-00002_ACMV NOTES AND LEGEND 2.pdf"
 WORKING = ROOT / "data" / "source" / "Basis" / "Working Drawings"
 APPID = "IPSCH"
@@ -149,20 +152,72 @@ def fnum(v: str) -> str:
         return v
 
 
+_LED: Optional[dc.Ledger] = None
+NAMES = dc.NameMap()
+
+
+def ledger() -> dc.Ledger:
+    global _LED
+    if _LED is None:
+        _LED = dc.Ledger()
+    return _LED
+
+
+def withdrawn(storey: int) -> Dict[str, Any]:
+    """Working sheet wins (D-079): a system of this storey whose tag is drawn on a working sheet is not drawn here.
+    Returns the system IDs, the spaces that only those systems serve, and the tags with the sheets that draw them.
+    A system is withdrawn when its first tag, or every tag, is in the ledger of the working sheets."""
+    appd = model.build_appd()
+    led = ledger()
+    tags: Dict[str, List[str]] = {}
+    sys_ids: Dict[str, List[str]] = {}
+    systems = [s for s in appd["systems"] if s["storey"] == [storey] and s["kind"] != "appd_space_without_equipment"]
+    for s_ in systems:
+        hits = {e["tag_as_written"]: led.homes(e["tag_as_written"]) for e in s_["equipment"]}
+        first = s_["equipment"][0]["tag_as_written"]
+        if hits.get(first) or (hits and all(hits.values())):
+            sys_ids[s_["system_id"]] = sorted({h for v in hits.values() for h in v})
+            for t, h in hits.items():
+                if h:
+                    tags[t] = h
+    # correction pass (Opus check item 6): a system whose review row is a query 'tag to correct' or 'not in zone schedule' is not drawn
+    held_rows = {r["unit"]: r for r in read_csv(OUT / "change_register.csv") if r["sheet"] == "App D" and r["layer_type"] == "queries"
+                 and r["quantity"] == "App D system absent from the working drawings" and r["class"] in ("tag to correct", "not in zone schedule")}
+    held_ids = {s_["system_id"]: held_rows[s_["system_id"]] for s_ in systems if s_["system_id"] in held_rows and s_["system_id"] not in sys_ids}
+    held_tags = {e["tag_as_written"] for s_ in systems if s_["system_id"] in held_ids for e in s_["equipment"]}
+    kept = [s_ for s_ in systems if s_["system_id"] not in sys_ids and s_["system_id"] not in held_ids]
+    kept_spaces = {sp["annotation_index"] for s_ in kept for sp in s_["spaces"]}
+    spaces = {sp["annotation_index"] for s_ in systems if s_["system_id"] in sys_ids for sp in s_["spaces"]} - kept_spaces
+    held_spaces = {sp["annotation_index"] for s_ in systems if s_["system_id"] in held_ids for sp in s_["spaces"]} - kept_spaces - spaces
+    return dict(system_ids=sys_ids, tags=tags, spaces=spaces, held=held_ids, held_tags=held_tags, held_spaces=held_spaces)
+
+
 def load_inputs(storey: int) -> Dict[str, Any]:
     appd = model.build_appd()
-    systems = [s for s in appd["systems"] if s["storey"] == [storey] and s["kind"] != "appd_space_without_equipment"]
+    wd = withdrawn(storey)
+    systems = [s for s in appd["systems"] if s["storey"] == [storey] and s["kind"] != "appd_space_without_equipment"
+               and s["system_id"] not in wd["system_ids"]]
     unserved = [s for s in appd["systems"] if s["storey"] == [storey] and s["kind"] == "appd_space_without_equipment"]
+    # a space that only a held system served is drawn as a space with no equipment (its query rows stay on the box)
+    for s_ in appd["systems"]:
+        if s_["storey"] == [storey] and s_["system_id"] in wd.get("held", {}):
+            for sp in s_["spaces"]:
+                if sp["annotation_index"] in wd["held_spaces"] and not any(
+                        u_["spaces"][0]["annotation_index"] == sp["annotation_index"] for u_ in unserved):
+                    unserved.append(dict(kind="appd_space_without_equipment", storey=s_["storey"], system_id=s_["system_id"] + "#space",
+                                         spaces=[sp], equipment=[]))
     chg = read_csv(OUT / "change_register.csv")
-    new_rows = {r["unit"]: r for r in chg if r["sheet"] == "App D" and r["layer_type"] == "new systems"}
+    # correction pass (Opus check item 6): an App D system whose row is a query (unit not in the zone schedule, near-match tag,
+    # room list fails the gate) is not drawn as a new system.  Its spaces are drawn only when another system serves them.
+    held = {r["unit"]: r for r in chg if r["sheet"] == "App D" and r["layer_type"] == "queries"
+            and r["quantity"] == "App D system absent from the working drawings" and r["class"] in ("tag to correct", "not in zone schedule")}
+    systems = [s_ for s_ in systems if s_["system_id"] not in held]
+    new_rows = {r["unit"]: r for r in chg if r["sheet"] == "App D" and (r["layer_type"] == "new systems" or (
+        r["layer_type"] == "queries" and r["quantity"] == "App D system absent from the working drawings" and r["class"] == "not established"))}
     # a unit that a working sheet draws as well is not drawn again on this sheet: the sheet refers to the working sheet
-    on_work = {r["item"]: r for r in chg if r["sheet"] == "App D" and "drawn on a working sheet" in r["action"]}
-    for s_ in systems:
-        for e_ in s_["equipment"]:
-            if e_["tag_as_written"] in on_work:
-                new_rows[s_["system_id"]] = on_work[e_["tag_as_written"]]
+    on_work: Dict[str, Any] = {}       # a system that a working sheet draws is withdrawn above; nothing is drawn for it
     q_rows = [r for r in chg if r["sheet"] == "App D" and r["layer_type"] == "queries"
-              and r["quantity"] == "Storey %d" % storey]
+              and r["quantity"] == "Storey %d" % storey and r["item"] not in wd["tags"]]
     spaces = {int(r["annotation_index"]): r for r in read_csv(REG / "appd_spaces.csv") if r["storey"] == str(storey)}
     recon = {r["appd_tag_as_written"]: r for r in read_csv(REG / "appd_schedule_reconciliation.csv")
              if r["appd_storeys"] == str(storey)}
@@ -186,13 +241,26 @@ def load_inputs(storey: int) -> Dict[str, Any]:
     air_rows = {r["item"]: r for r in chg if r["sheet"] == "App D" and r["layer_type"] == "airflows"
                 and r["quantity"] == "Storey %d" % storey}
     sched_only = [r for r in chg if r["sheet"] == "App D" and r["layer_type"] == "queries"
-                  and r["quantity"] == "Level %02d" % storey
-                  and ("on no App D layout" in r["action"] or "drawn on a working sheet" in r["action"])]
+                  and r["quantity"] == "Level %02d" % storey and "on no App D layout" in r["action"]]
+    # one cross-reference line for each unit or tag that a working sheet draws: 'shown on IP-BH-nnnnn', no value, no change ID
+    xref: Dict[str, List[str]] = dict(wd["tags"])
+    for r in chg:
+        if r["sheet"] == "App D" and r["layer_type"] == "queries" and r["quantity"] == "Level %02d" % storey \
+                and "drawn on a working sheet" in r["action"]:
+            h = ledger().homes(r["item"]) or dc.sheet_id(r["drawn"]) and [dc.sheet_id(r["drawn"])]
+            if h:
+                xref.setdefault(r["item"], list(h))
+    for r in recon.values():
+        t = r.get("appd_tag_as_written", "")
+        if t and t not in xref and ledger().homes(t) and t not in {e["tag_as_written"] for s_ in systems for e in s_["equipment"]}:
+            xref[t] = ledger().homes(t)
+    sched_only = sched_only + [dict(item=t, change_id="", source="", note="SHOWN ON " + ", ".join(h), xref=True, homes=h)
+                               for t, h in sorted(xref.items())]
     equip_rows = [r for r in read_csv(REG / "appd_equipment.csv") if r["storey"] == str(storey)]
     fan_types = {r["tag_as_written"]: r.get("Fan Type (1)", "") for r in read_csv(REG / "equipment_schedule_fans.csv")}
     return dict(appd=appd, systems=systems, unserved=unserved, new_rows=new_rows, q_rows=q_rows,
                 spaces=spaces, recon=recon, chg=chg, d00=d00_cells(storey), sp_q=sp_q, fan_types=fan_types,
-                un_q=un_q, equip_rows=equip_rows, air_rows=air_rows, sched_only=sched_only, on_work=on_work)
+                un_q=un_q, equip_rows=equip_rows, air_rows=air_rows, sched_only=sched_only, on_work=on_work, wd=wd, xref=xref)
 
 
 def d00_cells(storey: int) -> Dict[int, Dict[str, Any]]:
@@ -459,7 +527,8 @@ def box_content(inp, plan, sp_idx: int, system: Optional[Dict[str, Any]]) -> Dic
     sp = inp["spaces"][sp_idx]
     if system is None:           # highlighted space with no equipment on the layout
         uq = inp["un_q"].get(sp_idx, [])
-        return dict(idx=sp_idx, sp=sp, chg=uq[0]["change_id"] if uq else NOCHG, system=None,
+        sq = inp["sp_q"].get(sp_idx, [])
+        return dict(idx=sp_idx, sp=sp, chg=uq[0]["change_id"] if uq else (sq[0]["change_id"] if sq else NOCHG), system=None,
                     name=box_name(inp, sp_idx), queries=list(uq) + inp["sp_q"].get(sp_idx, []), relation="",
                     tags_in=[], tags_near=[])
     return dict(idx=sp_idx, sp=sp, chg=system_chg(inp, system), system=system, name=box_name(inp, sp_idx),
@@ -540,7 +609,8 @@ def box_name(inp, idx: int) -> str:
     d0 = inp["d00"].get(idx)
     if d0 and d0.get("name"):
         return str(d0["name"])
-    return re.sub(r"\s*\|\s*", " ", re.sub(r"\b(AC \(24HR\)|[FS]FL: ?[+\-0-9.]+|PLL|BLL|\?)\b", "", inp["spaces"][idx]["space_names_text_layer"])).strip() or "SPACE"
+    nm = re.sub(r"\s*\|\s*", " ", re.sub(r"\b(AC \(24HR\)|[FS]FL: ?[+\-0-9.]+|PLL|BLL|\?)\b", "", inp["spaces"][idx]["space_names_text_layer"])).strip()
+    return NAMES.show(nm) if nm else "SPACE"
 
 
 def box_height(c: Dict[str, Any]) -> float:
@@ -685,7 +755,7 @@ def draw_sched_table(sh, inp, rows, gx, ytop) -> None:
     ncol = 1 if len(rows) <= 12 else (2 if len(rows) <= 44 else 3)
     per = math.ceil(len(rows) / ncol)
     head = ("LISTED, NOT DRAWN ON THIS SHEET. EACH ROW GIVES THE REASON: SCHEDULED FOR THE COMMON AREAS OF THIS STOREY "
-            "AND ON NO APP D LAYOUT, OR DRAWN ON A WORKING SHEET.")
+            "AND ON NO APP D LAYOUT, OR SHOWN ON A WORKING SHEET (THE ROW NAMES THE SHEET).")
     y0 = ytop
     for i, ln in enumerate(wrap(head, 3.0, ncol * colw - 4)):
         sh.text(gx, y0 - 3.0 - i * 4.4, ln, 3.0, "IP-NOTES", owner="schedtable")
@@ -696,6 +766,11 @@ def draw_sched_table(sh, inp, rows, gx, ytop) -> None:
         for r in rows[c * per:(c + 1) * per]:
             x = gx + c * colw
             owner = "sched:" + r["item"]
+            if r.get("xref"):       # cross-reference line: the tag and the sheet, no value, no change ID
+                sh.text(x, y - H, r["item"], H, "IP-ROOMTEXT", owner=owner)
+                sh.text(x + 98, y - H, "SHOWN ON " + ", ".join(r["homes"]), H, "IP-ROOMTEXT", owner=owner)
+                y -= H * LP + 1.6
+                continue
             vt = Value("sched_only_tag", r["item"], r["change_id"], r["source"], owner)
             vc = Value("change_id", r["change_id"], r["change_id"], r["source"], owner)
             sh.values += [vt, vc]
@@ -1153,7 +1228,7 @@ def strip(sh: Sheet, inp, plan, sym) -> None:
         "A DASHED DUCT LINE SHOWS A SPACE WITH A TAG NEAR IT, NOT INSIDE IT.",
         "THE PLANT LEVEL AND THE SERVED LEVEL COME FROM THE TAGS.",
         "THE SYMBOLS FOLLOW IP-BH-00002. A FAN WITH A TYPE IN THE SCHEDULE HAS THE LEGEND SYMBOL. A LABELLED BOX SHOWS A FAN WITH NO TYPE. AN FCU HAS THE LEGEND SYMBOL FOR A FAN COIL UNIT.",
-        "WORKBOOK AIRFLOW IS THE LARGER VALUE OF THE COMMON-AREAS WORKBOOK, SHOWN BESIDE THE SCHEDULE DUTY (D-072).",
+        "WORKBOOK AIRFLOW IS THE LARGER VALUE OF THE COMMON-AREAS WORKBOOK, SHOWN BESIDE THE SCHEDULE DUTY.",
         "A SPACE IS IN ONE BOX ONLY. AN EQUIPMENT TAG IS DRAWN ONCE, AT ITS SYSTEM. THE TAGS LISTED IN A SPACE BOX ARE FOR REFERENCE.",
     ]
     yn = SHEET_H - 14.0
@@ -1398,6 +1473,8 @@ def used_numbers() -> set:
     used = {m.group(1) for p in WORKING.glob("IP-BH-*") for m in [re.match(r"IP-BH-(\w{5})", p.name)] if m}
     tender = ROOT / "data" / "source" / "Basis" / "01 ACMV Tender Schematic"
     used |= {m.group(1) for p in tender.glob("IP-BH-*") for m in [re.match(r"IP-BH-(\w{5})", p.name)] if m}
+    # the number of a withdrawn new drawing is not used again (D-079)
+    used |= {r["drawing_number"][6:11] for r in dc.read_csv(NUMBER_LEDGER) if r.get("status", "").startswith("withdrawn")}
     return used
 
 

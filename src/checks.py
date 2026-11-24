@@ -887,6 +887,7 @@ def _register_late_phases() -> None:
 
 
     from . import phase4_checks as p4
+    from . import phase4_c4 as c4
     PHASE_CHECKS[4] = [
         Check("P4-01", "Every unit of the zone schedule has a register tab and a drawing or a stated reason", p4.check_p4_units),
         Check("P4-02", "App D tags appear exactly once (or are listed with a reason)", p4.check_p4_appd_tags),
@@ -900,6 +901,17 @@ def _register_late_phases() -> None:
         Check("P4-10", "Air in equals air out: room, AHU, system (1 % or 10 L/s)", p4.check_p4_balance),
         Check("P4-11", "Drawing register matches the files on disk", p4.check_p4_drawing_register),
         Check("P4-12", "Issue folder complete; README language", p4.check_p4_issue),
+        Check("P4-13", "Drawn value anchored: the PDF text under the box holds the number", c4.check_p4_13_anchor),
+        Check("P4-14", "Source read-back: the cited cell opens, lies in the room's row and column, equals 'required'", c4.check_p4_14_source),
+        Check("P4-15", "Fans: ownership by tag core, pair once, required once, verdicts recomputed", c4.check_p4_15_fans),
+        Check("P4-16", "No add, missing or no-schematic row where the tag or system is drawn", c4.check_p4_16_false_add),
+        Check("P4-17", "Every drawn entity has one disposition; ledger agrees with PDF text", c4.check_p4_17_dispositions),
+        Check("P4-18", "One home per unit over working sheets and new drawings", c4.check_p4_18_home),
+        Check("P4-19", "Input gate: no instruction on a unit outside 0.90-1.10; name-only, reduction, D-076 rules", c4.check_p4_19_gate),
+        Check("P4-20", "Value domain: pressure, typical count, airflow, unit of measure", c4.check_p4_20_domain),
+        Check("P4-21", "MOT: no change ID or annotation for a list-only unit; MOT differences tab complete", c4.check_p4_21_mot),
+        Check("P4-22", "Text: D-015 word list, structural lint, no duplicate rows", c4.check_p4_22_text),
+        Check("P4-23", "One build: manifest hashes, issue equals staging, IDs equal, no ID reused", c4.check_p4_23_build),
     ]
 
 

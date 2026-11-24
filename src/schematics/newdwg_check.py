@@ -202,7 +202,7 @@ def compare_registers(rb: Dict[str, Any], storey: int) -> Dict[str, Any]:
 def queries_on_drawing(rb, storey: int) -> Dict[str, Any]:
     """Change IDs of the storey's query rows (and the schedule-only rows) that are in the text of this sheet."""
     chg = [r for r in csvrows(nd.OUT / "change_register.csv") if r["sheet"] == "App D" and r["layer_type"] == "queries"
-           and r["quantity"] in ("Storey %d" % storey, "Level %02d" % storey)]
+           and r["quantity"] in ("Storey %d" % storey, "Level %02d" % storey) and "drawn on a working sheet" not in r["action"]]
     joined = " ".join(t["s"] for t in rb["texts"])
     return dict(query_rows=len(chg), found=sorted(r["change_id"] for r in chg if r["change_id"] in joined),
                 missing=[r["change_id"] for r in chg if r["change_id"] not in joined])
@@ -388,6 +388,13 @@ def main_storey(results: List[Dict[str, Any]]) -> int:
     recon = {r["appd_tag_as_written"]: r for r in csvrows(REG / "appd_schedule_reconciliation.csv")
              if r["appd_storeys"] == str(storey)}
     equip_tags = {e["tag_as_written"] for e in csvrows(REG / "appd_equipment.csv") if e["storey"] == str(storey)}
+    # working sheet wins (D-079): systems that a working sheet draws are not on the new drawing; each has a cross-reference line
+    inp_x = nd.load_inputs(storey)
+    wd = inp_x["wd"]
+    xref = inp_x["xref"]
+    spaces = {i: r for i, r in spaces.items() if i not in wd["spaces"]}
+    equip_tags = {t for t in equip_tags if t not in xref and t not in wd["held_tags"]}
+    recon = {t: r for t, r in recon.items() if t not in xref and t not in wd["held_tags"]}
     space_sheet: Dict[int, List[str]] = defaultdict(list)
     tag_sheet: Dict[str, List[str]] = defaultdict(list)
     sched_sheet: Dict[str, List[str]] = defaultdict(list)
@@ -402,6 +409,10 @@ def main_storey(results: List[Dict[str, Any]]) -> int:
     joined = " ".join(rep["_texts"] for rep in reps)
     qrows = [r for r in csvrows(nd.OUT / "change_register.csv") if r["sheet"] == "App D" and r["layer_type"] == "queries"
              and r["quantity"] in ("Storey %d" % storey, "Level %02d" % storey)]
+    qrows = [r for r in qrows if "drawn on a working sheet" not in r["action"]       # cross-reference lines carry no change ID
+             and r["item"] not in wd["tags"] and r["item"] not in wd["held_tags"]
+             and not (re.match(r"Space (\d+):", r["item"]) and int(re.match(r"Space (\d+):", r["item"]).group(1)) in wd["spaces"])]
+    xref_missing = sorted(t for t, h in xref.items() if not all((t in joined) and (x in joined) for x in h))
     q_missing = [r["change_id"] for r in qrows if r["change_id"] not in joined]
     cov = dict(
         storey=storey, sheets=[r["number"] for r in results],
@@ -412,14 +423,15 @@ def main_storey(results: List[Dict[str, Any]]) -> int:
         tags_not_drawn_exactly_once=sorted(t for t in (equip_tags | set(recon)) if len(tag_sheet.get(t, [])) != 1
                                            and not (not tag_sheet.get(t) and len(sched_sheet.get(t, [])) == 1)),
         tags_drawn_not_in_register=sorted(t for t in tag_sheet if t not in (equip_tags | set(recon))),
-        schedule_only_rows=len([r for r in qrows if "on no App D layout" in r["action"] or "drawn on a working sheet" in r["action"]]),
+        schedule_only_rows=len([r for r in qrows if "on no App D layout" in r["action"]]),
+        cross_reference_lines_missing=xref_missing, cross_reference_lines=len(xref),
         schedule_only_listed=len(sched_sheet),
         queries_in_register=len(qrows), queries_missing=q_missing,
         values_without_change_row=sorted({x for rep in reps for x in rep["register_comparison"]["values_without_change_row"]}),
     )
     cov["pass"] = bool(all(rep["sheet_pass"] for rep in reps) and not cov["spaces_not_in_exactly_one_box"]
                        and not cov["spaces_on_unknown"] and not cov["tags_not_drawn_exactly_once"]
-                       and not cov["tags_drawn_not_in_register"] and not q_missing
+                       and not cov["tags_drawn_not_in_register"] and not q_missing and not xref_missing
                        and cov["schedule_only_rows"] == cov["schedule_only_listed"])
     # coverage table: every tag and space, with its drawing or the reason
     rows = []
@@ -433,10 +445,16 @@ def main_storey(results: List[Dict[str, Any]]) -> int:
             rows.append(dict(kind="Schedule tag on no layout", item=r["item"], schedule_form=r["item"],
                              drawing=";".join(sched_sheet.get(r["item"], [])) or "NOT LISTED",
                              reason="not drawn: no App D layout shows it; listed in the table with %s" % r["change_id"]))
-        elif "drawn on a working sheet" in r["action"]:
-            rows.append(dict(kind="Tag on a working sheet", item=r["item"], schedule_form=r["item"],
-                             drawing=";".join(sched_sheet.get(r["item"], [])) or "NOT LISTED",
-                             reason="not drawn again: a working sheet draws it (%s); listed in the table with %s" % (r["drawn"], r["change_id"])))
+    for t, h in sorted(xref.items()):
+        rows.append(dict(kind="Tag on a working sheet", item=t, schedule_form=(recon.get(t) or {}).get("schedule_tag_as_written", t),
+                         drawing=";".join(h), reason="shown on %s; cross-reference line on the new drawing, no value, no change ID" % ", ".join(h)))
+    for sid, hr in sorted(wd["held"].items()):
+        rows.append(dict(kind="App D system held", item=hr["item"], schedule_form="", drawing="",
+                         reason="not drawn: %s (%s); the spaces that only this system serves are not boxed" % (hr["action"], hr["change_id"])))
+    for i in sorted(wd["spaces"]):
+        rows.append(dict(kind="Highlighted space", item="SPACE %d" % i, schedule_form="", drawing="",
+                         reason="not drawn: its unit is shown on a working sheet (%s)" % ", ".join(
+                             sorted({x for v in wd["system_ids"].values() for x in v}))))
     for i in sorted(spaces):
         rows.append(dict(kind="Highlighted space", item="SPACE %d" % i, schedule_form="",
                          drawing=";".join(space_sheet.get(i, [])) or "NOT IN A BOX", reason="room box"))

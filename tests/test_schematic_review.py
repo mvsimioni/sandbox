@@ -159,7 +159,7 @@ class TestOutputs:
 
     def test_no_markup_on_mot_theatre_units(self, rv):
         for u in rv.i.units:
-            if u["mot"] and u["tag"] in rv.unit_info:
+            if u.get("list_only") and u["tag"] in rv.unit_info:
                 assert not any(r["needs_id"] for r in rv.unit_info[u["tag"]]["rows"])
 
     def test_cath_rooms_have_a_zone_link(self, rv):
@@ -184,7 +184,7 @@ class TestOutputs:
         n, m = R.write_csvs(rv, tmp_path)
         with open(tmp_path / "change_register.csv", newline="", encoding="utf-8") as fh:
             rows = list(csv.DictReader(fh))
-        assert len(rows) == n == sum(1 for r in rv.rows if r["needs_id"])
+        assert len(rows) == n == sum(1 for r in rv.rows if r["needs_id"] or r.get("class") == "increase of 5 L/s or less, not marked up" or r.get("cls") == "increase of 5 L/s or less, not marked up")
         for col in ("change_id", "sheet", "page", "bbox", "layer_type", "drawn", "required", "action", "source"):
             assert col in rows[0]
         assert {r["layer_type"] for r in rows} <= set(R.LAYERS)
@@ -200,4 +200,4 @@ class TestOutputs:
         assert ws.freeze_panes
         assert ws["A1"].font.name == "Arial"
         n_unit = sum(1 for u in rv.i.units if u["has_tag"])
-        assert len(wb.sheetnames) == 6 + n_unit
+        assert len(wb.sheetnames) == 7 + n_unit

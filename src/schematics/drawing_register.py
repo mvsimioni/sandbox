@@ -29,7 +29,7 @@ SHEET_SIZE = "A0 3367.8 x 2384.2 pt"
 STATUS_NEW = "DRAFT, for checking and drafting"
 STATUS_MARK = "MARKED UP, for checking and drafting"
 COLUMNS = ["drawing_number", "number_status", "title", "storey", "kind", "revision", "status", "sheet_size",
-           "systems", "change_id_count", "change_ids", "files", "notes"]
+           "systems", "change_id_count", "change_ids", "files", "notes", "room_boxes", "rows", "instructions", "queries"]
 
 
 def read_csv(path: Path) -> List[Dict[str, str]]:
@@ -89,47 +89,53 @@ def build_rows() -> List[Dict[str, str]]:
                 sys_by_sheet[s["sheet"]].append(a["tag"]["value"])
     rows: List[Dict[str, str]] = []
 
-    # 1. marked up
-    for pdf in sorted(MARK.glob("*_markup.pdf")):
-        sh = pdf.name[:-len("_markup.pdf")]
+    # 1 and 2. every working air-side sheet has one row with status and counts (C4 build line 26)
+    status_rows = {r["sheet"]: r for r in read_csv(SCH / "sheet_status.csv")}
+    ledger = read_csv(SCH / "entity_ledger.csv")
+    led_by_sheet: Dict[str, List[Dict[str, str]]] = defaultdict(list)
+    for r in ledger:
+        led_by_sheet[r["sheet"]].append(r)
+    for sh in ("IP-BH-00100", "IP-BH-00101"):
+        if sh not in status_rows:
+            rr = by_sheet.get(sh, [])
+            status_rows[sh] = dict(sheet=sh, status="", reason="", room_boxes="0", ledger_rows=str(len(led_by_sheet.get(sh, []))),
+                                   rows=str(len(rr)), instructions=str(sum(1 for r in rr if r["action"].startswith(("Mark up", "New system", "New drawing")))),
+                                   queries=str(sum(1 for r in rr if r["action"].startswith("Query"))), boxes_not_reviewed="0", list_only="0")
+    mot_sheets = {r["sheet"] for r in read_csv(SCH / "scope.csv") if r["kind"] == "sheet" and r["list_only"] == "1"}
+    for sh in sorted(status_rows):
+        st = status_rows[sh]
         rr = by_sheet.get(sh, [])
         ids = [r["change_id"] for r in rr]
-        layers = sorted({r["layer_type"] for r in rr})
-        rows.append(dict(
-            drawing_number=sh, number_status="working issue", title=title_of(model, sh), storey=storey_of(model, sh),
-            kind="mark-up", revision="working issue; mark-up copy", status=STATUS_MARK, sheet_size=SHEET_SIZE,
-            systems=short_list([u for r in rr for u in units_of(r["unit"])]),
-            change_id_count=str(len(set(ids))), change_ids=id_range(ids),
-            files="; ".join(f"markups/{sh}_markup{x}" for x in (".pdf",)),
-            notes=("Copy of the working issue with unflattened annotations on the layers " + ", ".join(layers)
-                   + ". The page content is unchanged. Each annotation carries its change ID as its subject.")))
-
-    # 2. reviewed, not marked up
-    marked = {r["drawing_number"] for r in rows}
-    for sh in sorted(model["sheets"]):
-        if sh in marked:
-            continue
-        kinds = {s["kind"] for s in model["systems"] if s["sheet"] == sh}
-        tags = sys_by_sheet.get(sh, [])
-        if sh in ("IP-BH-07050", "IP-BH-07051", "IP-BH-07052"):
-            why = "Theatre units of the MOT department. They are listed and not marked up. Specified values stay."
-        elif "working_unassigned_rooms" in kinds and not tags:
-            why = ("Reviewed. The sheet draws room boxes with no AHU tag and the zone schedule gives no unit to them, "
-                   "so no value can be marked up. The rooms are on the tab of the unit that the zone schedule names.")
+        layers = sorted({r["layer_type"] for r in rr if r["change_id"]})
+        has_markup = (MARK / f"{sh}_markup.pdf").exists()
+        no_disp = sum(1 for r in led_by_sheet.get(sh, []) if not (r["disposition"] or "").strip())
+        unrev = sum(1 for r in led_by_sheet.get(sh, []) if (r["disposition"] or "").startswith("not reviewed"))
+        if has_markup:
+            status, files = STATUS_MARK, f"markups/{sh}_markup.pdf"
+            kind = "mark-up"
+            notes = ("Copy of the working issue with unflattened annotations on the layers " + ", ".join(layers)
+                     + ". The page content is unchanged. Each annotation carries its change ID as its subject.")
+        elif sh in mot_sheets or st.get("list_only") == "1":
+            status, files, kind = "REVIEWED, listed, no mark-up (MOT)", "", "reviewed, not marked up (MOT)"
+            notes = ("Compared with the MOT schedules. The differences are on the MOT differences tab of the update workbook. "
+                     "The sheet is not marked up. Operating theatres keep the specified values.")
+        elif no_disp:
+            status, files, kind = "NOT REVIEWED: %d ledger rows have no disposition" % no_disp, "", "not reviewed"
+            notes = "Not reviewed: the sheet has ledger rows with no disposition."
+        elif unrev and unrev == len(led_by_sheet.get(sh, [])) - sum(1 for r in led_by_sheet.get(sh, []) if (r["disposition"] or "").startswith("not an air-side")):
+            why = st.get("reason") or "unit not established"
+            status, files, kind = "NOT REVIEWED: " + why, "", "not reviewed"
+            notes = "Not reviewed: " + why + "."
         else:
-            why = ("Reviewed. The change list has no row for this sheet: each drawn value is equal to the required "
-                   "value, or the sheet is covered on the tab of another unit.")
+            status, files, kind = "REVIEWED, no mark-up", "", "reviewed, not marked up"
+            notes = ("Reviewed. Every ledger row of the sheet has a disposition. The change list has no instruction for the sheet "
+                     "that a drafter can apply; queries, if any, are on the update workbook.")
         rows.append(dict(
             drawing_number=sh, number_status="working issue", title=title_of(model, sh), storey=storey_of(model, sh),
-            kind="reviewed, not marked up", revision="working issue", status="REVIEWED, no mark-up", sheet_size=SHEET_SIZE,
-            systems=short_list(tags), change_id_count="0", change_ids="", files="", notes=why))
-    if "IP-BH-00100" not in {r["drawing_number"] for r in rows}:
-        rows.append(dict(
-            drawing_number="IP-BH-00100", number_status="working issue", title="INPATIENT OVERALL ACMV SCHEMATIC 1",
-            storey="", kind="reviewed, not marked up", revision="working issue", status="REVIEWED, no mark-up",
-            sheet_size=SHEET_SIZE, systems="", change_id_count="0", change_ids="", files="",
-            notes=("Reviewed. Its tags are above level 07 and outside the zoning, so the change list has no row. "
-                   "The tags are listed on the Consistency tab. The revised AHU list is on IP-BH-00101.")))
+            kind=kind, revision="working issue" + ("; mark-up copy" if has_markup else ""), status=status, sheet_size=SHEET_SIZE,
+            systems=short_list([u for r in rr for u in units_of(r["unit"])]),
+            change_id_count=str(len(set(i for i in ids if i))), change_ids=id_range(ids), files=files, notes=notes,
+            room_boxes=st.get("room_boxes", ""), rows=st.get("rows", ""), instructions=st.get("instructions", ""), queries=st.get("queries", "")))
     # MOT NSC sheets: from the MOT differences tab of the update workbook
     import openpyxl
     wb = openpyxl.load_workbook(SCH / "schematic_update_register.xlsx", read_only=True)
@@ -138,13 +144,18 @@ def build_rows() -> List[Dict[str, str]]:
         if r[0] and str(r[0]).startswith("IP-BH-"):
             if r[1]:
                 mot[str(r[0])].append(str(r[1]))
+    wb.close()
+    have = {r["drawing_number"] for r in rows}
     for sh in sorted(mot):
+        if sh in have:
+            continue
         rows.append(dict(
             drawing_number=sh, number_status="MOT NSC issue", title="", storey="", kind="reviewed, not marked up (MOT)",
-            revision="MOT NSC issue", status="REVIEWED, listed, no mark-up", sheet_size=SHEET_SIZE,
+            revision="MOT NSC issue", status="REVIEWED, listed, no mark-up (MOT)", sheet_size=SHEET_SIZE,
             systems=short_list(mot[sh]), change_id_count="0", change_ids="", files="",
             notes=("Compared with the MOT schedules. The differences are on the MOT differences tab of the update workbook. "
-                   "The sheet is not marked up. Operating theatres keep the specified values.")))
+                   "The sheet is not marked up. Operating theatres keep the specified values."),
+            room_boxes="", rows=str(len(mot[sh])), instructions="0", queries="0"))
 
     # 3. created: App D storeys
     appd = read_csv(NEW / "appd_drawing_register_rows.csv")
@@ -200,6 +211,18 @@ def build_rows() -> List[Dict[str, str]]:
             change_id_count=str(len(ids)), change_ids=id_range(ids), files=new_files(num),
             notes="Air-side schematic of the FCUs that the zone schedule lists with no tag. One FCU and one room box for each line. "
                   "Airflows are not given: no workbook carries the room. Number provisional, for confirmation."))
+    # 6. withdrawn new drawings: the number is not used again (D-079)
+    nl = NEW.parent / "new_drawing_numbers.csv"
+    if nl.exists():
+        have = {r["drawing_number"] for r in rows}
+        for r in read_csv(nl):
+            if r.get("status", "").startswith("withdrawn") and r["drawing_number"] not in have:
+                rows.append(dict(
+                    drawing_number=r["drawing_number"], number_status="withdrawn, number not reused", title="", storey="",
+                    kind="withdrawn", revision="withdrawn", status=r.get("reason") or "withdrawn", sheet_size=SHEET_SIZE,
+                    systems=short_list([x for x in (r.get("items") or "").split("; ") if x], 20), change_id_count="0",
+                    change_ids="", files="", notes="Withdrawn: " + (r.get("reason") or "").replace("withdrawn: ", "") + ". The number is not reused.",
+                    room_boxes="", rows="", instructions="", queries=""))
     return rows
 
 
@@ -401,33 +424,37 @@ Air in equals air out within 1 % or 10 L/s for the workbook rooms and the AHU to
 """
 
 
-def build_issue() -> Dict[str, int]:
+def build_issue(dest: Path = ISSUE, readme: Optional[str] = None) -> Dict[str, int]:
+    """Copy the set into ``dest`` (the staging folder in the build, C4 build line 3).  Nothing in the issue folder is edited in place:
+    ``dest`` is removed and written whole.  ``readme`` is the text written by build_all from the list; the old template is the fallback."""
     rows = build_rows()
-    if ISSUE.exists():
-        shutil.rmtree(ISSUE)
-    (ISSUE / "markups").mkdir(parents=True)
-    (ISSUE / "new_drawings").mkdir(parents=True)
+    if dest.exists():
+        shutil.rmtree(dest)
+    (dest / "markups").mkdir(parents=True)
+    (dest / "new_drawings").mkdir(parents=True)
     n = {"markups": 0, "pdf": 0, "dxf": 0}
     for r in rows:
         for f in filter(None, r["files"].split("; ")):
             src = NEW / Path(f).name if f.startswith("new_drawings/") else MARK / Path(f).name
-            dst = ISSUE / f
-            shutil.copy2(src, dst)
+            d = dest / f
+            shutil.copy2(src, d)
             if f.endswith(".pdf"):
-                clean_pdf_properties(dst)
+                clean_pdf_properties(d)
                 n["markups" if f.startswith("markups/") else "pdf"] += 1
             elif f.endswith(".dxf"):
                 n["dxf"] += 1
-    shutil.copy2(SCH / "schematic_update_register.xlsx", ISSUE / "schematic_update_register.xlsx")
-    shutil.copy2(SCH / "missing_systems.csv", ISSUE / "missing_systems.csv")
-    shutil.copy2(SCH / "change_register.csv", ISSUE / "change_list.csv")
-    write(rows, ISSUE / "drawing_register.csv")
+    shutil.copy2(SCH / "schematic_update_register.xlsx", dest / "schematic_update_register.xlsx")
+    shutil.copy2(SCH / "missing_systems.csv", dest / "missing_systems.csv")
+    shutil.copy2(SCH / "change_register.csv", dest / "change_list.csv")
+    write(rows, dest / "drawing_register.csv")
+    if (SCH / "schematics_debrief.md").exists():          # the verification debrief is kept in out/schematics and copied with the set
+        shutil.copy2(SCH / "schematics_debrief.md", dest / "schematics_debrief.md")
     new = [r for r in rows if r["kind"] == "new drawing"]
     fill = dict(date="2026-11-23", n_markup=n["markups"], n_new=len(new),
                 n_appd=sum(1 for r in new if r["title"].startswith("App D")),
                 n_fcu=sum(1 for r in new if r["title"].startswith("FCUs with no tag")))
     fill["n_missing"] = fill["n_new"] - fill["n_appd"] - fill["n_fcu"]
-    (ISSUE / "README.md").write_text(README.format(**fill), encoding="utf-8")
+    (dest / "README.md").write_text(readme if readme is not None else README.format(**fill), encoding="utf-8")
     return n
 
 
@@ -439,7 +466,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         write(rows, REGISTER_CSV, files_prefix="out/schematics/")
         print(len(rows), "rows ->", REGISTER_CSV)
     elif cmd == "issue":
-        print(build_issue())
+        print(build_issue(ISSUE))
     return 0
 
 

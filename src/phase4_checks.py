@@ -100,9 +100,10 @@ def readback(d: Dict[str, Any]) -> Dict[str, Any]:
 # P4-01 every unit has a register tab and a drawing or a stated reason
 # --------------------------------------------------------------------------- #
 def check_p4_units(ctx) -> Tuple[str, List[str]]:
+    """P4-01 (C4, build line 29): a unit is covered only through a ledger disposition, a new drawing or the MOT differences tab.
+    The old credit 'sheet in the list of drawings and not marked up' is removed."""
     import openpyxl
-    from src.schematics.review import tag_keys
-    rv = review()
+    from . import phase4_c4 as c4
     wb = openpyxl.load_workbook(SCH / "schematic_update_register.xlsx", read_only=True)
     tabs = {}
     for ws in wb.worksheets:
@@ -110,49 +111,42 @@ def check_p4_units(ctx) -> Tuple[str, List[str]]:
         tabs[str(a)] = ws.title
     mot_rows = list(wb["MOT differences"].iter_rows(values_only=True))[5:]
     wb.close()
-    units = [u for u in rv.i.units if u["has_tag"]]
-    cov: Dict[str, set] = defaultdict(set)
+    zone = c4.zone_units()
+    units = {}
+    for k, z in zone.items():
+        if z["tag"].startswith(("AHU-", "PAHU-", "FCU-")):
+            units[z["tag"]] = k
+    cov: Dict[Tuple[str, str], set] = defaultdict(set)
 
     def add(tags, why):
         for t in tags:
-            for k in tag_keys(t):
+            k = c4.tkey(t)
+            if k:
                 cov[k].add(why)
-    marked = {os.path.basename(p)[:11] for p in glob.glob(str(MARK / "*_markup.pdf"))}
-    for r in changes():
-        if r["sheet"] in marked:
-            add(re.split(r";\s*", re.sub(r"^AHU group:\s*", "", r["unit"])), "marked up " + r["sheet"])
-    dreg = {r["drawing_number"]: r for r in drawing_register()}
-    for s in rv.i.systems:
-        if s.get("source_set") == "working" and s["sheet"] in dreg:
-            add([a["tag"]["value"] for a in s["ahus"]], ("marked up " if s["sheet"] in marked else "reviewed, no mark-up ") + s["sheet"])
-    for tg, inf in rv.unit_info.items():
-        for sh_ in inf.get("sheets_found", []):          # a unit that a working sheet prints by its tag
-            add([tg], "drawn on " + sh_)
+    for r in c4.ledger():
+        d = r["disposition"] or ""
+        if d.startswith(("reviewed under unit", "shared: units", "list only (MOT)")):
+            add(c4.tags_in(d) or c4.tags_in(r["disposition_unit"]), "ledger " + r["sheet"])
     for r in rcsv(NEWD / "missing_systems_coverage.csv"):
-        add([r["item"]], "new drawing " + r["drawing"])
+        if r.get("drawing") and "withdrawn" not in (r.get("reason") or "").lower() and "shown on" not in (r.get("reason") or "").lower():
+            add([r["item"]], "new drawing " + r["drawing"])
     for p in sorted(glob.glob(str(NEWD / "appd_L0*_coverage.csv"))):
         for r in rcsv(Path(p)):
-            if r["kind"] != "Highlighted space":
+            if r["kind"] != "Highlighted space" and r.get("drawing"):
                 add([r["item"]], "new drawing " + r["drawing"])
     add([str(r[1]) for r in mot_rows if r[0] and str(r[0]).startswith("IP-BH-") and r[1]], "MOT differences tab")
-    no_tab = [u["tag"] for u in units if u["tag"] not in tabs]
-    stated = [u["tag"] for u in units if not (u["akeys"] & set(cov))
-              and any(str(r.get("action", "")).startswith("List only (MOT") for r in rv.unit_info.get(u["tag"], {}).get("rows", []))]
-    no_dwg = [u["tag"] for u in units if not (u["akeys"] & set(cov)) and u["tag"] not in stated]
-    by = Counter()
-    for u in units:
-        for w in {x.split(" IP-BH")[0].split(" ")[0] + " " + x.split(" ")[1] if " " in x else x for x in cov.get(next(iter(u["akeys"]), ""), set())}:
-            by[w] += 1
+    for r in changes():                      # a query row at the unit with a reason is a stated reason
+        if r["sheet"] in ("NEW", "App D") and r["action"].startswith("Query"):
+            add(c4.tags_in(r["unit"] + " " + r["item"]), "query " + r["change_id"])
+    no_tab = [t for t in units if t not in tabs]
+    no_cov = [t for t, k in units.items() if k not in cov]
     ev = [f"{len(units)} units with a tag in the zone schedule; {len(units) - len(no_tab)} have a tab in the update workbook",
-          f"{len(units) - len(no_dwg) - len(stated)} units are on a marked-up, reviewed or new drawing, or on the MOT differences tab",
-          f"{len(stated)} units have a stated reason: MOT NSC theatre units, listed on their tab, not drawn here: " + sample(stated)]
+          f"{len(units) - len(no_cov)} are covered by a ledger disposition, a new drawing, a query row with a reason or the MOT differences tab (no credit for a sheet that is only in the list of drawings)"]
     if no_tab:
         ev.append("no tab: " + sample(no_tab))
-    if no_dwg:
-        ev.append("no drawing and no reason: " + sample(no_dwg))
-    untagged = [u for u in rv.i.units if not u["has_tag"]]
-    ev.append(f"{len(untagged)} zone-schedule lines without a tag (FCU, tag to confirm; spill path) are on the tabs 'FCU no tag' and 'Missing systems'")
-    return (FAIL if (no_tab or no_dwg) else PASS), ev
+    if no_cov:
+        ev.append("covered by nothing: " + sample(no_cov))
+    return (FAIL if (no_tab or no_cov) else PASS), ev
 
 
 # --------------------------------------------------------------------------- #
@@ -195,39 +189,42 @@ def working_tag_keys() -> set:
 
 
 def check_p4_appd_tags(ctx) -> Tuple[str, List[str]]:
+    """P4-02 (C4, build line 29): each App D tag is counted over the PDF text of the working sheets plus the DXF text of the new
+    drawings: exactly 1, or a stated reason in the coverage CSV.  A value-free cross-reference line is not counted."""
+    from . import phase4_c4 as c4
     reg = ROOT / "out" / "registers"
-    bad, ev = [], []
-    n_tags = 0
-    for st, reps in sorted(appd_reports().items()):
-        equip = {e["tag_as_written"] for e in rcsv(reg / "appd_equipment.csv") if e["storey"] == str(st)}
-        recon = {r["appd_tag_as_written"] for r in rcsv(reg / "appd_schedule_reconciliation.csv") if r["appd_storeys"] == str(st)}
-        want = equip | recon
-        on: Counter = Counter()
-        for rc in reps:
-            for t, n in rc["tags_on"].items():
-                on[t] += n
-        sched_on: Counter = Counter()
-        for rc in reps:
-            for t in rc["sched_only_on"]:
-                sched_on[t] += 1
-        coverage = {r["item"]: r for r in rcsv(NEWD / f"appd_L0{st}_coverage.csv") if r["kind"] != "Highlighted space"}
-        for t in sorted(want):
-            n = on.get(t, 0)
-            if n >= 1 and (tag_keys_of(t) & working_tag_keys()):
-                bad.append(f"L0{st} {t}: drawn on an App D sheet and on a working sheet")
+    tags = {e["tag_as_written"] for e in rcsv(reg / "appd_equipment.csv")}
+    tags |= {r["appd_tag_as_written"] for r in rcsv(reg / "appd_schedule_reconciliation.csv")}
+    idx = c4.sheet_tag_index()
+    on_new: Dict[Any, set] = defaultdict(set)
+    for p in c4.new_dxf_files():
+        for t in c4.dxf_texts(p):
+            if c4.XREF_RE.search(t):
                 continue
-            if n == 1:
-                continue
-            if n == 0 and sched_on.get(t) == 1 and "listed" in coverage.get(t, {}).get("reason", ""):
-                continue                    # listed in the table of schedule items, with its reason
-            bad.append(f"L0{st} {t}: {n} times")
-        extra = sorted(t for t in on if t not in want)
-        if extra:
-            bad.append(f"L0{st} on the drawing, not in the sources: {sample(extra)}")
-        n_tags += len(want)
-        ev.append(f"L0{st}: {len(want)} tags, {len(reps)} sheet(s), {sum(1 for t in want if on.get(t) == 1)} drawn once, "
-                  f"{sum(1 for t in want if on.get(t, 0) == 0 and sched_on.get(t) == 1)} listed in the table with a reason")
-    ev.append(f"{n_tags} tags in total")
+            for tg in c4.tags_in(t):
+                k = c4.tkey(tg)
+                if k:
+                    on_new[k].add(p.name[:11])
+    reasons: Dict[Any, str] = {}
+    for f in sorted(glob.glob(str(NEWD / "appd_L0*_coverage.csv"))):
+        for r in rcsv(Path(f)):
+            if r["kind"] != "Highlighted space" and (r.get("reason") or "").strip():
+                reasons.setdefault(c4.tkey(r["item"]), r["reason"])
+    bad, n1, nr = [], 0, 0
+    for t in sorted(tags):
+        k = c4.tkey(t)
+        if not k:
+            continue
+        homes = len(idx.get(k, set())) + len(on_new.get(k, set()))
+        if homes == 1:
+            n1 += 1
+        elif k in reasons and homes == 0 and ("listed" in reasons[k] or "not drawn" in reasons[k] or "shown on" in reasons[k]):
+            nr += 1
+        elif homes == 0:
+            bad.append(f"{t}: 0 times and no stated reason")
+        else:
+            bad.append(f"{t}: {homes} times ({sample(sorted(idx.get(k, set())) + sorted(on_new.get(k, set())), 3)})")
+    ev = [f"{len(tags)} App D tags; {n1} appear once over {len(c4.working_sheets())} working sheets (PDF text) and {len(c4.new_dxf_files())} new drawings (DXF text); {nr} listed with a reason"]
     return (FAIL if bad else PASS), ev + bad[:12]
 
 
@@ -324,7 +321,7 @@ def check_p4_pdf_dxf(ctx) -> Tuple[str, List[str]]:
 # --------------------------------------------------------------------------- #
 def check_p4_markup_register(ctx) -> Tuple[str, List[str]]:
     import pymupdf
-    rows = changes()
+    rows = [r for r in changes() if r["change_id"]]       # a row with no ID (increase of 5 L/s or less, no mark-up) has no mark-up
     by_sheet: Dict[str, set] = defaultdict(set)
     for r in rows:
         by_sheet[r["sheet"]].add(r["change_id"])
@@ -353,7 +350,15 @@ def check_p4_markup_register(ctx) -> Tuple[str, List[str]]:
         if strays:
             bad.append(f"{sh}: {strays} annotations with no change ID as subject")
     marked = {os.path.basename(p)[:11] for p in pdfs}
-    no_markup = sorted(s for s in by_sheet if s not in marked and s not in ("NEW", "App D"))
+    import csv as _csv
+    lo_sheets = set()
+    try:
+        with open(Path(__file__).resolve().parents[1] / "out" / "schematics" / "scope.csv", encoding="utf-8", newline="") as _fh:
+            lo_sheets = {r["sheet"] for r in _csv.DictReader(_fh) if r["kind"] == "sheet" and r["list_only"] == "1"}
+    except OSError:
+        pass
+    # a sheet on which every AHU is list-only has no mark-up copy by rule (build line 23, P4-21)
+    no_markup = sorted(s for s in by_sheet if s not in marked and s not in ("NEW", "App D") and s not in lo_sheets)
     if no_markup:
         bad.append("register rows on sheets with no mark-up copy: " + sample(no_markup))
     # new-drawing rows: each ID of the register for NEW and App D appears on a new drawing
@@ -366,11 +371,13 @@ def check_p4_markup_register(ctx) -> Tuple[str, List[str]]:
     want = {r["change_id"]: r for r in rows if r["sheet"] in ("NEW", "App D")}
     alltext = " ".join(t["s"] for d in new_drawings() for t in readback(d)["texts"])
     on_list = {i for i, r in want.items() if i not in on_new and r["layer_type"] == "queries"
-               and (i in listed or r["sheet"] == "App D")}          # App D queries stay on the reconciliation tab
+               and (i in listed or r["sheet"] == "App D" or "zoning conflict" in r["action"])}          # App D queries stay on the reconciliation tab
     fcu_listed = {r["change_id"] for r in rcsv(NEWD / "fcu_notag_coverage.csv") if not r["drawing"] and r["reason"]}
     on_list |= {i for i in fcu_listed if i in want and i not in on_new}      # listed with a reason: no room, no storey
-    on_tag = {i for i, r in want.items() if i not in on_new and i not in on_list and r["layer_type"] == "new systems"
-              and r["quantity"] == "Unit with no schematic" and r["item"] and r["item"] in alltext}   # App D tag drawn under its App D row
+    on_tag = {i for i, r in want.items() if i not in on_new and i not in on_list
+              and ((r["layer_type"] == "new systems" and r["quantity"] == "Unit with no schematic")
+                   or (r["layer_type"] == "queries" and r["quantity"] == "Unit drawn on a new drawing"))
+              and r["item"] and r["item"] in alltext}   # App D tag drawn under its App D row
     missing = sorted(i for i in want if i not in on_new and i not in on_list and i not in on_tag)
     ev = [f"{len(pdfs)} mark-up PDFs, {n_ann} annotations, each with a change ID as subject; set of IDs equal to the register rows of its sheet, both ways",
           f"{len(want)} register rows of new systems and App D: {len(want) - len(missing) - len(on_list) - len(on_tag)} appear on a new drawing as a value, a query or a listed item; "
@@ -382,23 +389,9 @@ def check_p4_markup_register(ctx) -> Tuple[str, List[str]]:
 
 
 def check_p4_workbook_ids(ctx) -> Tuple[str, List[str]]:
-    import openpyxl
-    wb = openpyxl.load_workbook(SCH / "schematic_update_register.xlsx", read_only=True)
-    ids: set = set()
-    for ws in wb.worksheets:
-        for row in ws.iter_rows(values_only=True):
-            for c in row:
-                if isinstance(c, str) and ID_RE.fullmatch(c):
-                    ids.add(c)
-    wb.close()
-    reg = {r["change_id"] for r in changes()}
-    a, b = sorted(reg - ids), sorted(ids - reg)
-    ev = [f"{len(reg)} change IDs in the change list; {len(ids)} in the update workbook"]
-    if a:
-        ev.append(f"in the change list and not in the workbook: {sample(a)}")
-    if b:
-        ev.append(f"in the workbook and not in the change list: {sample(b)}")
-    return (FAIL if a or b else PASS), ev
+    """P4-09, widened (C4, build line 40): change IDs over change list, workbook, mark-up subjects and DXF."""
+    from . import phase4_c4 as c4
+    return c4.check_p4_09_ids(ctx)
 
 
 # --------------------------------------------------------------------------- #

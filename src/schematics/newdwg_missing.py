@@ -31,6 +31,7 @@ from openpyxl.utils import get_column_letter
 
 from . import newdwg as nd
 from . import review as rv
+from . import drawings_common as dc
 from .newdwg import (H, HS, HT, LP, SHEET_H, SHEET_W, STRIP_X0, X0_PAGE, X_MAX, Y_MIN, Y_TOP, SHELF_GAP, Sheet, Value,
                      fnum, tw, wrap, insert, arrow_at)
 
@@ -180,15 +181,67 @@ class Data:
         self.zs_head = {h: i for i, h in enumerate(rows[0])}
         self.zs_rows = {str(r[0]): (n + 1, r) for n, r in enumerate(rows) if n >= 1 and r[0]}
 
-    # --- the lists of the job
+    # --- the lists of the job.  Working sheet wins (D-079): a tag that the ledger finds on a working sheet is not
+    #     drawn on a new drawing; it is listed in withdrawn_rows() with the sheet that draws it.
+    def link_count(self) -> Dict[Tuple[str, str], int]:
+        """Units a room is linked to in the zoning link list: 1 is a one-to-one link."""
+        if not hasattr(self, "_lc"):
+            seen: Dict[Tuple[str, str], set] = defaultdict(set)
+            for cls, ls in self.links.items():
+                for l in ls:
+                    seen[(l["dept"], l["dpa_room_id"])].add(cls)
+            self._lc = {k: len(v) for k, v in seen.items()}
+        return self._lc
+
+    @property
+    def led(self) -> dc.Ledger:
+        if not hasattr(self, "_led"):
+            self._led = dc.Ledger()
+        return self._led
+
+    @property
+    def scope(self) -> dc.Scope:
+        if not hasattr(self, "_scope"):
+            self._scope = dc.Scope()
+        return self._scope
+
+    def homes(self, tag: str) -> List[str]:
+        return self.led.homes(tag)
+
+    def xref_rows(self) -> List[Dict[str, Any]]:
+        """Units that a working sheet draws and that an earlier build drew on a new drawing, or that the list of missing
+        systems still names: one cross-reference line each ('shown on IP-BH-nnnnn'), on a new drawing of the storey."""
+        out: Dict[str, Dict[str, Any]] = {}
+        for w in self.withdrawn_rows():
+            out[w["item"]] = dict(item=w["item"], homes=w["homes"], storey=storey_of_tag(self, w["item"]))
+        for r in dc.read_csv(PREV_ITEMS):
+            if r["kind"] in ("unit", "outdoor-air unit") and r["item"] not in out:
+                h = self.homes(r["item"])
+                if h and not self.scope.unit_list_only(r["item"]):
+                    out[r["item"]] = dict(item=r["item"], homes=h, storey=r["storey"])
+        return sorted(out.values(), key=lambda x: x["item"])
+
+    def withdrawn_rows(self) -> List[Dict[str, str]]:
+        out = []
+        for r in self.mrows:
+            if r["category"] in ("Unit with no schematic",) or r["category"].startswith("Outdoor-air unit referred to"):
+                h = self.homes(r["system"])
+                if h:
+                    out.append(dict(item=r["system"], change_id=r["change_id"], category=r["category"], homes=h))
+        return out
+
     def unit_rows(self) -> List[Dict[str, str]]:
-        return [r for r in self.mrows if r["category"] == "Unit with no schematic" and r["system"] not in self.appd_tags]
+        return [r for r in self.mrows if r["category"] == "Unit with no schematic" and r["system"] not in self.appd_tags
+                and not self.homes(r["system"]) and not self.scope.unit_list_only(r["system"])]
 
     def sep_rows(self) -> List[Dict[str, str]]:
-        return [r for r in self.mrows if r["category"].startswith("Separated room")]
+        """Separated rooms (D-076): only a row that the review keeps as an instruction (build lines 11 and 15)."""
+        if not hasattr(self, "_instr_ids"):
+            self._instr_ids = {r["change_id"] for r in dc.read_csv(OUT / "change_register.csv") if r["action"].startswith(("Mark up", "New system", "New drawing"))}
+        return [r for r in self.mrows if r["category"].startswith("Separated room") and r["change_id"] in self._instr_ids]
 
     def pahu_rows(self) -> List[Dict[str, str]]:
-        return [r for r in self.mrows if r["category"].startswith("Outdoor-air unit referred to")]
+        return [r for r in self.mrows if r["category"].startswith("Outdoor-air unit referred to") and not self.homes(r["system"])]
 
     # --- schedule row of a unit (equipment schedule, air handling)
     def schedule_row(self, tag: str) -> Optional[Dict[str, str]]:
@@ -205,6 +258,19 @@ class Data:
                 seen.add(t)
                 out.append(f)
         return out
+
+
+PREV_ITEMS = OUT / "new_drawing_prev_items.csv"       # items that an earlier build drew on a new drawing (kept)
+
+
+def storey_of_tag(d: Data, tag: str) -> str:
+    zs = d.zs_rows.get(tag)
+    if zs:
+        first = str(zs[1][d.zs_head["Storeys served"]] or "").split(",")[0].strip()
+        if first in STOREYS:
+            return first
+    pl, sv = parse_tag_levels(tag)
+    return sv if sv in STOREYS else (pl if pl in STOREYS else "B2")
 
 
 def storey_of_unit(d: Data, tag: str, row: Dict[str, str]) -> str:
@@ -304,6 +370,27 @@ def build_unit(d: Data, row: Dict[str, str]) -> Dict[str, Any]:
         key = (r["dept"], str(r["name"]), r["area"], r["sa"], r["ra"], r["ea"], r["oa"], r["press"])
         groups.setdefault(key, []).append(r)
     u["room_groups"] = [dict(first=g[0], members=g) for g in groups.values()]
+    # D-076 / build line 15: a room box is drawn only for a room with a one-to-one zoning link to this unit, and only where the
+    # unit passes the gate (zone-schedule cover 0.90 to 1.10, room list complete)
+    n_links = d.link_count()
+    keep = []
+    for g in u["room_groups"]:
+        mem = [m for m in g["members"] if n_links.get((m["dept"], str(m["room"])), 1) == 1]
+        if mem:
+            keep.append(dict(first=mem[0], members=mem))
+    u["room_groups"] = keep
+    u["gate_text"] = ""
+    try:
+        cover = float(row.get("cover") or "")
+    except ValueError:
+        cover = None
+    counted, zoned = row.get("rooms_counted") or "", row.get("rooms_zoned") or ""
+    complete = counted != "" and zoned != "" and counted == zoned
+    if cover is None or not (0.90 <= cover <= 1.10) or not complete:
+        u["gate_text"] = ("ROOM BOXES ARE NOT DRAWN: THE ROOM LIST OF THIS UNIT IS NOT ESTABLISHED (%s OF THE ZONED AREA, %s OF %s ROOMS). "
+                          "THE ZONE TABLE LISTS THE ROOMS." % (("COUNTED AREA IS %.2f" % cover) if cover is not None else "COVER NOT KNOWN",
+                                                              counted or "NO", zoned or "NO"))
+        u["room_groups"] = []
     u["n_rooms_wb"] = len(rooms)
     u["storey"] = storey_of_unit(d, tag, row)
     if u["storey"] not in STOREYS or (zc["Storeys served"][0] in (None, "no information") and first_storey in STOREYS):
@@ -450,6 +537,17 @@ def room_box_stack(g: Dict[str, Any], chg: str, uid: str) -> Stack:
     if f["press"] is not None:
         pv = Value("pressure", numtxt(f["press"]), chg, src_wb(dept, "Pressure", f["press_cell"]), owner)
         st.pair([(0, "PRESS PA", pv, "")])
+    # D-076: the design-criteria rows of the room box: filter, temperature, RH and air class of the room's criteria row
+    crit = dc.criteria_of(dept, f["room"])
+
+    def cv(fld, key):
+        val, cell = crit[key]
+        src = src_wb(dept, "Criteria", cell) if cell else "Workbook D%s tab Criteria, no row for room %s" % (dept, f["room"])
+        return Value(fld, numtxt(val), chg, src, owner)
+    flt, tmp, rh, cls = cv("filter", "filter"), cv("temperature_C", "temp"), cv("rh_pct", "rh"), cv("air_class", "air_class")
+    st.pair([(0, "FILTER", flt, "")])
+    st.pair([(0, "TEMP C", tmp, ""), (36, "RH %", rh, "")])
+    st.pair([(0, "CLASS", cls, "")])
     st.gap(0.2)
     for fld, lab, key in (("terminal_tag", "TERMINAL", "term"), ("exhaust_fan_tag", "EXH FAN", "fan")):
         if f[key]:
@@ -855,9 +953,10 @@ def draw_unit(sh: Sheet, cx: Ctx, U: Dict[str, Any], gx: float, ytop: float, nco
         arrow_at(sh, x_last + 10.0, hy[k] + 0.5, nd.DUCT_LAYER[k], 7.0)
     ybot = min(bottoms) - 8.0 if rows_n else min(hy.values()) - 8.0
     if not groups:
-        sh.text(gx, min(hy.values()) - 9.0, "NO ROOM OF THIS UNIT HAS A ROW IN THE DEPARTMENT WORKBOOKS. NO ROOM BOX IS DRAWN.", 3.0,
-                "IP-NOTES", owner=owner)
-        ybot = min(hy.values()) - 14.0
+        for i_, ln_ in enumerate(wrap(U.get("gate_text") or
+                                      "NO ROOM OF THIS UNIT HAS A ROW IN THE DEPARTMENT WORKBOOKS. NO ROOM BOX IS DRAWN.", 3.0, 330.0)):
+            sh.text(gx, min(hy.values()) - 9.0 - 4.4 * i_, ln_, 3.0, "IP-NOTES", owner=owner)
+        ybot = min(hy.values()) - 14.0 - (4.4 if U.get("gate_text") else 0.0)
     # zone table and queries
     ncol_z = 1 if len(U["zone_rooms"]) <= 4 else (2 if len(U["zone_rooms"]) <= 10 else 3)
     ybot = draw_zone_table(sh, U, gx, ybot, ncol_z, 150.0) - 3.0
@@ -1225,6 +1324,8 @@ def strip2(sh: SheetX) -> None:
         "SYMBOL LIST.",
         "A NEW FCU FOR A SEPARATED ROOM HAS NO TAG YET. ITS TAG IS TO BE CONFIRMED.",
     ]
+    for x in getattr(sh, "xref", []):        # cross-reference line: tag and sheet, no value, no change ID
+        notes.append("%s: SHOWN ON %s." % (x["item"].upper(), ", ".join(x["homes"])))
     yn = SHEET_H - 14.0
     sh.text(x0, yn - 2.8, "NOTES:", 2.8, "IP-NOTES", owner="notes")
     yn -= 6.5
@@ -1424,6 +1525,7 @@ def build_storey(cx: Ctx, storey: str, items: List[Dict[str, Any]], numbers_fn) 
     for i, bands in enumerate(layout):
         Value._n = 0
         sh = SheetX(storey, numbers[i], i + 1, len(layout), numbers)
+        sh.xref = [x for x in cx.d.xref_rows() if x["storey"] == storey] if i == 0 else []
         nd.make_blocks(sh, sym)
         nd.frame(sh)
         y_top = Y_TOP
