@@ -24,6 +24,14 @@ from typing import Any, Dict, List, Optional, Tuple
 from .capture import _covers, _tok
 
 REG = Path("out/registers")
+# D-100: plan rooms whose DPA room is fixed by the sources, not by area (Endoscopy procedure rooms, 24 Nov 2026): room type from the DD Booklet
+# Endoscopy zoning (p98), suite group from the air-side schematics IP-BH-05020 (Advanced 06/07, Diagnostic 01/02) and IP-BH-05021 (ERCP 09,
+# Bronch 08, Diagnostic 03/04, Advanced 05); the order within a pair is north to south (assumed, flagged)
+FORCED = {"L02-R042": "ENDO 04.03.09", "L02-R065": "ENDO 04.03.08", "L02-R011": "ENDO 04.03.01", "L02-R024": "ENDO 04.03.02",
+          "L02-R044": "ENDO 04.03.03", "L02-R053": "ENDO 04.03.04", "L02-R067": "ENDO 04.03.05", "L02-R010": "ENDO 04.03.06",
+          "L02-R023": "ENDO 04.03.07"}
+FORCED_HOW = ("the sources (D-100): room type from the Endoscopy DD Booklet zoning p98, suite group from the air-side schematics IP-BH-05020/05021; "
+              "order within the pair north to south, assumed")
 SCOPE = {"LB3", "B3", "B2", "B1", "L01", "L02", "L03", "L04", "L05", "L06", "L07"}
 
 
@@ -116,7 +124,12 @@ def rebase_ids(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> D
     taken = set()
     plan: Dict[int, Tuple[str, Any]] = {}
     options: Dict[int, List[Dict[str, Any]]] = {}
+    allc = {c["id"]: c for lst in cands.values() for c in lst}
     for n, r in spaces:
+        pr = r.get("plan_room_id") or re.sub(r"^PLAN-", "", str(r["number"]))
+        if pr in FORCED and FORCED[pr] in allc:
+            options[id(r)] = [dict(allc[FORCED[pr]], forced=True)]
+            continue
         nm = {x.strip().lower() for x in _names(r)}
         a = _area(r)
         tagged = [c for c in cands.get(r["storey"], []) if c["tag"] and c["tag"] in nm]
@@ -132,7 +145,9 @@ def rebase_ids(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> D
             continue
         c = opts[0]
         n_alt = len(options[id(r)])
-        if c.get("only_tag"):
+        if c.get("forced"):
+            how = FORCED_HOW
+        elif c.get("only_tag"):
             how = "plan tag (the only room with this tag on the storey)"
         else:
             how = f"plan tag and area ({c['area']:g} m² against {_area(r):g} m²" + (f"; one of {n_alt} rooms with the same tag and area, the pairing among them is not known" if n_alt > 1 else "") + ")"
