@@ -1,4 +1,4 @@
-"""Room IDs from the brief only (D-093): every room of a workbook carries a DPA (or SOA) unique room identifier.
+"""Room IDs from the brief only (D-093, D-094): every room of a workbook carries a DPA (or SOA) unique room identifier.
 
 Appendix D and the plans do not give room IDs. A space read from them (App D space 'CA-...', plan room 'L06-R...', room added from the drawing
 'PLAN-...') is matched to the brief, in this order:
@@ -94,71 +94,89 @@ def rebase_ids(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> D
     def storey_of(x):
         return x.get("storey_from_identifier") or unit_storey.get(x["fpu_department_no"], "")
 
-    free: Dict[str, List[Dict[str, str]]] = defaultdict(list)
-    for x in dpa.values():
-        st = storey_of(x)
-        if st in SCOPE and x["unique_room_identifier"] not in in_wb:
-            free[st].append(x)
-    brief: Dict[Tuple[str, str], List[Tuple[str, Dict[str, Any]]]] = defaultdict(list)
+    # D-094: the SOA with Revit data gives the storey (Revit level) and the plan tag (Revit room name) of every DPA room
+    soa: Dict[str, Dict[str, str]] = {}
+    sp_ = root / REG / "soa_revit.csv"
+    if sp_.exists():
+        with sp_.open(newline="", encoding="utf-8") as fh:
+            for x in csv.DictReader(fh):
+                soa[x["unique_room_identifier"]] = x
+    cands: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for rid, x in dpa.items():
+        sx = soa.get(rid)
+        st = sx["storey"] if sx else storey_of(x)
+        if st not in SCOPE:
+            continue
+        try:
+            xa = float(x["designed_area_m2"] or 0)
+        except ValueError:
+            xa = 0.0
+        cands[st].append(dict(id=rid, tag=((sx or {}).get("revit_tag") or "").strip().lower(), area=xa, row=x, wb=in_wb.get(rid)))
+    spaces = [(n, r) for n, d in datasets.items() for r in d["rooms"] if r["number"] not in dpa]
+    taken = set()
+    plan: Dict[int, Tuple[str, Any]] = {}
+    options: Dict[int, List[Dict[str, Any]]] = {}
+    for n, r in spaces:
+        nm = {x.strip().lower() for x in _names(r)}
+        a = _area(r)
+        tagged = [c for c in cands.get(r["storey"], []) if c["tag"] and c["tag"] in nm]
+        within = sorted((c for c in tagged if a > 0 and c["area"] > 0 and abs(c["area"] - a) <= max(0.25, 0.02 * a)), key=lambda c: abs(c["area"] - a))
+        if within:
+            options[id(r)] = within
+        elif len(tagged) == 1 and _size_ok(a, tagged[0]["area"]):
+            options[id(r)] = [dict(tagged[0], only_tag=True)]
+    # spaces with one candidate first, then the closest areas; one DPA room for one space
+    for n, r in sorted(spaces, key=lambda t: (len(options.get(id(t[1]), [])) or 999, abs((options.get(id(t[1])) or [{"area": 0}])[0]["area"] - _area(t[1])))):
+        opts = [c for c in options.get(id(r), []) if c["id"] not in taken]
+        if not opts:
+            continue
+        c = opts[0]
+        n_alt = len(options[id(r)])
+        if c.get("only_tag"):
+            how = "plan tag (the only room with this tag on the storey)"
+        else:
+            how = f"plan tag and area ({c['area']:g} m² against {_area(r):g} m²" + (f"; one of {n_alt} rooms with the same tag and area, the pairing among them is not known" if n_alt > 1 else "") + ")"
+        taken.add(c["id"])
+        if c["wb"] is not None:
+            bn, b = c["wb"]
+            plan[id(r)] = ("merge", (bn, b), how)
+        else:
+            plan[id(r)] = ("become", c["row"], how)
+
+    # tier 2: same plan tag, area within 30 %, and a DPA department already proven on the same unit and storey (by a brief room or a tier-1 match)
+    unit_depts: Dict[Tuple[str, str], set] = defaultdict(set)
     for n, d in datasets.items():
         for r in d["rooms"]:
-            if r["number"] in dpa:
-                brief[(r["storey"], r.get("ahu") or "")].append((n, r))
-    spaces = [(n, r) for n, d in datasets.items() for r in d["rooms"] if r["number"] not in dpa]
-    taken_free, taken_brief = set(), set()
-    plan: Dict[int, Tuple[str, Any]] = {}
-
-    def pass_dup(by_area: bool):
-        for n, r in spaces:
-            if id(r) in plan or not r.get("ahu"):
-                continue
-            nm, a = _names(r), _area(r)
-            best, bd = None, None
-            for bn, b in brief[(r["storey"], r["ahu"])] + [z for z in brief[(r["storey"], "")] if not z[1].get("ahu")]:   # same unit, or a brief room with no unit yet
-                if id(b) in taken_brief:
-                    continue
-                if not by_area:
-                    ok = any(_covers(x, b.get("name") or "") > 0 for x in nm) and _size_ok(a, _area(b))
-                else:
-                    ba = _area(b)
-                    ok = a > 0 and ba > 0 and abs(ba - a) <= 0.1 * max(a, ba) and _shares_word(nm, b.get("name") or "")
-                if ok:
-                    dist = abs(_area(b) - a)
-                    if bd is None or dist < bd:
-                        best, bd = (bn, b), dist
-            if best:
-                taken_brief.add(id(best[1]))
-                plan[id(r)] = ("merge", best, "name" if not by_area else "area")
-
-    def pass_free(by_area: bool):
-        for n, r in spaces:
-            if id(r) in plan:
-                continue
-            nm, a = _names(r), _area(r)
-            best, bd = None, None
-            for x in free.get(r["storey"], []):
-                if x["unique_room_identifier"] in taken_free:
-                    continue
-                try:
-                    xa = float(x["designed_area_m2"] or 0)
-                except ValueError:
-                    xa = 0.0
-                if not by_area:
-                    ok = any(_covers(y, x["room_name"]) > 0 for y in nm) and _size_ok(a, xa)
-                else:
-                    ok = a > 0 and xa > 0 and abs(xa - a) <= 0.1 * max(a, xa) and _shares_word(nm, x["room_name"])
-                if ok:
-                    dist = abs(xa - a) if a and xa else 1e9
-                    if bd is None or dist < bd:
-                        best, bd = x, dist
-            if best:
-                taken_free.add(best["unique_room_identifier"])
-                plan[id(r)] = ("become", best, "name" if not by_area else "area")
-
-    pass_dup(False)
-    pass_free(False)
-    pass_dup(True)
-    pass_free(True)
+            sx = soa.get(r["number"])
+            if sx and r.get("ahu"):
+                unit_depts[(r["storey"], r["ahu"])].add(sx["department"])
+    for n, r in spaces:
+        act = plan.get(id(r))
+        if act and r.get("ahu"):
+            rid = act[1][1]["number"] if act[0] == "merge" else act[1]["unique_room_identifier"]
+            if rid in soa:
+                unit_depts[(r["storey"], r["ahu"])].add(soa[rid]["department"])
+    tier2 = []
+    for n, r in spaces:
+        if id(r) in plan or not r.get("ahu"):
+            continue
+        nm = {x.strip().lower() for x in _names(r)}
+        a = _area(r)
+        deps = unit_depts.get((r["storey"], r["ahu"]), set())
+        opts = [c for c in cands.get(r["storey"], []) if c["tag"] and c["tag"] in nm and a > 0 and c["area"] > 0
+                and abs(c["area"] - a) <= 0.3 * max(a, c["area"]) and (soa.get(c["id"]) or {}).get("department") in deps]
+        if opts:
+            tier2.append((min(abs(c["area"] - a) / max(a, c["area"]) for c in opts), n, r, opts))
+    for _, n, r, opts in sorted(tier2, key=lambda t: t[0]):
+        a = _area(r)
+        opts = sorted((c for c in opts if c["id"] not in taken), key=lambda c: abs(c["area"] - a))
+        if not opts:
+            continue
+        c = opts[0]
+        taken.add(c["id"])
+        how = (f"plan tag and department on the unit; area {c['area']:g} m² against {a:g} m² (differs by {abs(c['area'] - a) / max(a, c['area']) * 100:.0f} %)"
+               + (f"; one of {len(opts)} candidates" if len(opts) > 1 else ""))
+        plan[id(r)] = ("merge", c["wb"], how) if c["wb"] is not None else ("become", c["row"], how)
 
     merged, became, removed = [], [], []
     for n, r in spaces:
@@ -185,8 +203,8 @@ def rebase_ids(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> D
             r["prov"].pop("soa_area", None)
             r["prov"].pop("area_selector", None)
             r["remark"] = (f"DPA room {x['unique_room_identifier']} '{x['room_name']}' ({x['fpu_department_name']}). Drawing space {old} '{oname}' matched by {how} "
-                           f"on storey {r['storey']} (D-093). " + (r.get("remark") or ""))
-            r.setdefault("gaps", {})["identity"] = f"Room matched to the brief by {how} from drawing space {old} '{oname}'. Confirm (D-093)."
+                           f"on storey {r['storey']} (D-093, D-094). " + (r.get("remark") or ""))
+            r.setdefault("gaps", {})["identity"] = f"Room matched to the brief by {how} from drawing space {old} '{oname}'. Confirm (D-093, D-094)."
             became.append(dict(workbook=f"D{n}", space=old, space_name=oname, dpa_id=x["unique_room_identifier"], dpa_name=x["room_name"], how=how))
         elif act and act[0] == "merge":
             (bn, b), how = act[1], act[2]
@@ -227,6 +245,24 @@ def rebase_ids(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> D
             removed.append(dict(workbook=f"D{n}", space=old, name=oname, storey=r["storey"], unit=r.get("ahu") or r.get("system_type") or "",
                                 area_m2=round(_area(r), 1), plan_room=r.get("plan_room_id") or "",
                                 envelope_m2=round(sum(float(e.get("glazing_m2") or 0) + float(e.get("wall_m2") or 0) for e in r.get("envelope") or []), 1)))
+    # D-094: brief rooms that the SOA puts in the OP block leave the IP workbooks; a storey that differs from the SOA is flagged
+    level_flags = []
+    for n, d in datasets.items():
+        keep = []
+        for r in d["rooms"]:
+            sx = soa.get(r["number"])
+            if sx and sx["revit_level"].upper().endswith("(OP)"):
+                r.setdefault("gaps", {})["storey"] = (f"The SOA (Revit level {sx['revit_level']}) puts this room in the OP block, not the IP block. "
+                                                      "Kept in this workbook until the scope is confirmed (D-094).")
+                level_flags.append(dict(workbook=f"D{n}", room=r["number"], workbook_storey=r["storey"], soa_level=sx["revit_level"], action="flagged: OP block"))
+            elif sx and sx["storey"] and sx["storey"] != r["storey"]:
+                r.setdefault("gaps", {})["storey"] = f"The SOA (Revit level {sx['revit_level']}) puts this room on {sx['storey']}, not {r['storey']}. Confirm (D-094)."
+                level_flags.append(dict(workbook=f"D{n}", room=r["number"], workbook_storey=r["storey"], soa_level=sx["revit_level"], action="flagged: other storey"))
+            if sx:
+                r["soa_revit"] = dict(number=sx["revit_room_number"], tag=sx["revit_tag"], temperature=sx["acmv_temperature"], pressure=sx["acmv_pressure"],
+                                      humidity=sx["acmv_humidity"], recirculation=sx["acmv_recirculation"], exhaust=sx["acmv_exhaust"], hepa=sx["acmv_hepa"])
+            keep.append(r)
+        d["rooms"] = keep
     out = root / "out/qa/spaces_without_brief_room.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     if removed:
@@ -234,4 +270,4 @@ def rebase_ids(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> D
             w = csv.DictWriter(fh, fieldnames=list(removed[0]))
             w.writeheader()
             w.writerows(removed)
-    return dict(became=became, merged=merged, removed=removed)
+    return dict(became=became, merged=merged, removed=removed, level_flags=level_flags)
