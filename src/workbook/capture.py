@@ -63,6 +63,12 @@ def _covers(plan_name: str, room_name: str) -> float:
     return 1.0 + len(used) / max(len(rt), 1) * 0.01
 
 
+def _future_use(name: str) -> str:
+    """'Lact (Fut. Scrub)' -> 'Scrub': a room drawn for a future use is designed for that use."""
+    m = re.search(r"\(\s*fut(?:ure)?\.?\s*([^)]+)\)", name or "", re.I)
+    return m.group(1).strip() if m else (name or "")
+
+
 def _dept_of(zone_dept: str) -> str:
     m = re.search(r"\((\d{2})\)", zone_dept or "")
     return m.group(1) if m else ""
@@ -165,11 +171,16 @@ def capture(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> Dict
                    method="Room outline and tag read from the plan; unit from the zoning (D-092)", confidence="medium")
         tmpl = None
         best = 0.0
-        for r in d["rooms"]:
-            if r.get("ahu") == p["unit"] and not str(r["number"]).startswith("PLAN-"):
-                s = _covers(p["plan_name"], r.get("name") or "")
+        key_name = _future_use(p["plan_name"])
+        for same_unit in (True, False):                     # a room of the same name on the unit first, else anywhere in the workbook
+            for r in d["rooms"]:
+                if str(r["number"]).startswith("PLAN-") or (same_unit and r.get("ahu") != p["unit"]) or not r.get("criteria"):
+                    continue
+                s = _covers(key_name, r.get("name") or "")
                 if s > best:
                     tmpl, best = r, s
+            if tmpl is not None:
+                break
         room = dict(number=number, name=p["plan_name"], storey=p["storey"], ahu=p["unit"], zone_tag=None,
                     system_type="FCU" if p["unit"].startswith("FCU") else None, terminal_tag=None, exhaust_fan=None, space_type="UNCLASSIFIED",
                     room_condition="Comfort", dpa_area_m2=None, soa_area_m2=None, measured_area_m2=area, area_selector=None,
@@ -189,7 +200,7 @@ def capture(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> Dict
                     room["prov"][k] = ["A", v[1]]
             room["remark"] += f" Criteria and loads as room {tmpl['number']} ('{tmpl.get('name')}') on the same unit, assumed."
         else:
-            crow = _criteria_row(n, p["plan_name"], root)
+            crow = _criteria_row(n, key_name, root)
             if crow is not None:
                 from .assemble import criteria_from_row, criteria_text, _doc, _norm
                 csid = _src(d, f"CRIT-{n}-{_norm(crow['room_type_as_printed'])}"[:60], document=_doc(crow["source_file"]), issue=crow.get("department_label", "booklet"),
