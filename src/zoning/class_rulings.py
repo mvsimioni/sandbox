@@ -39,6 +39,10 @@ NEW_COLS = ["class_before_ruling", "basis", "ruling", "ruling_reason"]
 
 ELEC_RE = re.compile(r"^(ELEC|LV|HV|HV Switchrm|Switchroom|Switchrm|Elec Room|Electrical Room)$", re.I)
 IT_RE = re.compile(r"^(IT Closet|LAN|UPS|Batt|Battery)$", re.I)
+# D-095: electrical plant rooms of HFDS Vol 2 cl. 1.1.3.20 (CSR, HT, UPS, battery) and the transformer room of table T.1.1.1.1 under other plan names
+ELEC_PLANT_RE = re.compile(r"^(HT|HT CSR|CSR|HT Switchgear|HV Switchgear|HV Switchroom|Tfr|Transformer|Transformer Room|LV Switchroom|Low Voltage Switch Room|"
+                           r"Generator Sync|SPG Switchroom|UPS|Batt|Battery|Battery Room)$", re.I)
+VOL2_SRC = "HFDS Vol 2 MEP Standardization Report (14 Oct 25), cl. 1.1.3.20 p88 and table T.1.1.1.1 p44"
 AHUROOM_RE = re.compile(r"^AHU( (room|space|plant|deck))?$", re.I)
 CLASS_A = ["CF-0015", "CF-0021", "CF-0030", "CF-0039", "CF-0041", "CF-0055", "CF-0065", "CF-0078"]
 MOT_TAG = {"AHU-B-07-04CATH-01": "AHU-B-04-04CATH-01", "AHU-B-07-04CATH-02": "AHU-B-04-04CATH-02",
@@ -207,11 +211,21 @@ def run(storeys: List[str]) -> Dict[str, Any]:
                 else:
                     r["ruling"] = "; ".join(x for x in [r["ruling"], "D-070 A (unit not found)"] if x)
                     r["notes"] = ((r.get("notes") or "") + f" Ruling D-070 class A ({a_rooms[rid]}): AHU supply with dedicated exhaust expected; no single schematic box fixes the unit, class stays MV.").strip()
+            # D-095: every electrical plant room on duty/standby FCUs, unless a schematic or the MOT NSC names an AHU for it (that AHU is kept)
+            if ELEC_PLANT_RE.match(name) and r["class_kind"] != "AHU":
+                new = f"FCU duty/standby (tag to confirm) [{rid}]"
+                if r["class"] != new:
+                    change(r, new, "FCU", "D-095", f"electrical plant room '{name}': N duty + 1 standby FCUs, 27 deg C or less ({VOL2_SRC})",
+                           f"Electrical plant room: ducted FCUs in N duty + 1 standby, room at 27 deg C or less ({VOL2_SRC}; D-095). Plan mode label kept in class_before_ruling. Tag to confirm.",
+                           r.get("confidence") or "0.6")
+            elif ELEC_PLANT_RE.match(name) and "D-095" not in r["ruling"]:
+                r["ruling"] = "; ".join(x for x in [r["ruling"], "D-095 (AHU kept)"] if x)
+                r["notes"] = ((r.get("notes") or "") + f" Electrical plant room on {cls}: HFDS Vol 2 cl. 1.1.3.20 asks for duty + standby FCUs; the AHU of the source is kept, to confirm (D-095).").strip()
             r["ruling"] = "; ".join(dict.fromkeys(x for x in r["ruling"].split("; ") if x))
             if "D-038" in r["ruling"]:
                 r["basis"] = "MOT NSC"
-            elif any(x in r["ruling"] for x in ("D-029", "D-036", "D-037")):
-                r["basis"] = "council ruling " + ", ".join(x for x in ("D-029", "D-036", "D-037") if x in r["ruling"])
+            elif any(x in r["ruling"].split("; ") for x in ("D-029", "D-036", "D-037", "D-095")):
+                r["basis"] = "council ruling " + ", ".join(x for x in ("D-029", "D-036", "D-037", "D-095") if x in r["ruling"].split("; "))
             elif "D-070 A" in r["ruling"] and "not found" not in r["ruling"]:
                 r["basis"] = "working air-side schematic"
             else:

@@ -179,6 +179,7 @@ def rebase_ids(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> D
         plan[id(r)] = ("merge", c["wb"], how) if c["wb"] is not None else ("become", c["row"], how)
 
     merged, became, removed = [], [], []
+    removed_rooms = []
     for n, r in spaces:
         d = datasets[n]
         act = plan.get(id(r))
@@ -242,6 +243,7 @@ def rebase_ids(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> D
         else:
             d["rooms"] = [z for z in d["rooms"] if z is not r]
             d["flags"] = [f for f in d.get("flags") or [] if f.get("ref") != old]
+            removed_rooms.append((n, r))
             removed.append(dict(workbook=f"D{n}", space=old, name=oname, storey=r["storey"], unit=r.get("ahu") or r.get("system_type") or "",
                                 area_m2=round(_area(r), 1), plan_room=r.get("plan_room_id") or "",
                                 envelope_m2=round(sum(float(e.get("glazing_m2") or 0) + float(e.get("wall_m2") or 0) for e in r.get("envelope") or []), 1)))
@@ -270,4 +272,4 @@ def rebase_ids(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> D
             w = csv.DictWriter(fh, fieldnames=list(removed[0]))
             w.writeheader()
             w.writerows(removed)
-    return dict(became=became, merged=merged, removed=removed, level_flags=level_flags)
+    return dict(became=became, merged=merged, removed=removed, level_flags=level_flags, removed_rooms=removed_rooms)

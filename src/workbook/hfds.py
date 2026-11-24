@@ -18,10 +18,13 @@ HFDS_DOC = "HFDS - Mechanical reverse-brief.pdf"
 
 # (name pattern, table id, area name as in the register, kind, reason)
 RULES: List[Tuple[str, str, str, str, str]] = [
-    (r"\b(lan|comms?|communications?|telecom|data ?cent|server|\bit\b|ict|riser comms)\b|\bups\b|\bbatt", "T.1.1.1.1", "LAN Room", "it",
-     "IT, LAN, UPS and battery rooms follow the HFDS LAN room row on fan coil units"),
-    (r"transformer|\btfr\b|\bhv\b|\blv\b|switch ?(room|gear)|elec(trical)?\b|\bmv ?room|generator|genset", "T.1.1.1.1", "Transformer Room", "plant",
-     "electrical rooms follow the HFDS transformer room row"),
+    # D-095: HFDS Vol 2 cl. 1.1.3.20 puts UPS and battery rooms with the electrical plant rooms (duty + standby FCUs, 27 deg C or less)
+    (r"\bups\b|\bbatt", "T.1.1.1.1", "Transformer Room", "plant",
+     "UPS and battery rooms are electrical plant rooms (HFDS Vol 2 cl. 1.1.3.20: N duty + 1 standby FCUs, 27 deg C or less) and follow the HFDS transformer room row"),
+    (r"\b(lan|comms?|communications?|telecom|data ?cent|server|\bit\b|ict|riser comms)\b", "T.1.1.1.1", "LAN Room", "it",
+     "IT and LAN rooms follow the HFDS LAN room row on fan coil units"),
+    (r"transformer|\btfr\b|\bhv\b|\blv\b|\bht\b|\bcsr\b|switch ?(room|gear|rm)|elec(trical)?\b|\bmv ?room|generator|genset", "T.1.1.1.1", "Transformer Room", "plant",
+     "electrical rooms follow the HFDS transformer room row (HFDS Vol 2 cl. 1.1.3.20: N duty + 1 standby FCUs, 27 deg C or less)"),
     (r"\bahu\b|air handling|plant|pump|chiller|boiler|mechanical|compressor|\bmep\b|\bfcu room|\bhvac", "T.1.1.1.1", "Chiller Plant Room", "plant",
      "plant rooms follow the HFDS chiller plant room row"),
     (r"riser|shaft|duct|services? (room|cupboard)|\bsvc\b|cupboard", "T.1.1.1.1", "Chiller Plant Room", "riser",

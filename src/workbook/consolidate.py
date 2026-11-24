@@ -204,6 +204,19 @@ def main(argv=None) -> int:
     cap["unit_rows_made"] = ensure_unit_rows(datasets)
     from .dpa_ids import rebase_ids
     ids = rebase_ids(datasets)
+    from .services_rooms import services
+    svc = services(datasets, ids.pop("removed_rooms"), Path("."))
+    back = {a["space"] for a in svc["restored"]}
+    ids["removed"] = [x for x in ids["removed"] if x["space"] not in back]
+    _rw = Path("out/qa/spaces_without_brief_room.csv")
+    if ids["removed"]:
+        import csv as _csv
+        with _rw.open("w", newline="", encoding="utf-8") as fh:
+            _w = _csv.DictWriter(fh, fieldnames=list(ids["removed"][0]))
+            _w.writeheader()
+            _w.writerows(ids["removed"])
+    print(f"services rooms (D-095): {svc['inventory']} in the SOA, {len(svc['restored'])} restored from drawing spaces, {len(svc['added'])} added with no outline, "
+          f"{len(svc['spaces_left'])} services spaces with no DPA room", flush=True)
     cap["unit_rows_made"] += ensure_unit_rows(datasets)
     print(f"room IDs (D-093): {len(ids['became'])} space(s) became DPA rooms, {len(ids['merged'])} merged into brief rooms, "
           f"{len(ids['removed'])} taken out (no brief room)", flush=True)
@@ -211,6 +224,7 @@ def main(argv=None) -> int:
     rep = consolidate(datasets)
     rep["capture"] = cap
     rep["room_ids"] = ids
+    rep["services"] = svc
     rep["zone_facade"] = share_zone_facade(datasets)
     from .room_coverage import run as coverage
     cov = coverage(Path("."), datasets, write=True)
