@@ -1108,7 +1108,10 @@ def build_page_zones(key: str, info: dict, P: dict, k2: float) -> Tuple[List[zn.
                 if pr is not None and pr.get("region_kind"):
                     nd["regions"].add(pr["region_kind"])
             continue
-        poly = shapely.from_wkt(pr["polygon_pv_wkt"])
+        poly = shapely.make_valid(shapely.from_wkt(pr["polygon_pv_wkt"]))       # an approximate or extended outline can self-touch
+        if poly.geom_type not in ("Polygon", "MultiPolygon"):
+            poly = shapely.union_all([q for q in getattr(poly, "geoms", []) if q.geom_type in ("Polygon", "MultiPolygon")]) if hasattr(poly, "geoms") else poly
+        poly = poly.buffer(0)
         area = float(pr["a_area_m2"] or 0.0)
         cls = (a["class"] or "").strip() or "no information"
         conf = float(a["confidence"] or 0.0)
@@ -1134,7 +1137,7 @@ def build_page_zones(key: str, info: dict, P: dict, k2: float) -> Tuple[List[zn.
         tags = sorted(g["tags"])
         disp = display_tag(tags)
         parts: List[Polygon] = []
-        u = shapely.union_all(g["polys"])
+        u = shapely.union_all([q.buffer(0) for q in g["polys"]]).buffer(0)
         for part in (list(u.geoms) if u.geom_type == "MultiPolygon" else [u]):
             if part.geom_type == "Polygon" and not part.is_empty:
                 parts.extend(zn.simple_parts(part))

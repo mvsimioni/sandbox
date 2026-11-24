@@ -70,10 +70,10 @@ def run(STOREY: str = STOREY, REGION: str = REGION) -> Dict[str, object]:
     hull = MultiPoint(cen).convex_hull
     # the widened region must not cover a room that has its own closed outline: the area is matched after the closed rooms are cut out
     # (a ring corridor round closed theatres keeps the area of the ring)
-    others = shapely.union_all([wkt.loads(r["polygon_pv_wkt"]) for r in rows if r["polygon_pv_wkt"] and "-T" not in r["room_id"]]).buffer(0.5)
+    others = shapely.union_all([shapely.make_valid(wkt.loads(r["polygon_pv_wkt"])).buffer(0) for r in rows if r["polygon_pv_wkt"] and "-T" not in r["room_id"]]).buffer(0.5)
     # the floor plate: every closed room outline of the storey, joined across gaps up to 3 m; the open region stays inside it
     d_ = 3.0 / k2 ** 0.5
-    plate = shapely.union_all([wkt.loads(r["polygon_pv_wkt"]) for r in rows if r["polygon_pv_wkt"] and "-T" not in r["room_id"]]).buffer(d_).buffer(-d_)
+    plate = shapely.union_all([shapely.make_valid(wkt.loads(r["polygon_pv_wkt"])).buffer(0) for r in rows if r["polygon_pv_wkt"] and "-T" not in r["room_id"]]).buffer(d_).buffer(-d_)
     plate = shapely.union_all([Polygon(g.exterior) for g in getattr(plate, "geoms", [plate]) if g.geom_type == "Polygon"])   # an open region is a hole of the joined rooms: fill it
     hull = hull.intersection(plate) if not hull.intersection(plate).is_empty else hull
     lo, hi = 0.0, 3000.0

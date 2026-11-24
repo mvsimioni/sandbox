@@ -15,7 +15,7 @@ import json
 import re
 from typing import Any, Dict, List
 
-SRC_DOC = "AHU_Cross_Verification_MOT_NSC_Register_RevA.xlsx (sheet AHU Register) and 1. Overall AC Equipment Schedule (MOT NSC)_COR2.pdf"
+SRC_DOC = "council_c6_conflicts.csv decisions (Marcus, 24 Nov 2026); AHU_Cross_Verification_MOT_NSC_Register_RevA.xlsx (sheet AHU Register) and 1. Overall AC Equipment Schedule (MOT NSC)_COR2.pdf"
 
 # old or booklet tag -> MOT NSC Equipment Schedule (working drawing) tag
 MAP: Dict[str, str] = {
@@ -34,6 +34,11 @@ MAP: Dict[str, str] = {
     "AHU-B-07-05MOTSTORE-02A/B": "AHU-B-07-05MOTSTOR-01A/B",
     "AHU-B-07-05MOTSTORE-02A": "AHU-B-07-05MOTSTOR-01A",
     "AHU-B-07-05MOTSTORE-02B": "AHU-B-07-05MOTSTOR-01B",
+    # D-098 (Marcus, 24 Nov 2026, council C6 conflicts): B2 Food Services units take the tags of the air-side schematics
+    "AHU-B-B2-FS-01": "AHU-B-B1-B2OFOO-01", "AHU-B-B2-FS-02": "AHU-B-B1-B2OFOO-02", "AHU-B-B2-FS-03": "AHU-B-B1-B2OFOO-03",
+    "AHU-B-B2-FS-04": "AHU-B-B1-B2OFOO-04", "AHU-B-B2-FS-05": "AHU-B-B1-B2OFOO-05",
+    "AHU-B-B2-FS-06A/B": "AHU-B-B1-B2OFOO-06A/B", "AHU-B-B2-FS-06A": "AHU-B-B1-B2OFOO-06A", "AHU-B-B2-FS-06B": "AHU-B-B1-B2OFOO-06B",
+    "AHU-B-B2-FS-07A/B": "AHU-B-B1-B2OFOO-07A/B", "AHU-B-B2-FS-07A": "AHU-B-B1-B2OFOO-07A", "AHU-B-B2-FS-07B": "AHU-B-B1-B2OFOO-07B",
 }
 # a tag that must not be followed by more tag characters (ADMIT-01 becomes the A/B pair of the Corr 3 layout)
 EXACT = {"AHU-B-07-06ADMIT-01": "AHU-B-07-06ADMIT-01A/B"}

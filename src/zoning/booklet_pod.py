@@ -42,6 +42,14 @@ CYAN = np.array([179, 255, 255])
 MAX_ZONE_PT2 = 8000.0      # 190 m2 at the booklet scale: a larger area is not one theatre zone
 
 
+def _own(r):
+    """The room outline without the open floor that gap_fill added to it."""
+    g = shapely.make_valid(wkt.loads(r["polygon_pv_wkt"])).buffer(0)
+    if r.get("gap_fill_pv_wkt"):
+        g = g.difference(shapely.make_valid(wkt.loads(r["gap_fill_pv_wkt"])).buffer(0.4)).buffer(0)
+    return g
+
+
 def _rd(p: Path):
     with p.open(newline="", encoding="utf-8") as fh:
         r = csv.DictReader(fh)
@@ -137,7 +145,7 @@ def run(pod: dict) -> Dict[str, object]:
     unit_comp: Dict[str, set] = {}
     for c_, u in owner.items():
         unit_comp.setdefault(u, set()).add(c_)
-    closed = [wkt.loads(r["polygon_pv_wkt"]) for r in rows if r["polygon_pv_wkt"] and "-T" not in r["room_id"]]
+    closed = [_own(r) for r in rows if r["polygon_pv_wkt"] and "-T" not in r["room_id"]]
     others = shapely.union_all(closed).buffer(0.2)
     m = 1.0 / k2 ** 0.5
     plate = shapely.union_all(closed).buffer(3 * m).buffer(-3 * m)
@@ -354,7 +362,7 @@ DRAWN = {
     "L05-R261": dict(
         source="tender plan pod walls and MSOT DD Booklet p8 (MOT NSC Appendix C, Corr 2), drawn by inspection",
         frame=(0, 0, 1.0),
-        units={"AHU-B-07-05MOTSUPP-03A/B": [(724, 1345, 1135, 1650)]}),
+        units={"AHU-B-07-05MOTSUPP-03A/B": [(724, 1345, 1214, 1672)]}),   # to the core wall (east) and the south corridor
 }
 
 
@@ -371,7 +379,7 @@ def run_drawn(region: str) -> Dict[str, object]:
     tags = [r for r in rows if r["room_id"].startswith(region + "-T") and r["tag_box_pv"]]
     zr, zc = _rd(REG / f"zone_assignment_{st}.csv")
     cls = {z_["room_id"]: z_["class"] for z_ in zr}
-    closed = [wkt.loads(r["polygon_pv_wkt"]) for r in rows if r["polygon_pv_wkt"] and "-T" not in r["room_id"]]
+    closed = [_own(r) for r in rows if r["polygon_pv_wkt"] and "-T" not in r["room_id"]]
     others = shapely.union_all(closed).buffer(0.2)
     x0, y0, f = spec["frame"]
     pv = lambda b: _box(x0 + b[0] / f, y0 + b[1] / f, x0 + b[2] / f, y0 + b[3] / f)
