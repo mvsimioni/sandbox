@@ -1184,7 +1184,7 @@ def _tender():
     return _TENDER[0]
 
 
-def stage_pdf(storeys: Sequence[str]) -> dict:
+def stage_pdf(storeys: Sequence[str], per_storey_dir=None, revision: str = None) -> dict:
     root = common.project_root()
     specs = []
     summaries = {}
@@ -1219,8 +1219,20 @@ def stage_pdf(storeys: Sequence[str]) -> dict:
                       "not_drawn_note": ("Not drawn (no closed outline on the plan, so no zone and no legend row): %s. See the zone schedule."
                                          % ", ".join(u["tag"] for u in summ["undrawn_units"])) if summ.get("undrawn_units") else ""})
         summaries[key] = summ
+    if per_storey_dir is not None:                 # one PDF per storey: its index page(s) and its sheet only
+        per_storey_dir = Path(per_storey_dir)
+        per_storey_dir.mkdir(parents=True, exist_ok=True)
+        files, all_ok, problems = [], True, []
+        for sp in specs:
+            out = per_storey_dir / ("AIGH_IP_AHU_Zoning_%s.pdf" % sp["key"])
+            man = wp.write_multi_zoning_pdf(root / BG_PDF, [sp], out, "AIGH IP AHU zoning, %s (%s)" % (sp["key"], sp["label"]), revision=revision)
+            v = wp.verify_multi_zoning_pdf(out, root / BG_PDF, man["page_map"], man["expected_layers"], man["expected_tags"])
+            all_ok = all_ok and bool(v.get("ok"))
+            problems += ["%s: %s" % (sp["key"], p_) for p_ in v.get("problems", [])]
+            files.append(str(out))
+        return {"files": files, "ok": all_ok and not area_warnings, "problems": problems + area_warnings, "summaries": summaries}
     out = out_pdf_path(storeys)
-    manifest = wp.write_multi_zoning_pdf(root / BG_PDF, specs, out, "AIGH IP AHU zoning, %s to %s" % (storeys[0], storeys[-1]))
+    manifest = wp.write_multi_zoning_pdf(root / BG_PDF, specs, out, "AIGH IP AHU zoning, %s to %s" % (storeys[0], storeys[-1]), revision=revision)
     ver = wp.verify_multi_zoning_pdf(out, root / BG_PDF, manifest["page_map"], manifest["expected_layers"], manifest["expected_tags"])
     (common.project_root() / "out" / "zoning" / "storeys").mkdir(parents=True, exist_ok=True)
     ver["zone_area_units_consistent"] = not area_warnings

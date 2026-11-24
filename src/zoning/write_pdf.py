@@ -360,7 +360,7 @@ def _add_poly_annot(page, doc, poly: Polygon, name: str, subject: str, contents:
 
 
 def write_multi_zoning_pdf(src_pdf: Path, specs: Sequence[dict], out_pdf: Path, title: str,
-                           legend_cols: int = 3, col_w: float = 760.0) -> dict:
+                           legend_cols: int = 3, col_w: float = 760.0, revision: str = None) -> dict:
     """Write one PDF: an index page, then one page per storey, each a copy of its source page (content stream untouched).
 
     ``specs``: per storey ``key``, ``label``, ``drawing``, ``page_index`` (0-based page of ``src_pdf``), ``zones`` (``zones.Zone``; ``draw_polygons_pv`` are
@@ -492,7 +492,7 @@ def write_multi_zoning_pdf(src_pdf: Path, specs: Sequence[dict], out_pdf: Path, 
     # ---- index pages (first): AHUs by storey, as a table -----------------------------------------------
     import datetime as _dt
     from ..workbook import conf as _conf
-    rev_txt = "Rev A, %s" % _conf.revision_date()
+    rev_txt = revision or ("Rev A, %s" % _conf.revision_date())
     PW, PH = INDEX_PAGE_SIZE
     M = 40.0
     X = dict(swatch=M, tag=M + 26, typ=M + 250, rooms=M + 345, area=M + 435, air=M + 525, dept=M + 535)
