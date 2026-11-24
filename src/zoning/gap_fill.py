@@ -67,7 +67,14 @@ def run(st: str) -> Dict[str, object]:
     # voids and courts stay holes (not floor); a piece larger than 250 m2 is not a corridor and stays open
     gap = plate.difference(shapely.union_all(list(geo.values())).buffer(0.3))
     gap = gap.buffer(-0.4 * m).buffer(0.4 * m)
-    pieces = [g for g in getattr(gap, "geoms", [gap]) if g.geom_type == "Polygon" and 2.0 <= g.area * k2 <= 250.0]
+    # lift shafts are not covered by any system: never filled, and cut out of every outline drawn on the storey (D-099)
+    from .lift_shafts import write as _lifts
+    lifts = [shapely.make_valid(wkt.loads(x["polygon_pv_wkt"])) for x in _lifts(st, k2)]
+    shaft = shapely.union_all(lifts).buffer(0.2) if lifts else Polygon()
+    pieces = [g for g in getattr(gap, "geoms", [gap]) if g.geom_type == "Polygon" and 2.0 <= g.area * k2 <= 250.0
+              and not (not shaft.is_empty and g.intersects(shaft) and g.intersection(shaft).area > 0.3 * g.area)]
+    pieces = [g.difference(shaft) if not shaft.is_empty else g for g in pieces]
+    pieces = [q for g in pieces for q in getattr(g, "geoms", [g]) if q.geom_type == "Polygon" and q.area * k2 >= 2.0]
     tree_ids = [rid for rid in geo if kind.get(rid) in ("AHU", "FCU", "AHU spill", "CRAC")]
     added: Dict[str, List[Polygon]] = {}
     left = 0.0
@@ -101,18 +108,30 @@ def run(st: str) -> Dict[str, object]:
         if FLAG not in (r.get("flags") or ""):
             r["flags"] = ((r.get("flags") or "") + " | " + FLAG + f" ({fill.area * k2:.1f} m2)").strip(" |")
         n += 1
+    cut = 0
+    if not shaft.is_empty:
+        for r in rows:
+            if r["polygon_pv_wkt"]:
+                g0 = shapely.make_valid(wkt.loads(r["polygon_pv_wkt"]))
+                if g0.intersects(shaft) and g0.intersection(shaft).area * k2 > 0.5:
+                    g1 = _clean(g0.difference(shaft))
+                    if not g1.is_empty:
+                        r["polygon_pv_wkt"] = shapely.to_wkt(g1, rounding_precision=2)
+                        if "lift shaft cut out" not in (r.get("flags") or ""):
+                            r["flags"] = ((r.get("flags") or "") + " | lift shaft cut out of the drawn outline (D-099)").strip(" |")
+                        cut += 1
     with path.open("w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=cols)
         w.writeheader()
         for r in rows:
             w.writerow({c: r.get(c, "") for c in cols})
     return {"storey": st, "pieces": len(pieces), "rooms_extended": n, "filled_m2": round(sum(g.area for v in added.values() for g in v) * k2, 1),
-            "left_open_m2": round(left, 1)}
+            "left_open_m2": round(left, 1), "lift_shafts": len(lifts), "outlines_cut_by_shafts": cut}
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--storeys", default="L05,L06")
+    ap.add_argument("--storeys", default="LB3,B3,B2,B1,L01,L02,L03,L04,L05,L06,L07")
     a = ap.parse_args()
     for s in a.storeys.split(","):
         print(run(s))
