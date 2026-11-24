@@ -28,6 +28,7 @@ ENVELOPE_STOREYS = {"L01": 17.0, "L02": 23.0, "L03": 29.0, "L04": 35.0, "L05": 4
 DEFAULT_STOREY_H = 4.5
 CLOSING_MM = 1500.0        # D-089: gaps up to 3 m between plan rooms are closed (provisional)
 TOL_MM = 300.0             # D-089: room outline within 300 mm of the facade line (provisional)
+REACH_MM = 3000.0          # D-102: a facade step with no outline within TOL_MM goes to the nearest outline within 3 m
 STEP_MM = 100.0
 OPEN_MM = 250.0            # D-089: parts of an outline narrower than 500 mm are not used to take the facade line
 
@@ -116,10 +117,12 @@ class Envelope:
         self._storey_cache[storey] = (big, big.exterior)
         return self._storey_cache[storey]
 
-    def _set_geoms(self, storey: str, kind: str):
-        """Outlines of one set on the storey: 'plan' = plan room outlines, 'appd' = App D area outlines."""
+    def _set_rows(self, storey: str, kind: str):
+        """(row, measured outline, zoning outline) of one set. 'plan': the zoning outline is the drawn outline of the zoning (open floor joined
+        by the gap fill, corridors extended to the facade, zones drawn by inspection; D-099, D-101), so that every part of the facade line goes
+        to the space that the zoning shows there; the measured outline is kept to match a room of a workbook to its plan room."""
         key = (storey, kind)
-        cache = self.__dict__.setdefault("_sets", {})
+        cache = self.__dict__.setdefault("_setrows", {})
         if key not in cache:
             from shapely import wkt
             src = (_read(self.root / REG / f"room_polygons_{storey}.csv") if kind == "plan"
@@ -130,10 +133,26 @@ class Envelope:
                     g = wkt.loads(r["polygon_building_mm_wkt"]).buffer(0)
                 except Exception:
                     continue
-                if not g.is_empty:
-                    out.append(g)
+                if g.is_empty:
+                    continue
+                z = g
+                if kind == "plan" and r.get("zoning_building_mm_wkt"):
+                    try:
+                        z = wkt.loads(r["zoning_building_mm_wkt"]).buffer(0)
+                        z = g if z.is_empty else z
+                    except Exception:
+                        z = g
+                out.append((r, g, z))
             cache[key] = out
         return cache[key]
+
+    def _set_geoms(self, storey: str, kind: str):
+        """Outlines of one set used for the facade allocation (zoning outlines for the plan set)."""
+        return [z for _, _, z in self._set_rows(storey, kind)]
+
+    def _match_geoms(self, storey: str, kind: str):
+        """Measured outlines of one set, in the same order, to match a room outline."""
+        return [g for _, g, _ in self._set_rows(storey, kind)]
 
     def _allocation(self, storey: str, kind: str):
         """Each step of the facade line goes to the nearest outline of the set within TOL_MM. Returns a list (per outline) of {sector: m}."""
@@ -168,13 +187,18 @@ class Envelope:
                 t = (i + 0.5) / n
                 p = Point(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
                 best, bk = None, None
-                for j in tree.query(p.buffer(TOL_MM)):
-                    d = geoms[int(j)].distance(p)
-                    if d > TOL_MM:
-                        continue
-                    k = (round(d / 50.0), geoms[int(j)].area)      # nearest (50 mm steps); on a tie the smaller outline (a room before an open region)
-                    if bk is None or k < bk:
-                        best, bk = int(j), k
+                # D-102: every step of the facade line belongs to a space. Nearest outline within TOL_MM; where none (recess, column line,
+                # set-back glazing), the nearest outline within REACH_MM (the facade line closes gaps of up to 2 x CLOSING_MM)
+                for tol in (TOL_MM, REACH_MM):
+                    for j in tree.query(p.buffer(tol)):
+                        d = geoms[int(j)].distance(p)
+                        if d > tol:
+                            continue
+                        k = (round(d / 50.0), geoms[int(j)].area)      # nearest (50 mm steps); on a tie the smaller outline (a room before an open region)
+                        if bk is None or k < bk:
+                            best, bk = int(j), k
+                    if best is not None:
+                        break
                 if best is not None:
                     res[best][sector] = res[best].get(sector, 0.0) + L / n / 1000.0
         cache[key] = res
@@ -186,15 +210,7 @@ class Envelope:
         cache = self.__dict__.setdefault("_prf", {})
         if storey in cache:
             return cache[storey]
-        from shapely import wkt
-        ids = []
-        for r in _read(self.root / REG / f"room_polygons_{storey}.csv"):
-            try:
-                g = wkt.loads(r["polygon_building_mm_wkt"]).buffer(0)
-            except Exception:
-                continue
-            if not g.is_empty:
-                ids.append(r["room_id"])
+        ids = [r["room_id"] for r, _, _ in self._set_rows(storey, "plan")]
         al = self._allocation(storey, "plan")
         cache[storey] = {rid: al[i] for i, rid in enumerate(ids) if i < len(al) and al[i]}
         return cache[storey]
@@ -217,7 +233,7 @@ class Envelope:
         if g.is_empty or self._outline(storey) is None:
             return {}
         for kind in ("plan", "appd"):
-            geoms = self._set_geoms(storey, kind)
+            geoms = self._match_geoms(storey, kind)
             best, score = None, 0.0
             for j, h in enumerate(geoms):
                 if not h.intersects(g):

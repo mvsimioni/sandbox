@@ -209,6 +209,15 @@ def run(st: str) -> Dict[str, object]:
                         if "lift shaft cut out" not in (r.get("flags") or ""):
                             r["flags"] = ((r.get("flags") or "") + " | lift shaft cut out of the drawn outline (D-099)").strip(" |")
                         cut += 1
+    if "zoning_building_mm_wkt" not in cols:
+        cols.append("zoning_building_mm_wkt")
+    for r in rows:                      # the drawn outline in building mm: the envelope allocates the facade line on it (D-102)
+        if r.get("polygon_pv_wkt"):
+            try:
+                gz = _clean(wkt.loads(r["polygon_pv_wkt"]))
+                r["zoning_building_mm_wkt"] = shapely.to_wkt(shapely.affinity.affine_transform(gz, [M_[0, 0], M_[1, 0], M_[0, 1], M_[1, 1], M_[2, 0], M_[2, 1]]), rounding_precision=0)
+            except Exception:
+                r["zoning_building_mm_wkt"] = ""
     with path.open("w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=cols)
         w.writeheader()
