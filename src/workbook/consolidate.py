@@ -202,9 +202,15 @@ def main(argv=None) -> int:
     from .capture import capture, ensure_unit_rows
     cap = capture(datasets)
     cap["unit_rows_made"] = ensure_unit_rows(datasets)
+    from .dpa_ids import rebase_ids
+    ids = rebase_ids(datasets)
+    cap["unit_rows_made"] += ensure_unit_rows(datasets)
+    print(f"room IDs (D-093): {len(ids['became'])} space(s) became DPA rooms, {len(ids['merged'])} merged into brief rooms, "
+          f"{len(ids['removed'])} taken out (no brief room)", flush=True)
     print(f"capture: {len(cap['linked'])} room(s) linked to a unit by zoning, {len(cap['added'])} room(s) added from the drawing", flush=True)
     rep = consolidate(datasets)
     rep["capture"] = cap
+    rep["room_ids"] = ids
     rep["zone_facade"] = share_zone_facade(datasets)
     from .room_coverage import run as coverage
     cov = coverage(Path("."), datasets, write=True)

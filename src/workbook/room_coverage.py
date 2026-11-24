@@ -66,6 +66,9 @@ def run(root: Path = Path("."), datasets: dict = None, write: bool = True) -> li
             m = re.match(r"CA-(\w+)-(\d+)$", r["number"])
             if m:
                 appd_used.add((m.group(1), str(int(m.group(2)))))
+            for sp in ([r["appd_space"]] if r.get("appd_space") else []) + list(r.get("appd_spaces") or []):
+                appd_used.add((sp[0], str(sp[1])))
+                m = m or True
             for u in (UNIT.findall(r.get("ahu") or "") or [None]):
                 wb_rooms[(r["storey"], u)].append((wbk, r["number"], r.get("name") or "", bool(ids) or bool(m)))
     outl = defaultdict(list)
