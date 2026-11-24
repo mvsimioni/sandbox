@@ -159,6 +159,18 @@ VOL2_TEXT = {
 def _apply_service(d: Dict[str, Any], r: Dict[str, Any], key: str, root: Path) -> List[str]:
     """Unit and criteria of a services room (D-095). Returns notes."""
     notes = []
+    try:
+        return _apply_service_(d, r, key, root, notes)
+    finally:
+        if (r.get("ahu") or r.get("system_type") or r.get("terminal_tag")) and not r["prov"].get("zoning"):
+            if not any(s_["id"] == "ASM-D095" for s_ in d["sources"]):
+                d["sources"].append(dict(id="ASM-D095", document="Decision D-095 (electrical rooms and plant rooms)", issue="24 Nov 2026", page="-",
+                                         location="decision register", text_as_read="System of a services room by its room type where the zoning gives none",
+                                         method="Assumption by room type (HFDS Vol 2 cl. 1.1.3.19, 1.1.3.20, 1.1.4; D-036, D-037)", confidence="low"))
+            r["prov"]["zoning"] = ["A", "ASM-D095"]
+
+
+def _apply_service_(d: Dict[str, Any], r: Dict[str, Any], key: str, root: Path, notes: List[str]) -> List[str]:
     cat = CAT[key]
     if not r.get("criteria"):
         crit = _hfds_criteria(d, r.get("name") or key, root) or _hfds_criteria(d, key, root)
