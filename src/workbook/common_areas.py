@@ -368,6 +368,21 @@ def assemble_common_areas(root: Path = Path("."), with_others: bool = True) -> D
 
     # D-044: the common areas of LB3, B3, B2, B1 and L01 (outside App D). Rooms are the plan rooms that the zoning gives to no department or to the common areas.
     env_model = envm.Envelope(root, (cfg.get("envelope_round5") or {}).get("coefficients"))
+    # D-089: App D spaces take their facade from their App D outline (they were treated as internal before)
+    n_env_appd = 0
+    if env_model.available:
+        for room in rooms:
+            m = re.match(r"CA-(\w+)-(\d+)$", room["number"])
+            if not m or room.get("_plan_room") or room["storey"] not in envm.ENVELOPE_STOREYS:
+                continue
+            g = outlines.get((room["storey"], str(int(m.group(2)))))
+            if g is None:
+                continue
+            erows = env_model.rows(room["storey"], room["number"], g.wkt, "ETTV-ENV")
+            if erows:
+                room["envelope"] = erows
+                n_env_appd += 1
+                room["remark"] = room["remark"].rstrip(". ") + ". External space: envelope rows from the App D outline by the simple facade method, to confirm."
     n_plan_ca = 0
     plan_rooms: List[Dict[str, Any]] = []
     for st_key in PLAN_STOREYS:
@@ -584,8 +599,9 @@ def assemble_common_areas(root: Path = Path("."), with_others: bool = True) -> D
                        text_as_read="wall U-value, glazing U-value, area-weighted shading coefficient, correction factor and window-to-wall ratio of each facade",
                        method="Gain per m² of wall = 12 × Uw; gain per m² of glass = 3.4 × Uf + 211 × CF × SC (ETTV equivalents, an averaged basis); areas by the simple facade method",
                        confidence="medium")
-        flags.append(dict(type="CONFIRM", ref="Envelope", text=(f"Envelope gain is assessed for {n_env} external plan room(s) of storey L01 by the simple facade method (edge length on the storey outline × storey height × "
-                          "ETTV window-to-wall ratio). App D spaces have no envelope rows: they are treated as internal. Confirm the method and the bearing of the grid."), source=esid))
+        flags.append(dict(type="CONFIRM", ref="Envelope", text=(f"Envelope gain is assessed for {n_env} external space(s) ({n_env_appd} App D spaces) by the simple facade method: facade length × storey height × "
+                          "ETTV window-to-wall ratio. Facade line: plan room outlines joined across gaps up to 3 m; a space within 300 mm of the line takes the nearest part of it. "
+                          "Confirm the method, the 3 m and 300 mm values and the bearing of the grid."), source=esid))
     else:
         flags.append(dict(type="CONFIRM", ref="Envelope", text="Envelope rows are not set. Every space is treated as internal, with no glazing, wall or roof gain.", source="ASM-DEFAULT"))
     flags.append(dict(type="ASSUMPTION", ref="Room Information", text=(f"{n_plan_ca} common-area plan room(s) of storeys LB3, B3, B2, B1 and L01 are added from the plan outlines and the zoning, outside App D. "

@@ -2,7 +2,8 @@
 
 Method, as documented on Basis of Design:
 * Properties come from the ETTV report (wall U-value, glazing U-value, shading coefficient, correction factor and window-to-wall ratio of each facade).
-* A room is external only where an edge of its plan outline lies on the outline of the storey. The facade of an edge is the sector (N, NE, E, ...) of its outward normal,
+* Facade line (D-089): plan room outlines joined across gaps up to 3 m. A room is external where the line passes within 300 mm of it; each part of the line
+  goes to the nearest room of the same outline set. The facade of a part of the line is the sector (N, NE, E, ...) of its outward normal,
   taken from the grid axes with the grid bearing (assumed, to confirm).
 * Area of the facade of the room = length of its edges on the facade x storey height. Glass = area x window-to-wall ratio of the ETTV report for that facade. Wall = the rest
   (spandrel and mullion count as wall, as the report counts them).
@@ -25,8 +26,15 @@ SECTORS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
 GRID_BEARING_DEG = 359.77          # azimuth of the page-up grid axis relative to grid north (grid model, fit of the call-outs on the sample sheet); to confirm
 ENVELOPE_STOREYS = {"L01": 17.0, "L02": 23.0, "L03": 29.0, "L04": 35.0, "L05": 41.0, "L06": 47.0, "L07": 53.0, "L08": 59.0}
 DEFAULT_STOREY_H = 4.5
-EDGE_TOL_MM = 160.0
-BUFFER_MM = 100.0
+CLOSING_MM = 1500.0        # D-089: gaps up to 3 m between plan rooms are closed (provisional)
+TOL_MM = 300.0             # D-089: room outline within 300 mm of the facade line (provisional)
+STEP_MM = 100.0
+OPEN_MM = 250.0            # D-089: parts of an outline narrower than 500 mm are not used to take the facade line
+
+
+def _opened(g):
+    h = g.buffer(-OPEN_MM).buffer(OPEN_MM)
+    return h if not h.is_empty else g
 
 
 def _f(v: Any) -> Optional[float]:
@@ -93,31 +101,107 @@ class Envelope:
         return self.heights.get(storey)
 
     def _outline(self, storey: str):
+        """Facade line of the storey (D-089): the plan room outlines joined across gaps up to 2 x CLOSING_MM (columns, shafts, rooms with no
+        outline), the outer boundary of the main floor plate only (courts and voids are not facades). Returns (plate, ring) or None."""
         if storey in self._storey_cache:
             return self._storey_cache[storey]
-        from shapely import wkt
         from shapely.ops import unary_union
-        rows = _read(self.root / REG / f"room_polygons_{storey}.csv")
-        polys = []
-        for r in rows:
-            try:
-                g = wkt.loads(r["polygon_building_mm_wkt"])
-            except Exception:
-                continue
-            if not g.is_empty:
-                polys.append(g.buffer(0))
+        polys = [g for g in self._set_geoms(storey, "plan")]
         if not polys:
             self._storey_cache[storey] = None
             return None
-        u = unary_union([p.buffer(BUFFER_MM) for p in polys])
+        u = unary_union([p.buffer(CLOSING_MM) for p in polys]).buffer(-CLOSING_MM)
         geoms = list(u.geoms) if hasattr(u, "geoms") else [u]
-        big = max(geoms, key=lambda g: g.area)            # only the outer boundary of the main body of the storey; islands and courts are not facades
-        ring = big.exterior
-        self._storey_cache[storey] = ring
-        return ring
+        big = max(geoms, key=lambda g: g.area)
+        self._storey_cache[storey] = (big, big.exterior)
+        return self._storey_cache[storey]
+
+    def _set_geoms(self, storey: str, kind: str):
+        """Outlines of one set on the storey: 'plan' = plan room outlines, 'appd' = App D area outlines."""
+        key = (storey, kind)
+        cache = self.__dict__.setdefault("_sets", {})
+        if key not in cache:
+            from shapely import wkt
+            src = (_read(self.root / REG / f"room_polygons_{storey}.csv") if kind == "plan"
+                   else [r for r in _read(self.root / REG / "appd_outlines_mm.csv") if r.get("storey") == storey])
+            out = []
+            for r in src:
+                try:
+                    g = wkt.loads(r["polygon_building_mm_wkt"]).buffer(0)
+                except Exception:
+                    continue
+                if not g.is_empty:
+                    out.append(g)
+            cache[key] = out
+        return cache[key]
+
+    def _allocation(self, storey: str, kind: str):
+        """Each step of the facade line goes to the nearest outline of the set within TOL_MM. Returns a list (per outline) of {sector: m}."""
+        key = (storey, kind)
+        cache = self.__dict__.setdefault("_alloc", {})
+        if key in cache:
+            return cache[key]
+        from shapely.geometry import Point
+        from shapely.strtree import STRtree
+        o = self._outline(storey)
+        geoms = self._set_geoms(storey, kind)
+        res: List[Dict[str, float]] = [dict() for _ in geoms]
+        if o is None or not geoms:
+            cache[key] = res
+            return res
+        plate, ring = o
+        geoms = [_opened(g) for g in geoms]       # slivers under 2 x OPEN_MM wide (gaps read as part of a room) are not the room
+        tree = STRtree(geoms)
+        pts = list(ring.coords)
+        for a, b in zip(pts[:-1], pts[1:]):
+            L = math.hypot(b[0] - a[0], b[1] - a[1])
+            if L < 1.0:
+                continue
+            nx, ny = (b[1] - a[1]) / L, -(b[0] - a[0]) / L
+            mx, my = (a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0
+            if plate.contains(Point(mx + nx * 200.0, my + ny * 200.0)):
+                nx, ny = -nx, -ny
+            az = (math.degrees(math.atan2(nx, ny)) + GRID_BEARING_DEG) % 360.0
+            sector = SECTORS[int(((az + 22.5) % 360.0) // 45.0)]
+            n = max(1, int(round(L / STEP_MM)))
+            for i in range(n):
+                t = (i + 0.5) / n
+                p = Point(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+                best, bk = None, None
+                for j in tree.query(p.buffer(TOL_MM)):
+                    d = geoms[int(j)].distance(p)
+                    if d > TOL_MM:
+                        continue
+                    k = (round(d / 50.0), geoms[int(j)].area)      # nearest (50 mm steps); on a tie the smaller outline (a room before an open region)
+                    if bk is None or k < bk:
+                        best, bk = int(j), k
+                if best is not None:
+                    res[best][sector] = res[best].get(sector, 0.0) + L / n / 1000.0
+        cache[key] = res
+        return res
+
+    def plan_room_facade(self, storey: str) -> Dict[str, Dict[str, float]]:
+        """Facade of each plan room of the storey, keyed by room_id (plan set, D-089)."""
+        key = ("_prf", storey)
+        cache = self.__dict__.setdefault("_prf", {})
+        if storey in cache:
+            return cache[storey]
+        from shapely import wkt
+        ids = []
+        for r in _read(self.root / REG / f"room_polygons_{storey}.csv"):
+            try:
+                g = wkt.loads(r["polygon_building_mm_wkt"]).buffer(0)
+            except Exception:
+                continue
+            if not g.is_empty:
+                ids.append(r["room_id"])
+        al = self._allocation(storey, "plan")
+        cache[storey] = {rid: al[i] for i, rid in enumerate(ids) if i < len(al) and al[i]}
+        return cache[storey]
 
     def facade_lengths(self, storey: str, room_wkt: str) -> Dict[str, float]:
-        """Length in metres of the edges of the room outline that lie on the outline of the storey, by facade sector (cached by outline)."""
+        """Length in metres of facade line given to this room outline, by facade sector (D-089). The outline is found in the plan set or in the
+        App D set of the storey (same outline, or overlap of 90 % or more); the facade line is shared among the outlines of that set only."""
         key = (storey, hash(room_wkt))
         cache = self.__dict__.setdefault("_len_cache", {})
         if key not in cache:
@@ -126,34 +210,47 @@ class Envelope:
 
     def _facade_lengths(self, storey: str, room_wkt: str) -> Dict[str, float]:
         from shapely import wkt
-        from shapely.geometry import Point
-        ring = self._outline(storey)
-        if ring is None:
-            return {}
         try:
             g = wkt.loads(room_wkt).buffer(0)
         except Exception:
             return {}
-        polys = list(g.geoms) if hasattr(g, "geoms") else [g]
+        if g.is_empty or self._outline(storey) is None:
+            return {}
+        for kind in ("plan", "appd"):
+            geoms = self._set_geoms(storey, kind)
+            best, score = None, 0.0
+            for j, h in enumerate(geoms):
+                if not h.intersects(g):
+                    continue
+                inter = h.intersection(g).area
+                s = inter / max(h.area, g.area) if max(h.area, g.area) > 0 else 0.0
+                if s > score:
+                    best, score = j, s
+            if best is not None and score >= 0.9:
+                return {k: v for k, v in self._allocation(storey, kind)[best].items() if v >= 0.3}
+        # an outline of neither set: the facade line within TOL_MM of the outline
+        from shapely.geometry import LineString
+        plate, ring = self._outline(storey)
+        band = g.buffer(TOL_MM)
         out: Dict[str, float] = {}
-        for p in polys:
-            for ring_ in [p.exterior]:
-                pts = list(ring_.coords)
-                for (x1, y1), (x2, y2) in zip(pts[:-1], pts[1:]):
-                    L = math.hypot(x2 - x1, y2 - y1)
-                    if L < 50:
-                        continue
-                    mx, my = (x1 + x2) / 2.0, (y1 + y2) / 2.0
-                    if ring.distance(Point(mx, my)) > BUFFER_MM + EDGE_TOL_MM:
-                        continue
-                    nx, ny = (y2 - y1) / L, -(x2 - x1) / L
-                    eps = 200.0
-                    if p.contains(Point(mx + nx * eps, my + ny * eps)):
-                        nx, ny = -nx, -ny
-                    az = (math.degrees(math.atan2(nx, ny)) + GRID_BEARING_DEG) % 360.0
-                    sector = SECTORS[int(((az + 22.5) % 360.0) // 45.0)]
-                    out[sector] = out.get(sector, 0.0) + L / 1000.0
-        return out
+        pts = list(ring.coords)
+        from shapely.geometry import Point
+        for a, b in zip(pts[:-1], pts[1:]):
+            seg = LineString([a, b])
+            L = seg.length
+            if L < 1.0:
+                continue
+            part = seg.intersection(band).length
+            if part < 1.0:
+                continue
+            nx, ny = (b[1] - a[1]) / L, -(b[0] - a[0]) / L
+            mx, my = (a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0
+            if plate.contains(Point(mx + nx * 200.0, my + ny * 200.0)):
+                nx, ny = -nx, -ny
+            az = (math.degrees(math.atan2(nx, ny)) + GRID_BEARING_DEG) % 360.0
+            sector = SECTORS[int(((az + 22.5) % 360.0) // 45.0)]
+            out[sector] = out.get(sector, 0.0) + part / 1000.0
+        return {k: v for k, v in out.items() if v >= 0.3}
 
     def rows(self, storey: str, number: str, room_wkt: str, source: str) -> List[Dict[str, Any]]:
         """Envelope rows of the workbook schema for one room (one per facade sector). Empty for an internal room."""
@@ -192,5 +289,6 @@ class Envelope:
                 segment=f"{number}-{sector}", building_part="Facade", face=sector, azimuth_deg=az, orientation=sector, glazing_m2=round(glass, 1), wall_m2=round(wall, 1), roof_m2=0,
                 shading="shading coefficient of the ETTV report, area weighted", method="ETTV ratio x facade length x storey height", source=source, code="A",
                 remark=(f"Facade length {length:.1f} m on the {sector} facade of storey {storey}, storey height {h:g} m, window-to-wall ratio {f['wwr']:.3f} (ETTV report, page {f['page']}). "
+                        "Facade line: plan room outlines joined across gaps up to 3 m; room within 300 mm of the line; each part of the line to the nearest room. "
                         "Simple facade method: openings are not read from the elevations one by one. Confirm.")))
         return rows
