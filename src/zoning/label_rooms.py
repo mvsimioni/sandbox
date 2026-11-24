@@ -44,6 +44,10 @@ def label(pdf: Path, storey: str) -> dict:
             continue
         contents = f"{num}\n{info['name']}\nUnit: {info['unit'] or 'none'}\nWorkbook: {info['wb']}"
         tagname = re.sub(r"[^A-Za-z0-9]", "", num)
+        gs = [q for g0 in gs for q in getattr(g0, "geoms", [g0]) if q.geom_type == "Polygon"]
+        if not gs:
+            unplaced.append(num)
+            continue
         for k, g in enumerate(gs):                     # room outline: an unflattened polygon markup, subject = DPA room ID
             pts = list(g.exterior.coords)[:-1]
             if len(pts) < 3:

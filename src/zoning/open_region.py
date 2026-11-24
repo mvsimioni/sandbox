@@ -12,6 +12,7 @@ a measured outline: confidence 'low', and the polygon says so in the register.
 from __future__ import annotations
 
 import csv
+csv.field_size_limit(1 << 30)
 import sys
 from pathlib import Path
 from typing import Dict, List
@@ -55,7 +56,7 @@ def _to_mm(poly: Polygon, M) -> Polygon:
     return Polygon(pts)
 
 
-def run() -> Dict[str, object]:
+def run(STOREY: str = STOREY, REGION: str = REGION) -> Dict[str, object]:
     path = REG / f"room_polygons_{STOREY}.csv"
     rows, cols = _rd(path)
     tags = [r for r in rows if r["room_id"].startswith(REGION + "-T")]
@@ -67,17 +68,22 @@ def run() -> Dict[str, object]:
     boxes = [tuple(map(float, r["tag_box_pv"].split(","))) for r in tags]
     cen = [((b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for b in boxes]
     hull = MultiPoint(cen).convex_hull
-    lo, hi = 0.0, 2000.0
+    # the widened region must not cover a room that has its own closed outline: the area is matched after the closed rooms are cut out
+    # (a ring corridor round closed theatres keeps the area of the ring)
+    others = shapely.union_all([wkt.loads(r["polygon_pv_wkt"]) for r in rows if r["polygon_pv_wkt"] and "-T" not in r["room_id"]]).buffer(0.5)
+    # the floor plate: every closed room outline of the storey, joined across gaps up to 3 m; the open region stays inside it
+    d_ = 3.0 / k2 ** 0.5
+    plate = shapely.union_all([wkt.loads(r["polygon_pv_wkt"]) for r in rows if r["polygon_pv_wkt"] and "-T" not in r["room_id"]]).buffer(d_).buffer(-d_)
+    plate = shapely.union_all([Polygon(g.exterior) for g in getattr(plate, "geoms", [plate]) if g.geom_type == "Polygon"])   # an open region is a hole of the joined rooms: fill it
+    hull = hull.intersection(plate) if not hull.intersection(plate).is_empty else hull
+    lo, hi = 0.0, 3000.0
     for _ in range(60):
         mid = (lo + hi) / 2
-        if hull.buffer(mid).area * k2 < region_m2:
+        if hull.buffer(mid).intersection(plate).difference(others).area * k2 < region_m2:
             lo = mid
         else:
             hi = mid
-    reg = hull.buffer(hi)
-    # the widened region must not cover a room that has its own closed outline
-    others = [wkt.loads(r["polygon_pv_wkt"]) for r in rows if r["polygon_pv_wkt"] and "-T" not in r["room_id"]]
-    reg = reg.difference(shapely.union_all(others).buffer(0.5))
+    reg = hull.buffer(hi).intersection(plate).difference(others)
     cells = voronoi_diagram(MultiPoint(cen), envelope=reg.buffer(10).envelope)
     M = _affine(rows)
     patched = 0
@@ -85,10 +91,14 @@ def run() -> Dict[str, object]:
         pt = shapely.Point(c)
         cell = next(g for g in cells.geoms if g.contains(pt))
         part = cell.intersection(reg)
-        if part.is_empty:
-            continue
+        if part.is_empty or part.area * k2 < 0.5:        # the tag falls inside a closed room or outside the plate: its tag box only
+            bx = boxes[tags.index(r)]
+            part = box(*bx)
         if part.geom_type != "Polygon":
             part = max((g for g in part.geoms if g.geom_type == "Polygon"), key=lambda g: g.area)
+        part = part.simplify(0.5, preserve_topology=True)       # 0.5 pt on the sheet: well below the drawing accuracy
+        if part.geom_type != "Polygon":
+            part = max((g for g in getattr(part, "geoms", [part]) if g.geom_type == "Polygon"), key=lambda g: g.area)
         r["polygon_pv_wkt"] = shapely.to_wkt(part, rounding_precision=2)
         r["polygon_building_mm_wkt"] = shapely.to_wkt(_to_mm(part, M), rounding_precision=0)
         r["a_area_m2"] = f"{part.area * k2:.3f}"
@@ -117,6 +127,20 @@ def run() -> Dict[str, object]:
     return {"patched": patched, "area_total_m2": round(tot, 1), "region_m2": region_m2}
 
 
+def run_all() -> List[Dict[str, object]]:
+    """Every open region of LB3 to L07 whose tags have no outline (D-071, extended 24 Nov 2026 for the MOT pods and the other open regions)."""
+    out = []
+    for st in ["LB3", "B3", "B2", "B1", "L01", "L02", "L03", "L04", "L05", "L06", "L07"]:
+        rows, _ = _rd(REG / f"room_polygons_{st}.csv")
+        regions = sorted({r["room_id"].rsplit("-T", 1)[0] for r in rows if "-T" in r["room_id"] and r["tag_box_pv"]
+                          and (not r["polygon_pv_wkt"] or "nearest-tag partition" in (r.get("method_agreement") or ""))})
+        for rg in regions:
+            res = run(st, rg)
+            out.append(dict(storey=st, region=rg, **res))
+    return out
+
+
 if __name__ == "__main__":
-    print(run())
+    for x in run_all():
+        print(x)
     sys.exit(0)
