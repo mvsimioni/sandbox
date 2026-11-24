@@ -288,3 +288,28 @@ def rebase_ids(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> D
             w.writeheader()
             w.writerows(removed)
     return dict(became=became, merged=merged, removed=removed, level_flags=level_flags, removed_rooms=removed_rooms)
+
+
+def apply_forced(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> List[Dict[str, Any]]:
+    """D-100: a DPA room of FORCED takes its plan room and the unit of that plan room in the zoning (rooms that were brief rooms already)."""
+    by_dpa = {v: k for k, v in FORCED.items()}
+    zone = {}
+    for st in {k.split("-")[0] for k in FORCED}:
+        with (root / REG / f"zone_assignment_{st}.csv").open(newline="", encoding="utf-8") as fh:
+            for z in csv.DictReader(fh):
+                zone[z["room_id"]] = z["class"]
+    out = []
+    for n, d in datasets.items():
+        for r in d["rooms"]:
+            pr = by_dpa.get(r["number"])
+            if not pr:
+                continue
+            unit = zone.get(pr)
+            before = (r.get("plan_room_id"), r.get("ahu"))
+            r["plan_room_id"] = pr
+            if unit and re.match(r"^(P?AHU|FCU)-", unit):
+                r["ahu"] = unit
+            r.setdefault("gaps", {})["identity"] = f"Plan room {pr} and unit {unit} by {FORCED_HOW}. Confirm."
+            r["remark"] = (r.get("remark") or "").split(" D-100:")[0] + f" D-100: plan room {pr}, unit {unit} (was {before[0]}, {before[1]})."
+            out.append(dict(room=r["number"], plan_room=pr, unit=unit, before_plan=before[0], before_unit=before[1]))
+    return out

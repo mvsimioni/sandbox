@@ -204,6 +204,8 @@ def main(argv=None) -> int:
     cap["unit_rows_made"] = ensure_unit_rows(datasets)
     from .dpa_ids import rebase_ids
     ids = rebase_ids(datasets)
+    from .dpa_ids import apply_forced
+    ids["forced"] = apply_forced(datasets)
     from .services_rooms import services
     svc = services(datasets, ids.pop("removed_rooms"), Path("."))
     back = {a["space"] for a in svc["restored"]}

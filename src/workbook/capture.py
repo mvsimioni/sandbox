@@ -266,7 +266,19 @@ def ensure_unit_rows(datasets: Dict[str, Dict[str, Any]]) -> List[str]:
                 copy_sources(rows_any[t][1], d, a)
             else:
                 a = dict(tag=t, type="FCU" if t.startswith("FCU") else ("PAHU" if t.startswith("PAHU") else "AHU"), sched_oa_lps=None, sched_supply_lps=None,
-                         note="The unit is on rooms linked by the zoning (D-092). No tender airflow is set for it in this workbook. VERIFY.")
+                         note="The unit is on rooms linked by the zoning (D-092). VERIFY.")
+                # the tender airflow of the unit from the one tender lookup (Equipment Schedule Corr 5, MOT NSC schedule, air-side schematic)
+                try:
+                    from .assemble import _tender_for_tag
+
+                    def _add(sid, **kw):
+                        if not any(s_["id"] == sid for s_ in d["sources"]):
+                            d["sources"].append(dict(id=sid, **kw))
+                    a.update(_tender_for_tag(t, add_src=_add))
+                except Exception as e:                          # no tender value: the row stays without one, flagged
+                    a["note"] += f" No tender airflow found ({type(e).__name__})."
+                if a.get("sched_supply_lps") is None:
+                    a["note"] += " No tender airflow is set for it in this workbook."
                 made.append(f"D{n} {t}")
             d.setdefault("ahus", []).append(a)
     return made
