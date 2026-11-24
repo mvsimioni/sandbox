@@ -337,19 +337,20 @@ DRAWN = {
         units={
             "AHU-B-07-06DSOT-09": [(415, 137, 585, 335), (292, 137, 415, 210)],
             "AHU-B-07-06DSOT-10A/B": [(765, 137, 935, 335), (935, 137, 1060, 210)],
-            "AHU-B-07-06DSOT-11": [(415, 335, 585, 545), (292, 485, 415, 545)],
-            "AHU-B-07-06DSOT-12A/B": [(765, 335, 935, 545), (935, 485, 1060, 545)],
-            "AHU-B-07-06STER-03A/B": [(585, 287, 765, 545)],
+            # OR-11, OR-12 and the sterile hold share the south facade (Marcus, 24 Nov 2026): their zones run to the facade line, no support strip
+            "AHU-B-07-06DSOT-11": [(415, 335, 585, 560), (292, 485, 415, 560)],
+            "AHU-B-07-06DSOT-12A/B": [(765, 335, 935, 560), (935, 485, 1060, 560)],
+            "AHU-B-07-06STER-03A/B": [(585, 287, 765, 560)],
         },
         frame=(640, 1300, 2.083),
         support="AHU-B-07-06DSOTSUPP-03A/B",
         above="AHU-B-07-06DSOTSUPP-02A/B",
-        above_box=[(677, 1262, 962, 1330), (677, 1110, 772, 1262)]),          # pod 2 bottom row (bay exits, scrub) above the pod 3 wall: pod 2 support zone
+        above_box=[(677, 1262, 1005, 1330), (677, 1110, 772, 1262)]),     # pod 2 south and west sides, to the PRE-OP wall          # pod 2 bottom row (bay exits, scrub) above the pod 3 wall: pod 2 support zone
     # L05 MOT pods 1 and 2 (support rings) and pod 3: the pod box minus every room that has its own closed outline (MSOT DD Booklet p7, p8)
     "L05-R058": dict(
         source="tender plan pod walls and MSOT DD Booklet p7 (MOT NSC Appendix C, Corr 2), drawn by inspection",
         frame=(0, 0, 1.0),
-        units={"AHU-B-07-05MOTSUPP-01A/B": [(724, 400, 975, 860)], "AHU-B-07-05MOTSUPP-02A/B": [(724, 860, 975, 1345)]}),
+        units={"AHU-B-07-05MOTSUPP-01A/B": [(724, 400, 1005, 860)], "AHU-B-07-05MOTSUPP-02A/B": [(724, 860, 1005, 1345)]}),   # to the PACU / PRE-OP wall
     "L05-R261": dict(
         source="tender plan pod walls and MSOT DD Booklet p8 (MOT NSC Appendix C, Corr 2), drawn by inspection",
         frame=(0, 0, 1.0),

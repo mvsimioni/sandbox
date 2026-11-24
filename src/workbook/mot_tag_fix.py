@@ -26,7 +26,17 @@ MAP: Dict[str, str] = {
     "AHU-B-07-05MOTHYB-12": "AHU-B-07-05MOTHYB-01",
     "AHU-B-07-04ANGIONP-04A": "AHU-B-07-04ANGIO-04A",
     "AHU-B-07-04ANGIONP-04B": "AHU-B-07-04ANGIO-04B",
+    # units in no equipment schedule: the latest MOT NSC drawings (Corr 3: L07 ACMV layout sheets 1 and 3, App A L07 AHU Plant Room) govern over
+    # the DD Booklet (Marcus, 24 Nov 2026: the DD Booklet does not carry the latest naming)
+    "AHU-B-07-05PACU-01A/B": "AHU-B-07-05MOTPACU-01A/B",
+    "AHU-B-07-05PACU-01A": "AHU-B-07-05MOTPACU-01A",
+    "AHU-B-07-05PACU-01B": "AHU-B-07-05MOTPACU-01B",
+    "AHU-B-07-05MOTSTORE-02A/B": "AHU-B-07-05MOTSTOR-01A/B",
+    "AHU-B-07-05MOTSTORE-02A": "AHU-B-07-05MOTSTOR-01A",
+    "AHU-B-07-05MOTSTORE-02B": "AHU-B-07-05MOTSTOR-01B",
 }
+# a tag that must not be followed by more tag characters (ADMIT-01 becomes the A/B pair of the Corr 3 layout)
+EXACT = {"AHU-B-07-06ADMIT-01": "AHU-B-07-06ADMIT-01A/B"}
 PATTERNS = [
     (re.compile(r"AHU-B-07-0([56])STERS-0([123])"), r"AHU-B-07-0\1STER-0\2"),
     (re.compile(r"AHU-B-07-06DOTSUPP-0([1234])"), r"AHU-B-07-06DSOTSUPP-0\1"),
@@ -38,7 +48,38 @@ def fix_text(s: str) -> str:
         s = re.sub(re.escape(a) + r"(?![0-9])", b, s)
     for p, b in PATTERNS:
         s = p.sub(b, s)
+    for a, b in EXACT.items():
+        s = re.sub(re.escape(a) + r"(?![0-9A-Z/])", b, s)
     return s
+
+
+def apply_zoning(reg_dir) -> List[Dict[str, Any]]:
+    """The same tag map on the zone assignment classes (the earlier class stays in class_before_ruling)."""
+    import csv
+    from pathlib import Path
+    log = []
+    csv.field_size_limit(1 << 30)
+    for f in sorted(Path(reg_dir).glob("zone_assignment_*.csv")):
+        with f.open(newline="", encoding="utf-8") as fh:
+            rd = csv.DictReader(fh)
+            rows, cols = list(rd), rd.fieldnames
+        ch = 0
+        for r in rows:
+            new = fix_text(r["class"])
+            if new != r["class"]:
+                if not r.get("class_before_ruling"):
+                    r["class_before_ruling"] = r["class"]
+                log.append(dict(storey=r["storey"], room_id=r["room_id"], before=r["class"], after=new))
+                r["notes"] = ((r.get("notes") or "") + f" Tag {r['class']} replaced by {new}: MOT NSC naming (D-097).").strip()
+                r["ruling"] = "; ".join(x for x in [r.get("ruling", ""), "D-097"] if x)
+                r["class"] = new
+                ch += 1
+        if ch:
+            with f.open("w", newline="", encoding="utf-8") as fh:
+                w = csv.DictWriter(fh, fieldnames=cols)
+                w.writeheader()
+                w.writerows(rows)
+    return log
 
 
 def apply(datasets: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
