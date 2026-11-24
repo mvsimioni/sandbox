@@ -156,6 +156,9 @@ def consolidate(datasets: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
             if a.get("tag") == unit:
                 a["other_rooms"] = 0
                 a["consolidated"] = True
+                from .capture import copy_sources
+                for S in datasets.values():
+                    copy_sources(S, D, a)
         if not any(a.get("tag") == unit for a in D.get("ahus") or []):
             for n, S in datasets.items():
                 hit = [a for a in S.get("ahus") or [] if a.get("tag") == unit]
@@ -163,6 +166,8 @@ def consolidate(datasets: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
                     a = copy.deepcopy(hit[0])
                     a["other_rooms"] = 0
                     D.setdefault("ahus", []).append(a)
+                    from .capture import copy_sources
+                    copy_sources(S, D, a)
                     break
             else:
                 raise SystemExit(f"{unit}: no unit row in any workbook")

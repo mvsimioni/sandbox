@@ -151,6 +151,14 @@ def capture(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> Dict
                 area = float(pr.get("a_area_m2") or 0) or None
             except ValueError:
                 area = None
+        area_assumed = False
+        if area is None and tag_level:
+            try:
+                ra, nt = float(pr.get("region_area_m2") or 0), int(float(pr.get("n_tags_in_region") or 0))
+            except ValueError:
+                ra, nt = 0.0, 0
+            if ra > 0 and nt > 0:
+                area, area_assumed = round(ra / nt, 1), True
         number = f"PLAN-{p['plan_room']}"
         sid = _src(d, f"PLAN-{p['plan_room']}", document=f"Architectural plan, storey {p['storey']} (room outline and tag)", issue="as issued", page=p["storey"],
                    location=f"plan room {p['plan_room']}", text_as_read=f"tag '{p['plan_name']}', {area or '?'} m², class {p['unit']} in the zoning",
@@ -181,11 +189,39 @@ def capture(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> Dict
                     room["prov"][k] = ["A", v[1]]
             room["remark"] += f" Criteria and loads as room {tmpl['number']} ('{tmpl.get('name')}') on the same unit, assumed."
         else:
-            room["gaps"]["criteria"] = "No room of the same name on this unit gives criteria or loads. Give the room type."
+            crow = _criteria_row(n, p["plan_name"], root)
+            if crow is not None:
+                from .assemble import criteria_from_row, criteria_text, _doc, _norm
+                csid = _src(d, f"CRIT-{n}-{_norm(crow['room_type_as_printed'])}"[:60], document=_doc(crow["source_file"]), issue=crow.get("department_label", "booklet"),
+                            page=f"page {crow['booklet_page']}", location=crow.get("bbox", ""), text_as_read=criteria_text(crow),
+                            method="Value read from the DD Booklet criteria table", confidence=str(crow.get("confidence", "")))
+                room["criteria"] = criteria_from_row(crow, csid, "plan name expanded", "A",
+                                                     f"Booklet room type '{crow['room_type_as_printed']}' (page {crow['booklet_page']}) for the plan tag '{p['plan_name']}' (abbreviations expanded). Confirm.")
+                room["remark"] += f" Criteria from the booklet row '{crow['room_type_as_printed']}' by the expanded plan name, assumed."
+            else:
+                room["gaps"]["criteria"] = "No room of the same name on this unit and no booklet row of the department fits the plan tag. Give the room type."
+        # D-028: a room with a pressure target is calculated on Pressure
+        c_ = room.get("criteria") or {}
+        pa_ = next((c_[k] for k in ("pressure_pa_tender", "pressure_pa_working", "pressure_pa_booklet") if c_.get(k) is not None), None)
+        if pa_ not in (None, 0):
+            try:
+                per = float(pr.get("a_perimeter_m") or 0) if not tag_level else 0.0
+            except ValueError:
+                per = 0.0
+            if per > 0:
+                room["pressure"] = dict(mode="controlled", suite=number, perimeter_m=round(per, 3), prov=["M", sid], doors=[])
+            else:
+                room["pressure"] = dict(mode="controlled", suite=number, perimeter_m=None, perimeter_rule="factor", prov=["A", "GEN-PRESSURE"], doors=[])
+                room["gaps"]["perimeter"] = "The perimeter for the internal surface is 4 × the square root of the area, assumed: the plan outline is not this room's. Confirm."
         if room.get("ceiling_height_m") and "ceiling_height" not in room["prov"]:
             room["prov"]["ceiling_height"] = ["A", "ASM-CEILING"]
         if tag_level:
-            room["gaps"]["area"] = "The room is a tag inside an open-plan region of the plan: its own area and outline are not measured. Give the area."
+            if area_assumed:
+                room["prov"]["measured_area"] = ["A", sid]
+                room["gaps"]["area"] = (f"The room is a tag inside an open-plan region of the plan ({pr.get('region_area_m2')} m², {pr.get('n_tags_in_region')} tags). "
+                                        f"Its area is assumed as the region area divided by the number of tags: {area} m². Give the area.")
+            else:
+                room["gaps"]["area"] = "The room is a tag inside an open-plan region of the plan: its own area and outline are not measured. Give the area."
         elif pr.get("polygon_building_mm_wkt") and p["storey"] in envm.ENVELOPE_STOREYS:
             room["envelope"] = env.rows(p["storey"], number, pr["polygon_building_mm_wkt"], "ETTV-ENV")
             room["_geom"] = True
@@ -206,7 +242,7 @@ def ensure_unit_rows(datasets: Dict[str, Dict[str, Any]]) -> List[str]:
     rows_any = {}
     for d in datasets.values():
         for a in d.get("ahus") or []:
-            rows_any.setdefault(a["tag"], a)
+            rows_any.setdefault(a["tag"], (a, d))
     made = []
     for n, d in datasets.items():
         have = {a["tag"] for a in d.get("ahus") or []}
@@ -214,11 +250,63 @@ def ensure_unit_rows(datasets: Dict[str, Dict[str, Any]]) -> List[str]:
             if not re.match(r"^(P?AHU|FCU)-", t):
                 continue
             if t in rows_any:
-                a = copy.deepcopy(rows_any[t])
+                a = copy.deepcopy(rows_any[t][0])
                 a["other_rooms"] = 0
+                copy_sources(rows_any[t][1], d, a)
             else:
                 a = dict(tag=t, type="FCU" if t.startswith("FCU") else ("PAHU" if t.startswith("PAHU") else "AHU"), sched_oa_lps=None, sched_supply_lps=None,
                          note="The unit is on rooms linked by the zoning (D-092). No tender airflow is set for it in this workbook. VERIFY.")
                 made.append(f"D{n} {t}")
             d.setdefault("ahus", []).append(a)
     return made
+
+
+def copy_sources(src_d: Dict[str, Any], dst_d: Dict[str, Any], obj: Any) -> int:
+    """Copy to dst_d every source of src_d that obj cites (any string equal to a source id)."""
+    cited = set()
+
+    def walk(o):
+        if isinstance(o, str):
+            cited.add(o)
+        elif isinstance(o, dict):
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, (list, tuple)):
+            for v in o:
+                walk(v)
+    walk(obj)
+    have = {x["id"] for x in dst_d["sources"]}
+    n = 0
+    for x in src_d["sources"]:
+        if x["id"] in cited and x["id"] not in have:
+            dst_d["sources"].append(copy.deepcopy(x))
+            have.add(x["id"])
+            n += 1
+    return n
+
+
+_CRIT_CACHE: Dict[str, List[Dict[str, str]]] = {}
+
+
+def _criteria_row(dept: str, plan_name: str, root: Path):
+    """Booklet criteria row of the department for the plan tag, with its abbreviations expanded (first expansion of each word)."""
+    if dept == "00":
+        return None
+    if not _CRIT_CACHE:
+        with (root / REG / "criteria.csv").open(newline="", encoding="utf-8") as fh:
+            for r in csv.DictReader(fh):
+                _CRIT_CACHE.setdefault(r["dept_no"].lstrip("0"), []).append(r)
+    rows = _CRIT_CACHE.get(dept.lstrip("0"), [])
+    if not rows:
+        return None
+    from .assemble import _criteria_alternatives
+    best, bs = None, (0.0, 0)
+    for c in rows:
+        for alt in _criteria_alternatives(c):
+            sc = _covers(plan_name, alt)
+            if sc <= 0:
+                continue
+            key = (sc, -len(alt))                    # all plan words in the booklet name; the shortest such name is the closest
+            if key > bs:
+                best, bs = c, key
+    return best
