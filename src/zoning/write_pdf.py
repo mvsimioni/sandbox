@@ -471,9 +471,8 @@ def write_multi_zoning_pdf(src_pdf: Path, specs: Sequence[dict], out_pdf: Path, 
             _style_annot(doc, ft, "legend-nodraw-%s-%d" % (sp["key"], j), ud["tag"], label, legend_oc, None, (0, 0, 0), 1.0, None)
         # room outlines
         for r in sp["rooms"]:
-            poly: Polygon = r["polygon"]
-            if poly.is_empty:
-                continue
+          parts = [q for q in getattr(r["polygon"], "geoms", [r["polygon"]]) if q.geom_type == "Polygon" and not q.is_empty]
+          for k_, poly in enumerate(parts):              # an approximate outline of an open region can have several parts
             pts = list(poly.exterior.coords)[:-1]
             if len(pts) < 3:
                 continue
@@ -486,7 +485,7 @@ def write_multi_zoning_pdf(src_pdf: Path, specs: Sequence[dict], out_pdf: Path, 
             a.update()
             a.set_oc(rooms_oc)
             doc.xref_set_key(a.xref, "CA", "1.00")
-            doc.xref_set_key(a.xref, "NM", "(%s)" % ("room-" + r["room_id"]))
+            doc.xref_set_key(a.xref, "NM", "(%s)" % ("room-" + r["room_id"] + ("-%d" % k_ if k_ else "")))
             pm["rooms"] += 1
         manifest_pages.append(pm)
     # ---- index pages (first): AHUs by storey, as a table -----------------------------------------------

@@ -217,6 +217,10 @@ def main(argv=None) -> int:
             _w.writerows(ids["removed"])
     print(f"services rooms (D-095): {svc['inventory']} in the SOA, {len(svc['restored'])} restored from drawing spaces, {len(svc['added'])} added with no outline, "
           f"{len(svc['spaces_left'])} services spaces with no DPA room", flush=True)
+    from .mot_tag_fix import apply as mot_tags
+    tagfix = mot_tags(datasets)
+    print(f"MOT NSC tags (D-097): {sum(1 for x in tagfix if x['action'] == 'tag corrected')} tag(s) corrected, "
+          f"{sum(1 for x in tagfix if x['action'] == 'unit row merged')} duplicate unit row(s) merged", flush=True)
     cap["unit_rows_made"] += ensure_unit_rows(datasets)
     print(f"room IDs (D-093): {len(ids['became'])} space(s) became DPA rooms, {len(ids['merged'])} merged into brief rooms, "
           f"{len(ids['removed'])} taken out (no brief room)", flush=True)
@@ -225,6 +229,7 @@ def main(argv=None) -> int:
     rep["capture"] = cap
     rep["room_ids"] = ids
     rep["services"] = svc
+    rep["mot_tags"] = tagfix
     rep["zone_facade"] = share_zone_facade(datasets)
     from .room_coverage import run as coverage
     cov = coverage(Path("."), datasets, write=True)

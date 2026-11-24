@@ -664,6 +664,8 @@ class Tender:
                 continue
             if gm.is_valid and not gm.is_empty:
                 polys.append(gm)
+            if gp.geom_type != "Polygon" or gm.geom_type != "Polygon":       # an approximate multipart outline is not a registration pair
+                continue
             ap, am = list(gp.exterior.coords), list(gm.exterior.coords)
             if len(ap) == len(am):
                 pv.extend(ap)
