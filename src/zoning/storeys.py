@@ -1111,7 +1111,7 @@ def build_page_zones(key: str, info: dict, P: dict, k2: float) -> Tuple[List[zn.
         poly = shapely.make_valid(shapely.from_wkt(pr["polygon_pv_wkt"]))       # an approximate or extended outline can self-touch
         if poly.geom_type not in ("Polygon", "MultiPolygon"):
             poly = shapely.union_all([q for q in getattr(poly, "geoms", []) if q.geom_type in ("Polygon", "MultiPolygon")]) if hasattr(poly, "geoms") else poly
-        poly = poly.buffer(0)
+        poly = poly.buffer(0).simplify(0.6, preserve_topology=True).buffer(0)     # print only: 0.6 pt (about 50 mm) keeps the PDF light
         area = float(pr["a_area_m2"] or 0.0)
         cls = (a["class"] or "").strip() or "no information"
         conf = float(a["confidence"] or 0.0)
@@ -1138,6 +1138,12 @@ def build_page_zones(key: str, info: dict, P: dict, k2: float) -> Tuple[List[zn.
         disp = display_tag(tags)
         parts: List[Polygon] = []
         u = shapely.union_all([q.buffer(0) for q in g["polys"]]).buffer(0)
+        # print only: close slivers between joined outlines (0.8 pt, about 70 mm) and drop holes under 2 m2 (wall cores, gaps), so that a
+        # zone is drawn as a few polygons and not as thousands of pieces cut round tiny holes
+        u = u.buffer(0.8, join_style="mitre").buffer(-0.8, join_style="mitre")
+        def _nohole(q, lim=2.0 / k2):
+            return shapely.Polygon(q.exterior, [h for h in q.interiors if shapely.Polygon(h).area >= lim])
+        u = shapely.union_all([_nohole(q) for q in getattr(u, "geoms", [u]) if q.geom_type == "Polygon"]).simplify(0.4, preserve_topology=True)
         for part in (list(u.geoms) if u.geom_type == "MultiPolygon" else [u]):
             if part.geom_type == "Polygon" and not part.is_empty:
                 parts.extend(zn.simple_parts(part))

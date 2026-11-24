@@ -37,7 +37,7 @@ def _clean(g):
     g = shapely.make_valid(g)
     ps = [q for q in getattr(g, "geoms", [g]) if q.geom_type in ("Polygon", "MultiPolygon")]
     ps = [x for q in ps for x in getattr(q, "geoms", [q])]
-    g = shapely.union_all([q.buffer(0) for q in ps]).simplify(0.2, preserve_topology=True).buffer(0)
+    g = shapely.union_all([q.buffer(0) for q in ps]).simplify(0.6, preserve_topology=True).buffer(0)   # 0.6 pt = about 50 mm: drawing accuracy
     return g
 
 
@@ -165,7 +165,7 @@ def run(st: str) -> Dict[str, object]:
         if rid not in added:
             continue
         fill = shapely.union_all(added[rid])
-        g = _clean(shapely.union_all([geo[rid], fill.buffer(0.35)]))
+        g = _clean(shapely.union_all([geo[rid], fill.buffer(0.35, quad_segs=1, join_style="mitre")]))
         r["polygon_pv_wkt"] = shapely.to_wkt(g, rounding_precision=2)
         r["gap_fill_pv_wkt"] = shapely.to_wkt(fill, rounding_precision=2)
         if FLAG not in (r.get("flags") or ""):
