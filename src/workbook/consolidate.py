@@ -194,8 +194,17 @@ def main(argv=None) -> int:
     with ProcessPoolExecutor(max_workers=a.jobs) as ex:
         datasets = dict(ex.map(_assemble, nums))
     print("assembled", len(datasets), flush=True)
+    from .capture import capture, ensure_unit_rows
+    cap = capture(datasets)
+    cap["unit_rows_made"] = ensure_unit_rows(datasets)
+    print(f"capture: {len(cap['linked'])} room(s) linked to a unit by zoning, {len(cap['added'])} room(s) added from the drawing", flush=True)
     rep = consolidate(datasets)
+    rep["capture"] = cap
     rep["zone_facade"] = share_zone_facade(datasets)
+    from .room_coverage import run as coverage
+    cov = coverage(Path("."), datasets, write=True)
+    rep["coverage_not_represented"] = [r for r in cov if not r["represented_by"]]
+    print(f"coverage: {len(cov)} zoned plan rooms, {len(rep['coverage_not_represented'])} not represented", flush=True)
     empty = [n for n, d in datasets.items() if not d["rooms"]]          # D-091: a workbook with no rooms left is not issued
     rep["not_issued"] = [f"D{n}" for n in empty]
     for n in empty:
@@ -294,7 +303,7 @@ def share_zone_facade(datasets: Dict[str, Dict[str, Any]], root: Path = Path("."
                 for e in r.get("envelope") or []:
                     carried[e["orientation"]] += (float(e["glazing_m2"]) + float(e["wall_m2"])) / h
             rest = {k: zone[k] - carried.get(k, 0.0) for k in zone if zone[k] - carried.get(k, 0.0) >= 0.5}
-            takers = [r for r in rooms if not r.get("envelope") and _room_area(r) > 0]
+            takers = [r for r in rooms if not r.get("envelope") and not r.get("_geom") and _room_area(r) > 0]   # rooms with their own outline are not given a share
             row = dict(workbook=f"D{n}", unit=tag, storey=st, zone_m={k: round(v, 1) for k, v in zone.items()},
                        carried_m={k: round(v, 1) for k, v in carried.items()}, rest_m={k: round(v, 1) for k, v in rest.items()}, rooms_sharing=len(takers))
             if not rest or not takers:

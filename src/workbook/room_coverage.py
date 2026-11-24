@@ -22,35 +22,46 @@ UNIT = re.compile(r"(?:P?AHU|FCU)-[A-Z0-9][\w/-]*")
 IDRE = re.compile(r"\b((?:LB3|B[123]|L0\d))-R(\d{3}(?:-T\d\d)?)\b")
 
 
-def run(root: Path = Path(".")) -> list:
+def _load_files(root: Path) -> dict:
+    files = sorted(glob.glob(str(root / "out/loads/inputs/D*.json"))) + [str(root / "out/loads/inputs_common/D00.json")]
+    return {re.search(r"D(\d+)\.json$", f).group(1): json.load(open(f, encoding="utf-8")) for f in files}
+
+
+def cited_ids(room: dict, src: dict) -> set:
+    ids = set()
+
+    def walk(o):
+        if isinstance(o, str):
+            s = src.get(o)
+            txt = o + (" " + s.get("location", "") + " " + s.get("text_as_read", "") if s else "")
+            for m in IDRE.findall(txt):
+                ids.add(f"{m[0]}-R{m[1]}")
+        elif isinstance(o, dict):
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+    walk(room.get("prov"))
+    walk(room.get("remark"))
+    walk(room.get("gaps"))
+    if room.get("plan_room_id"):
+        ids.add(room["plan_room_id"])
+    return ids
+
+
+def run(root: Path = Path("."), datasets: dict = None, write: bool = True) -> list:
     from shapely import wkt
     from shapely.geometry import Point
     abbr = _expansions(root)
-    files = sorted(glob.glob(str(root / "out/loads/inputs/D*.json"))) + [str(root / "out/loads/inputs_common/D00.json")]
+    datasets = datasets if datasets is not None else _load_files(root)
     cited, appd_used = set(), set()
     wb_rooms = defaultdict(list)                     # (storey, unit) -> [(workbook, number, name)]
-    for f in files:
-        d = json.load(open(f, encoding="utf-8"))
-        wbk = "D" + re.search(r"D(\d+)\.json$", f).group(1)
+    for num, d in datasets.items():
+        wbk = "D" + num
         src = {s["id"]: s for s in d["sources"]}
         for r in d["rooms"]:
-            ids = set()
-
-            def walk(o):
-                if isinstance(o, str):
-                    s = src.get(o)
-                    txt = o + (" " + s.get("location", "") + " " + s.get("text_as_read", "") if s else "")
-                    for m in IDRE.findall(txt):
-                        ids.add(f"{m[0]}-R{m[1]}")
-                elif isinstance(o, dict):
-                    for v in o.values():
-                        walk(v)
-                elif isinstance(o, list):
-                    for v in o:
-                        walk(v)
-            walk(r.get("prov"))
-            walk(r.get("remark"))
-            walk(r.get("gaps"))
+            ids = cited_ids(r, src)
             cited |= ids
             m = re.match(r"CA-(\w+)-(\d+)$", r["number"])
             if m:
@@ -98,6 +109,8 @@ def run(root: Path = Path(".")) -> list:
                 if best:
                     used.add(best[1])
                     pr["represented_by"] = f"name match: {best[0]} {best[1]} '{best[2]}' ({bs:.2f})"
+    if not write:
+        return rows
     out = root / "out/qa/room_coverage.csv"
     with open(out, "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=list(rows[0]))

@@ -85,6 +85,9 @@ def apply_unit_links(rooms: List[Dict[str, Any]], dept: str, root: Path, add_src
         counts[basis or "no link"] = counts.get(basis or "no link", 0) + 1
         kind = (row.get("unit_kind") or "").upper()
         if NO_UNIT.match(unit):
+            if room.get("ahu") and room.get("plan_room_id"):        # D-092: the unit of the plan room that holds the space stays; the table gives no unit
+                room["remark"] = (room.get("remark") or "").rstrip() + " The link table gives no unit; the unit of the plan room that holds the space is kept (D-092)."
+                continue
             room["ahu"] = None
             continue
         if kind == "CLASS" or not re.match(r"^(AHU|PAHU|FCU|DXFCU|CRAC|FAN|OAF|EAF)", unit, re.I):

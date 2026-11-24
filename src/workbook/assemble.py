@@ -1133,6 +1133,7 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
                 if env_model.available and p["storey"] in envm.ENVELOPE_STOREYS and poly.get("polygon_building_mm_wkt"):
                     # D-042, D-049, D-066, D-071: envelope rows by the ETTV component method, simple facade method
                     erows = env_model.rows(p["storey"], number, poly["polygon_building_mm_wkt"], "ETTV-ENV")
+                    room["_geom"] = True                       # D-090: the facade of this room is measured from its own outline
                     if erows:
                         room["envelope"] = erows
                         env_rooms += 1
@@ -1196,6 +1197,7 @@ def assemble_department(dept: str, out: Optional[Path] = None, root: Path = Path
                     zl_count_count[0] += 1
                     if env_model.available and d["storey"] in envm.ENVELOPE_STOREYS and zl.get("n_dpa"):
                         erows = env_model.typical_rows(d["storey"], number, [x["poly"].get("polygon_building_mm_wkt") for x in plans], int(zl["n_dpa"]), "ETTV-ENV")
+                        room["_geom"] = True
                         if erows:
                             room["envelope"] = erows
                             env_rooms += 1

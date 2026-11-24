@@ -191,6 +191,7 @@ def assemble_common_areas(root: Path = Path("."), with_others: bool = True) -> D
     from . import appd_outlines as ao
     outlines = ao.load_outlines(root)
     class_of_space: Dict[Any, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    contained_in: Dict[Any, str] = {}
     for st_key in STOREYS.values():
         pr = _read(root / REG / f"room_polygons_{st_key}.csv") if (root / REG / f"room_polygons_{st_key}.csv").exists() else []
         inside = ao.rooms_inside(root, st_key, outlines, pr)          # a plan room lies in an outline when its label point is inside it (building mm)
@@ -205,6 +206,28 @@ def assemble_common_areas(root: Path = Path("."), with_others: bool = True) -> D
             za = zone_rows.get(st_key, {}).get(r["room_id"])
             if r.get("appd_annotation_index") and za is not None and (r["appd_annotation_index"], r["room_id"]) not in taken:
                 class_of_space[(st_key, r["appd_annotation_index"])][(za.get("class") or "").strip() or "no information"] += _f(r.get("a_area_m2")) or 1.0
+        # D-092: an outline with no plan-room label inside it (a room inside an open-plan region) takes the class of the plan room that holds most of it
+        from shapely import wkt as _wkt
+        geo = []
+        for r in pr:
+            try:
+                g_ = _wkt.loads(r["polygon_building_mm_wkt"]).buffer(0)
+            except Exception:
+                continue
+            if not g_.is_empty:
+                geo.append((r, g_))
+        for (s_k, idx), og in outlines.items():
+            if s_k != st_key or (st_key, idx) in class_of_space:
+                continue
+            og = og.buffer(0)
+            if og.is_empty or og.area <= 0:
+                continue
+            best = max(((r, g_.intersection(og).area) for r, g_ in geo if g_.intersects(og)), key=lambda x: x[1], default=(None, 0.0))
+            if best[0] is not None and best[1] >= 0.5 * og.area:
+                za = zone_rows.get(st_key, {}).get(best[0]["room_id"])
+                if za is not None:
+                    class_of_space[(st_key, idx)][(za.get("class") or "").strip() or "no information"] += best[1] / 1e6
+                    contained_in[(st_key, idx)] = best[0]["room_id"]
     type_of = {_norm(e["tag_normalised"]): e["type"] for e in equip}
     rooms: List[Dict[str, Any]] = []
     skipped: List[str] = []
@@ -319,6 +342,11 @@ def assemble_common_areas(root: Path = Path("."), with_others: bool = True) -> D
                 room["system_type"] = "FCU" if cls.startswith("FCU") else None
                 room["prov"]["zoning"] = ["D", zsid]
                 room["remark"] += f"; unit {cls} from the zone schedule ({share * 100:.0f} % of the plan room area inside the outline)"
+                if (st, s["annotation_index"]) in contained_in:
+                    pid = contained_in[(st, s["annotation_index"])]
+                    room["plan_room_id"] = pid
+                    room["gaps"]["ahu"] = (f"Unit {cls} from plan room {pid}, which holds this space (an open-plan region): no plan room label lies inside "
+                                           "the outline. Confirm (D-092).")
                 if len(zc) > 1:
                     room["remark"] += f"; other classes inside the outline: {', '.join(k for k in zc if k != cls)}"
                     room["gaps"]["ahu"] = f"The plan rooms inside this outline have several classes: {', '.join(f'{k} ({v:.0f} m²)' for k, v in sorted(zc.items(), key=lambda kv: -kv[1]))}. The largest is used. Confirm."
@@ -379,6 +407,7 @@ def assemble_common_areas(root: Path = Path("."), with_others: bool = True) -> D
             if g is None:
                 continue
             erows = env_model.rows(room["storey"], room["number"], g.wkt, "ETTV-ENV")
+            room["_geom"] = True
             if erows:
                 room["envelope"] = erows
                 n_env_appd += 1
@@ -472,6 +501,7 @@ def assemble_common_areas(root: Path = Path("."), with_others: bool = True) -> D
                 room["remark"] += f"; provisional equipment gain {eq_[1]:g} W/m² ({eq_[0].replace('_', ' ')}), vendor data needed"
             if env_model.available and st_key in envm.ENVELOPE_STOREYS and pp.get("polygon_building_mm_wkt"):
                 room["envelope"] = env_model.rows(st_key, number, pp["polygon_building_mm_wkt"], "ETTV-ENV")
+                room["_geom"] = True
             room["remark"] = ". ".join(_sentence_case(x).rstrip(". ") for x in re.split(r";\s*", room["remark"]) if x.strip(". ")) + ". " + ROOM_THERMAL_NOTE
             room["_plan_room"] = True
             plan_rooms.append(room)
