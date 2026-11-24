@@ -168,6 +168,19 @@ def main() -> Dict[str, Any]:
     ua = {p["tag"]: p for p in ok["unit_assignments"]}
     fa = {p["tag"]: p for p in ok["fan_assignments"]}
     rej = {(x["section"], x["key"]): x for x in ok["_rejected"]}
+    # a schedule unit whose proposed rooms are all on one other unit of the zoning: the same unit under two tags
+    alias = {}
+    byitem = defaultdict(list)
+    for c in conflicts:
+        m = re.search(r"already on (\S+);", c["conflict"])
+        if m:
+            byitem[c["item"]].append((m.group(1), f"{c['storey']}:{c['room_id']}"))
+    for t, lst in byitem.items():
+        tags_ = {x for x, _ in lst}
+        if len(tags_) == 1:
+            alias[t] = (next(iter(tags_)), [r for _, r in lst])
+        else:
+            alias[t] = (" / ".join(sorted(tags_)), [r for _, r in lst])
     reg, seen = [], set()
     for r in ah + fn:
         t = r["tag_normalised"]
@@ -178,8 +191,21 @@ def main() -> Dict[str, Any]:
         is_fan = r in fn
         rooms = zoned.get(t) or zb.get(base(t)) or []
         p = (fa if is_fan else ua).get(t)
+        if r.get("type") in ("BIBO", "HEPA"):
+            reg.append(dict(tag=t, type=r.get("type", ""), served_storey=st, location=r.get("Location", ""), description=r.get("Description", ""),
+                            disposition="filter of a unit", assigned_to="bag-in/bag-out or HEPA filter housing on the duct of the area named; not a unit of its own",
+                            rooms="", evidence=f"SCH/1 Corr 5 p{r.get('page(s)', '')}: {r.get('Description', '')}", source="Equipment Schedule"))
+            continue
+        al = alias.get(t)
         if rooms and not is_fan:
             disp, det, ev, src = "zone", f"{len(rooms)} plan room(s)", "", "zoning"
+        elif al and not is_fan:
+            tag_z, rms = al
+            disp = "zone (tag alias)"
+            det = (f"same rooms as {tag_z} in the zoning: the zoning keeps the tag of the higher source (D-052); the Equipment Schedule prints {t}. "
+                   "Two tags for one unit, to confirm")
+            rooms = rms
+            ev, src = ev_text((ua.get(t) or {}).get("evidence")), "council C6 (alias)"
         elif p:
             disp = p.get("disposition", "")
             det = "; ".join(x for x in [p.get("unit") or "", ", ".join(p.get("serves") or []), ", ".join(p.get("rooms") or []), p.get("system") or ""] if x)
