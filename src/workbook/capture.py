@@ -176,13 +176,13 @@ def capture(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> Dict
                       "load_basis", "load_use", "exhaust_fan", "system_type", "zone_tag", "terminal_tag"):
                 if tmpl.get(k) is not None:
                     room[k] = copy.deepcopy(tmpl[k])
-            for k in ("criteria", "space_type", "activity", "lighting", "small_power", "occupancy_density", "exhaust_fan"):
-                if k in (tmpl.get("prov") or {}):
-                    room["prov"][k] = ["A", tmpl["prov"][k][1]]
+            for k, v in (tmpl.get("prov") or {}).items():          # every value taken from the template keeps the source of the template, code A
+                if k not in ("identity", "zoning", "measured_area", "dpa_area", "soa_area", "area_selector", "occupancy_people") and isinstance(v, (list, tuple)) and len(v) == 2:
+                    room["prov"][k] = ["A", v[1]]
             room["remark"] += f" Criteria and loads as room {tmpl['number']} ('{tmpl.get('name')}') on the same unit, assumed."
         else:
             room["gaps"]["criteria"] = "No room of the same name on this unit gives criteria or loads. Give the room type."
-        if ch_default and not (tmpl or {}).get("ceiling_height_m"):
+        if room.get("ceiling_height_m") and "ceiling_height" not in room["prov"]:
             room["prov"]["ceiling_height"] = ["A", "ASM-CEILING"]
         if tag_level:
             room["gaps"]["area"] = "The room is a tag inside an open-plan region of the plan: its own area and outline are not measured. Give the area."
