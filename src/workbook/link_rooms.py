@@ -205,6 +205,8 @@ def link(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> List[Di
     for i, (n, r) in enumerate(free):
         if i in done:
             continue
+        if n == "00" and not _soa_mv(r):          # services spaces (risers, closets) of the common areas take no unit from their neighbours
+            continue
         if _soa_mv(r):
             s = r.get("soa_revit") or {}
             done[i] = dict(rule="3 SOA mechanical ventilation", plan=None, cls="MV", kind="MV",
