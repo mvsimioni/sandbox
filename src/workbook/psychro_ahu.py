@@ -26,112 +26,93 @@ import openpyxl
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter as L
 
-NEWTON = 6
 PS = "(PsyA*EXP(PsyB*{t}/(PsyC+{t})))"                     # saturation pressure, kPa
 WS = "(PsyEps*" + PS + "/(PsyP-" + PS + "))"               # saturation humidity ratio
 W_OF = "(({h})-PsyCpA*({t}))/(PsyHfg+PsyCpV*({t}))"        # humidity ratio from enthalpy and dry bulb
+H_OF = "(PsyCpA*({t})+({w})*(PsyHfg+PsyCpV*({t})))"        # enthalpy from dry bulb and humidity ratio
 PW = "(({w})*PsyP/(PsyEps+({w})))"                         # vapour pressure from humidity ratio
 DEW = "PsyC*LN(" + PW + "/PsyA)/(PsyB-LN(" + PW + "/PsyA))"
+HS = "(PsyCpA*{t}+" + WS + "*(PsyHfg+PsyCpV*{t}))"          # enthalpy of saturated air at t
+
+# (key, header, unit, formula with {key} references to the same row and {src} = row of the tab, number format)
+SPEC = [
+    ("oa_t", "Outdoor air dry bulb", "°C", "OutdoorDB", "t"),
+    ("oa_h", "Outdoor air enthalpy", "kJ/kg", "OutdoorH", "t"),
+    ("oa_w", "Outdoor air humidity ratio", "kg/kg", W_OF.format(h="{oa_h}", t="{oa_t}"), "w"),
+    ("ra_t", "Return air dry bulb (reference room)", "°C", "AB{src}", "t"),
+    ("ra_h", "Return air enthalpy (reference room)", "kJ/kg", "AC{src}", "t"),
+    ("ra_w", "Return air humidity ratio (room design)", "kg/kg", W_OF.format(h="{ra_h}", t="{ra_t}"), "w"),
+    ("q_oa", "Outdoor air", "L/s", "N{src}", "q"),
+    ("q_ra", "Recirculated air", "L/s", "W{src}", "q"),
+    ("q_sa", "AHU supply airflow", "L/s", "J{src}", "q"),
+    ("q_rm", "Room supply airflow", "L/s", "H{src}", "q"),
+    ("mx_t", "Mixed air dry bulb", "°C", "({q_oa}*{oa_t}+{q_ra}*{ra_t})/{q_sa}", "t"),
+    ("mx_h", "Mixed air enthalpy", "kJ/kg", "({q_oa}*{oa_h}+{q_ra}*{ra_h})/{q_sa}", "t"),
+    ("mx_w", "Mixed air humidity ratio", "kg/kg", "({q_oa}*{oa_w}+{q_ra}*{ra_w})/{q_sa}", "w"),
+    ("mx_rh", "Mixed air relative humidity", "%", PW.format(w="{mx_w}") + "/" + PS.format(t="{mx_t}"), "p"),
+    ("tab_s", "Coil sensible of this tab", "kW", "AG{src}", "k"),
+    ("tab_l", "Coil latent of this tab", "kW", "AH{src}", "k"),
+    ("tab_q", "Coil duty of this tab (outdoor-air rule)", "kW", "AI{src}", "k"),
+    ("fan", "Supply fan temperature rise", "K", "AF{src}*WperkW/(AirSensibleFactor*{q_sa})", "t"),
+    ("sa_t", "Supply air dry bulb required by the sensible load", "°C", "AP{src}", "t"),
+    ("off_t", "Off-coil dry bulb required (supply less fan rise)", "°C", "{sa_t}-{fan}", "t"),
+    ("req_w", "Supply humidity ratio required by the room latent load", "kg/kg",
+     "{ra_w}-AA{src}/(AirDensity*{q_rm}/LperM3*(PsyHfg+PsyCpV*{ra_t}))", "w"),
+    ("req_dp", "Supply dew point required by the room latent load", "°C", DEW.format(w="{req_w}"), "t"),
+    ("sch_w", "Coil leaving humidity ratio of the tender schedule", "kg/kg",
+     "((PsyHfg-(WaterCp-PsyCpV)*CoilLATWB)*" + WS.format(t="CoilLATWB") + "-PsyCpA*(CoilLATDB-CoilLATWB))/(PsyHfg+PsyCpV*CoilLATDB-WaterCp*CoilLATWB)", "w"),
+    ("coil_rh", "Coil leaving relative humidity (from the tender schedule leaving condition)", "%",
+     PW.format(w="{sch_w}") + "/" + PS.format(t="CoilLATDB"), "p"),
+    ("reheat_ok", "Unit with a reheat coil (Y or N; N for a fan coil unit or a CRAC unit)", None,
+     'IF(OR(B{src}="FCU",LEFT(A{src},3)="FCU",LEFT(A{src},4)="CRAC"),"N","Y")', None),
+    ("dh_t", "Dry bulb at which the coil leaves the required humidity ratio", "°C",
+     "PsyC*LN(" + PW.format(w="{req_w}") + "/({coil_rh}*PsyA))/(PsyB-LN(" + PW.format(w="{req_w}") + "/({coil_rh}*PsyA)))", "t"),
+    ("cl_t", "COIL LEAVING DRY BULB", "°C", 'IF({reheat_ok}="Y",MIN({off_t},{dh_t}),{off_t})', "t"),
+    ("cl_w", "Coil leaving humidity ratio", "kg/kg",
+     "MIN({req_w},PsyEps*{coil_rh}*" + PS.format(t="{cl_t}") + "/(PsyP-{coil_rh}*" + PS.format(t="{cl_t}") + "))", "w"),
+    ("cl_h", "Coil leaving enthalpy", "kJ/kg", H_OF.format(t="{cl_t}", w="{cl_w}"), "t"),
+    ("cl_rh", "Coil leaving relative humidity", "%", PW.format(w="{cl_w}") + "/" + PS.format(t="{cl_t}"), "p"),
+    ("sa_dp", "SUPPLY AIR DEW POINT", "°C", DEW.format(w="{cl_w}"), "t"),
+    ("sa_rh", "Supply air relative humidity at the AHU outlet", "%", PW.format(w="{cl_w}") + "/" + PS.format(t="{sa_t}"), "p"),
+    ("rm_w", "Room humidity ratio that results", "kg/kg", "{cl_w}+AA{src}/(AirDensity*{q_rm}/LperM3*(PsyHfg+PsyCpV*{ra_t}))", "w"),
+    ("rm_rh", "Room relative humidity that results", "%", PW.format(w="{rm_w}") + "/" + PS.format(t="{ra_t}"), "p"),
+    ("cc_s", "Cooling coil sensible duty", "kW", "AirSensibleFactor*{q_sa}*({mx_t}-{cl_t})/WperkW", "k"),
+    ("cc_q", "COOLING COIL DUTY", "kW", "MAX(0,AirDensity*{q_sa}/LperM3*({mx_h}-{cl_h}))", "k"),
+    ("cc_l", "Cooling coil latent duty", "kW", "{cc_q}-{cc_s}", "k"),
+    ("cc_d", "Cooling coil duty less the coil duty of this tab", "kW", "{cc_q}-{tab_q}", "k"),
+    ("rh_q", "REHEAT COIL DUTY", "kW", "AirSensibleFactor*{q_sa}*MAX(0,{off_t}-{cl_t})/WperkW", "k"),
+    ("chw", "CHILLED WATER FLOW", "L/s", "{cc_q}/(WaterCp*(ChwLWT-ChwEWT)*WaterDensity)", "f"),
+    ("hw", "REHEAT WATER FLOW", "L/s", "{rh_q}/(WaterCp*(HwEWT-HwLWT)*WaterDensity)", "f"),
+    ("cc_d1", "Enthalpy difference, air in to saturated air at the leaving water (helper)", "kJ/kg", "{mx_h}-" + HS.format(t="ChwLWT"), "t"),
+    ("cc_d2", "Enthalpy difference, air out to saturated air at the entering water (helper)", "kJ/kg", "{cl_h}-" + HS.format(t="ChwEWT"), "t"),
+    ("cc_ntu", "Cooling coil transfer units (counterflow, log-mean enthalpy difference)", "–",
+     'IF({mx_h}<={cl_h},0,IF(OR({cc_d1}<=0,{cc_d2}<=0),"not possible",({mx_h}-{cl_h})/IF(ABS({cc_d1}-{cc_d2})<CoilTol,{cc_d1},({cc_d1}-{cc_d2})/LN({cc_d1}/{cc_d2}))))', "r"),
+    ("cc_rows", "COOLING COIL ROWS (estimate)", "no.", 'IF(ISNUMBER({cc_ntu}),ROUNDUP({cc_ntu}/CoilNTUPerRow,0),"–")', "i"),
+    ("rh_d1", "Temperature difference, entering water to air out (helper)", "K", "HwEWT-{off_t}", "t"),
+    ("rh_d2", "Temperature difference, leaving water to air in (helper)", "K", "HwLWT-{cl_t}", "t"),
+    ("rh_ntu", "Reheat coil transfer units (counterflow, log-mean temperature difference)", "–",
+     'IF({rh_q}<=0,0,IF(OR({rh_d1}<=0,{rh_d2}<=0),"not possible",({off_t}-{cl_t})/IF(ABS({rh_d1}-{rh_d2})<CoilTol,{rh_d1},({rh_d1}-{rh_d2})/LN({rh_d1}/{rh_d2}))))', "r"),
+    ("rh_rows", "REHEAT COIL ROWS (estimate)", "no.", 'IF(ISNUMBER({rh_ntu}),ROUNDUP({rh_ntu}/HeatCoilNTUPerRow,0),"–")', "i"),
+    ("ts_q", "Tender schedule basis: cooling coil duty with the coil leaving at the schedule condition", "kW",
+     "MAX(0,AirDensity*{q_sa}/LperM3*({mx_h}-" + H_OF.format(t="CoilLATDB", w="{sch_w}") + "))", "k"),
+    ("ts_rh", "Tender schedule basis: reheat from the schedule leaving dry bulb", "kW",
+     'IF({reheat_ok}="Y",AirSensibleFactor*{q_sa}*MAX(0,{off_t}-CoilLATDB)/WperkW,0)', "k"),
+    ("check", "Check", None,
+     'IF({cc_ntu}="not possible","The chilled water cannot give this coil leaving state. VERIFY",IF({off_t}<ChwEWT,"The off-coil dry bulb is below the chilled water. VERIFY",'
+     'IF({rh_q}>0,"Reheat: the coil cools below the required dry bulb to remove moisture",IF({cl_w}<{req_w}-CoilTol/WperkW,'
+     '"No reheat: the coil removes more moisture than the room latent load; the room is below the design humidity","OK"))))', None),
+]
 
 
 def _cols(src: int, x: int) -> List[tuple]:
     """(header, unit, formula, number format) for the row x of the block that reads the row src of the tab."""
-    c = lambda k: f"{k}{x}"
-    out = [
-        ("AHU or system", None, f"=A{src}", None),
-        ("Outdoor air dry bulb", "°C", "=OutdoorDB", "t"),
-        ("Outdoor air enthalpy", "kJ/kg", "=OutdoorH", "t"),
-        ("Outdoor air humidity ratio", "kg/kg", "=" + W_OF.format(h=c("C"), t=c("B")), "w"),
-        ("Return air dry bulb (reference room)", "°C", f"=AB{src}", "t"),
-        ("Return air enthalpy (reference room)", "kJ/kg", f"=AC{src}", "t"),
-        ("Return air humidity ratio", "kg/kg", "=" + W_OF.format(h=c("F"), t=c("E")), "w"),
-        ("Outdoor air", "L/s", f"=N{src}", "q"),
-        ("Recirculated air", "L/s", f"=W{src}", "q"),
-        ("AHU supply airflow", "L/s", f"=J{src}", "q"),
-        ("Mixed air dry bulb", "°C", f"=IF({c('J')}>0,({c('H')}*{c('B')}+{c('I')}*{c('E')})/{c('J')},0)", "t"),
-        ("Mixed air enthalpy", "kJ/kg", f"=IF({c('J')}>0,({c('H')}*{c('C')}+{c('I')}*{c('F')})/{c('J')},0)", "t"),
-        ("Mixed air humidity ratio", "kg/kg", f"=IF({c('J')}>0,({c('H')}*{c('D')}+{c('I')}*{c('G')})/{c('J')},0)", "w"),
-        ("Mixed air relative humidity", "%", f"=IF({c('J')}>0," + PW.format(w=c("M")) + "/" + PS.format(t=c("K")) + ",0)", "p"),
-        ("Coil sensible", "kW", f"=AG{src}", "k"),
-        ("Coil latent", "kW", f"=AH{src}", "k"),
-        ("Coil duty (outdoor-air rule)", "kW", f"=AI{src}", "k"),
-        ("Coil sensible heat ratio", "–", f"=IF({c('Q')}>0,{c('O')}/{c('Q')},0)", "r"),
-        ("Off-coil dry bulb", "°C", f"=IF({c('J')}>0,{c('K')}-{c('O')}*WperkW/(AirSensibleFactor*{c('J')}),0)", "t"),
-        ("Off-coil enthalpy", "kJ/kg", f"=IF({c('J')}>0,{c('L')}-{c('Q')}/(AirDensity*{c('J')}/LperM3),0)", "t"),
-        ("Off-coil humidity ratio", "kg/kg", f"=IF({c('J')}>0," + W_OF.format(h=c("T"), t=c("S")) + ",0)", "w"),
-        ("Saturation humidity ratio at the off-coil dry bulb", "kg/kg", "=" + WS.format(t=c("S")), "w"),
-        ("Off-coil relative humidity", "%", f"=IF({c('J')}>0," + PW.format(w=c("U")) + "/" + PS.format(t=c("S")) + ",0)", "p"),
-        ("Off-coil dew point", "°C", f"=IF({c('U')}>0," + DEW.format(w=c("U")) + ",0)", "t"),
-        ("Supply fan temperature rise", "K", f"=IF({c('J')}>0,AF{src}*WperkW/(AirSensibleFactor*{c('J')}),0)", "t"),
-        ("Supply air dry bulb at the AHU outlet", "°C", f"=IF({c('J')}>0,{c('S')}+{c('Y')},0)", "t"),
-        ("Supply air humidity ratio", "kg/kg", f"={c('U')}", "w"),
-        ("Supply air relative humidity", "%", f"=IF({c('J')}>0," + PW.format(w=c("AA")) + "/" + PS.format(t=c("Z")) + ",0)", "p"),
-        ("SUPPLY AIR DEW POINT AT THE COIL DUTY", "°C", f"=IF({c('AA')}>0," + DEW.format(w=c("AA")) + ",0)", "t"),
-        ("Apparatus dew point of the coil line", "°C",
-         f"=IF({c('J')}=0,0,IFERROR(IF(ABS({WS.format(t=c(L(36 + NEWTON)))}-({c('M')}+({c(L(36 + NEWTON))}-{c('K')})*{c('AJ')}))<OffsetEps,"
-         f"{c(L(36 + NEWTON))},\"none\"),\"none\"))", "t"),
-        ("Coil contact factor", "–", f"=IF(ISNUMBER({c('AD')}),IF({c('K')}>{c('AD')},({c('K')}-{c('S')})/({c('K')}-{c('AD')}),0),\"–\")", "r"),
-        ("Room humidity ratio that results (room latent on the room supply)", "kg/kg",
-         f"=IF(H{src}>0,{c('AA')}+AA{src}/(AirDensity*H{src}/LperM3*(PsyHfg+PsyCpV*{c('E')})),0)", "w"),
-        ("Room relative humidity that results", "%", f"=IF(H{src}>0," + PW.format(w=c("AF")) + "/" + PS.format(t=c("E")) + ",0)", "p"),
-        ("Check", None,
-         f"=IF({c('J')}=0,\"–\",IF({c('U')}>{c('V')},\"The off-coil state is past saturation: cooling alone cannot give this sensible and latent duty. VERIFY\","
-         f"IF(NOT(ISNUMBER({c('AD')})),\"The coil line does not meet the saturation curve: no apparatus dew point. VERIFY\",\"OK\")))", None),
-        ("Source ID", None, "GEN-PSY", None),
-        ("Slope of the coil line (helper)", "kg/kg per K", f"=IF({c('K')}<>{c('S')},({c('M')}-{c('U')})/({c('K')}-{c('S')}),0)", "s"),
-        ("Apparatus dew point, start (helper)", "°C", f"={c('X')}-1", "t"),
-    ]
-    for i in range(NEWTON):                                   # Newton steps on Ws(t) = W of the coil line at t
-        t = c(L(37 + i))
-        ps = PS.format(t=t)
-        f = f"({WS.format(t=t)}-({c('M')}+({t}-{c('K')})*{c('AJ')}))"
-        df = f"(PsyEps*PsyP*{ps}/(PsyP-{ps})^2*PsyB*PsyC/(PsyC+{t})^2-{c('AJ')})"
-        out.append((f"Apparatus dew point, step {i + 1} (helper)", "°C", f"=IFERROR({t}-{f}/{df},{t})", "t"))
-    out += _coil_cols(src, x, 38 + NEWTON)
+    ref = {k: f"{L(i + 2)}{x}" for i, (k, *_) in enumerate(SPEC)}
+    live = f"AND(H{src}>0,J{src}>0)"
+    out = [("AHU or system", None, f"=A{src}", None)]
+    for k, head, unit, f, fmt in SPEC:
+        out.append((head, unit, f'=IF({live},{f.format(src=src, **ref)},"–")', fmt))
+    out.append(("Source ID", None, "GEN-PSY; EQS-COIL; GEN-COIL", None))
     return out
-
-
-HS = "(PsyCpA*{t}+" + WS + "*(PsyHfg+PsyCpV*{t}))"          # enthalpy of saturated air at t
-
-
-def _coil_cols(src: int, x: int, c0: int) -> List[tuple]:
-    """Reheat duty, chilled water and reheat water flow, coil rows (25 Nov 2026). c0 = first free column."""
-    c = lambda k: f"{k}{x}"
-    n = lambda i: c(L(c0 + i))
-    hs_l, hs_e = HS.format(t="ChwLWT"), HS.format(t="ChwEWT")
-
-    def ntu(h_in: str, h_out: str) -> str:                  # counterflow, enthalpy potential: air in against leaving water, air out against entering water
-        d1, d2 = f"({h_in}-{hs_l})", f"({h_out}-{hs_e})"
-        return (f"=IF(OR({c('J')}=0,{h_in}<={h_out}),0,IF(OR({d1}<=0,{d2}<=0),\"not possible\","
-                f"({h_in}-{h_out})/IF(ABS({d1}-{d2})<OffsetEps,{d1},({d1}-{d2})/LN({d1}/{d2}))))")
-
-    def rows(k: str) -> str:
-        return f"=IF(ISNUMBER({k}),IF({k}>0,ROUNDUP({k}/CoilNTUPerRow,0),0),\"–\")"
-    wwb = WS.format(t=n(5))
-    return [
-        ("Chilled water flow at the coil duty of this tab", "L/s", f"={c('Q')}/(WaterCp*(ChwLWT-ChwEWT)*WaterDensity)", "f"),
-        ("Cooling coil transfer units at the coil duty of this tab", "–", ntu(c("L"), c("T")), "r"),
-        ("Cooling coil rows at the coil duty of this tab (estimate)", "no.", rows(n(1)), "i"),
-        ("Cooling coil is at the schedule leaving condition and the air is reheated (Y or N; N for a fan coil unit)", None, f"=IF(AND({c('J')}>0,{c('S')}>CoilLATDB,B{src}<>\"FCU\"),\"Y\",\"N\")", None),
-        ("Coil leaving dry bulb, schedule", "°C", "=CoilLATDB", "t"),
-        ("Coil leaving wet bulb, schedule", "°C", "=CoilLATWB", "t"),
-        ("Coil leaving humidity ratio, schedule", "kg/kg",
-         f"=((PsyHfg-(WaterCp-PsyCpV)*{n(5)})*{wwb}-PsyCpA*({n(4)}-{n(5)}))/(PsyHfg+PsyCpV*{n(4)}-WaterCp*{n(5)})", "w"),
-        ("Coil leaving enthalpy, schedule", "kJ/kg", f"=PsyCpA*{n(4)}+{n(6)}*(PsyHfg+PsyCpV*{n(4)})", "t"),
-        ("Supply air dew point with the coil at the schedule leaving condition", "°C", "=" + DEW.format(w=n(6)), "t"),
-        ("REHEAT COIL DUTY", "kW", f"=IF({n(3)}=\"Y\",AirSensibleFactor*{c('J')}*({c('S')}-{n(4)})/WperkW,0)", "k"),
-        ("Cooling coil duty with reheat (coil at the schedule leaving condition)", "kW",
-         f"=IF({n(3)}=\"Y\",MAX({c('Q')},AirDensity*{c('J')}/LperM3*({c('L')}-{n(7)})),{c('Q')})", "k"),
-        ("CHILLED WATER FLOW (cooling coil duty with reheat)", "L/s", f"={n(10)}/(WaterCp*(ChwLWT-ChwEWT)*WaterDensity)", "f"),
-        ("REHEAT WATER FLOW", "L/s", f"={n(9)}/(WaterCp*(HwEWT-HwLWT)*WaterDensity)", "f"),
-        ("Cooling coil transfer units with reheat", "–", ntu(c("L"), f"IF({n(3)}=\"Y\",MIN({c('T')},{n(7)}),{c('T')})"), "r"),
-        ("COOLING COIL ROWS (estimate)", "no.", rows(n(13)), "i"),
-        ("Reheat coil transfer units", "–",
-         f"=IF({n(9)}<=0,0,IF(OR(HwEWT<={c('S')},HwLWT<={n(4)}),\"not possible\",({c('S')}-{n(4)})/IF(ABS((HwEWT-{c('S')})-(HwLWT-{n(4)}))<OffsetEps,"
-         f"HwEWT-{c('S')},((HwEWT-{c('S')})-(HwLWT-{n(4)}))/LN((HwEWT-{c('S')})/(HwLWT-{n(4)})))))", "r"),
-        ("REHEAT COIL ROWS (estimate)", "no.", rows(n(15)), "i"),
-        ("Source ID", None, "EQS-COIL; GEN-COIL", None),
-    ]
 
 
 FMT = {"t": "0.00;\\−0.00;\\–", "w": "0.00000", "q": "#,##0.0;\\−#,##0.0;\\–", "k": "#,##0.00;\\−#,##0.00;\\–", "p": "0.0%", "r": "0.000", "s": "0.000000", "f": "#,##0.00;\\−#,##0.00;\\–", "i": "0;\\−0;\\–"}
@@ -157,14 +138,15 @@ def add(path_in: Path, path_out: Path) -> dict:
             sec.setdefault(cur, []).append(r)
     titles = {"A": "C. PSYCHROMETRIC STATE AT THE COIL DUTY: AS ZONED (ROWS OF SECTION A)",
               "B": "D. PSYCHROMETRIC STATE AT THE COIL DUTY: AFTER THE OUTDOOR-AIR RULE (ROWS OF SECTION B)"}
-    note = ("Outdoor air and return air mix; the coil takes the sensible, latent and total duty of this tab from the mixed air; the supply fan "
-            "(draw-through) warms the air after the coil. Dry bulb by the sensible air constant, enthalpy by the air density, both on the AHU "
-            "supply airflow, so that the states close on the coil duty of this tab. Humidity ratio from enthalpy and dry bulb; dew point and "
-            "saturation by the psychrometric constants of the Basis of Design (source GEN-PSY). The return air is at the reference room "
-            "condition (no return fan heat or duct gain). The supply air dew point is the dew point of the off-coil air. Reheat: where the off-coil "
-            "dry bulb that the sensible load needs is above the coil leaving dry bulb of the tender schedule, the coil cools to the schedule leaving "
-            "condition and a reheat coil warms the air to that dry bulb. Water flow = duty ÷ (specific heat × temperature rise). Coil rows are an "
-            "estimate from the transfer units of a counterflow coil (sources EQS-COIL, GEN-COIL); the coil selection governs.")
+    note = ("Outdoor air and return air mix. Off-coil dry bulb = supply dry bulb required by the sensible load (this tab) less the supply fan rise "
+            "(draw-through). Supply humidity ratio required = room design humidity ratio less the room latent load on the room supply airflow. "
+            "The coil leaves the air at the relative humidity of the tender schedule leaving condition. Where the required humidity ratio needs a "
+            "coil leaving dry bulb below the off-coil dry bulb, the coil cools to that dry bulb and a reheat coil warms the air (not on a fan coil "
+            "unit or a CRAC unit). Where the coil at the off-coil dry bulb removes more moisture than required, the room is below the design "
+            "humidity and there is no reheat. Cooling coil duty = air density × supply airflow × enthalpy drop, mixed air to coil leaving air. "
+            "Water flow = duty ÷ (specific heat × temperature rise). Coil rows are an estimate from the transfer units of a counterflow coil; the "
+            "coil selection governs. Return air is at the reference room condition of this tab (no return fan heat or duct gain). "
+            "Sources GEN-PSY, EQS-COIL, GEN-COIL.")
     r0 = ws.max_row + 3
     h4, h5, h6, d7 = ws["A4"], ws["A5"], ws["A6"], ws["H7"]
     done = {}
@@ -180,7 +162,7 @@ def add(path_in: Path, path_out: Path) -> dict:
         ws.cell(r0 + 1, 1, note)
         _style(ws.cell(r0 + 1, 1), ws["A2"])
         ws.merge_cells(start_row=r0 + 1, start_column=1, end_row=r0 + 1, end_column=12)
-        ws.row_dimensions[r0 + 1].height = 88
+        ws.row_dimensions[r0 + 1].height = 112
         for c, (head, unit, _, _) in enumerate(cols, 1):
             a, b = ws.cell(r0 + 2, c, head), ws.cell(r0 + 3, c, unit)
             _style(a, h5)
@@ -193,7 +175,7 @@ def add(path_in: Path, path_out: Path) -> dict:
                 _style(cell, ws["A7"] if c == 1 else d7)
                 if fmt:
                     cell.number_format = FMT[fmt]
-                if head.isupper() or head.startswith(("SUPPLY AIR DEW POINT", "CHILLED WATER FLOW (", "COOLING COIL ROWS", "REHEAT")):
+                if head.isupper() or head.startswith(("COOLING COIL ROWS", "REHEAT COIL ROWS")):
                     cell.font = Font(name=d7.font.name, sz=d7.font.sz, b=True)
         done[k] = (r0 + 4, r0 + 3 + len(rows))
         r0 = r0 + 4 + len(rows) + 2

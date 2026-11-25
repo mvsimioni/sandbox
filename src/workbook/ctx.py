@@ -135,6 +135,8 @@ DEFAULTS: Dict[str, Tuple] = {
     "HwLWT": ("Reheat water leaving the coil", 25, "°C", "D", "EQS-COIL", "Equipment Schedule, AHU Part B"),
     "WaterCp": ("Specific heat of water", 4.186, "kJ/(kg K)", "S", "GEN-COIL", "physical property"),
     "WaterDensity": ("Density of water", 1, "kg/L", "S", "GEN-COIL", "physical property"),
+    "HeatCoilNTUPerRow": ("Transfer units of a reheat coil per row (coil row estimate)", 0.45, "–", "A", "GEN-COIL", "assumed, to confirm at coil selection"),
+    "CoilTol": ("Smallest difference used in the coil estimate (numerical)", 0.001, "–", "S", "GEN-COIL", "numerical only"),
     "CoilNTUPerRow": ("Transfer units of a coil per row (coil row estimate)", 0.45, "–", "A", "GEN-COIL", "assumed, to confirm at coil selection"),
     "EnvCheckShare": ("Envelope rooms: share of the air-change airflow within which the thermal case is marked for a peak solar check", 0.20, "fraction", "A",
                       "GEN-BASIS", "to confirm"),
@@ -160,7 +162,7 @@ GROUPS = [
                          "GapBottom", "GapHinged", "GapSliding", "GapBedWidth", "GapShaft", "NewtonEps", "OffsetEps",
                          "StartPressure", "PressureBracket", "TolPressure"]),
     ("Check tolerances", ["AreaTolPct", "AreaTolM2", "BalTolPct", "BalTolLps", "SchedTolPct", "SchedTolLps", "ZoneCoverMin", "ZoneCoverMax", "EnvCheckShare"]),
-    ("Coils and water", ["CoilLATDB", "CoilLATWB", "ChwEWT", "ChwLWT", "HwEWT", "HwLWT", "WaterCp", "WaterDensity", "CoilNTUPerRow"]),
+    ("Coils and water", ["CoilLATDB", "CoilLATWB", "ChwEWT", "ChwLWT", "HwEWT", "HwLWT", "WaterCp", "WaterDensity", "CoilNTUPerRow", "HeatCoilNTUPerRow", "CoilTol"]),
     ("Room design condition", ["DesignTRef", "DesignRHMax", "PsyA", "PsyB", "PsyC", "PsyP", "PsyEps", "PsyCpA", "PsyCpV", "PsyHfg", "PsyPct"]),
 ]
 
