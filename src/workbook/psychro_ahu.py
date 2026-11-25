@@ -39,8 +39,8 @@ SPEC = [
     ("oa_t", "Outdoor air dry bulb", "°C", "OutdoorDB", "t"),
     ("oa_h", "Outdoor air enthalpy", "kJ/kg", "OutdoorH", "t"),
     ("oa_w", "Outdoor air humidity ratio", "kg/kg", W_OF.format(h="{oa_h}", t="{oa_t}"), "w"),
-    ("ra_t", "Return air dry bulb (reference room)", "°C", "AB{src}", "t"),
-    ("ra_h", "Return air enthalpy (reference room)", "kJ/kg", "AC{src}", "t"),
+    ("ra_t", "Return air dry bulb (supply-weighted mean of the rooms)", "°C", "AB{src}", "t"),
+    ("ra_h", "Return air enthalpy (supply-weighted mean of the rooms)", "kJ/kg", "AC{src}", "t"),
     ("ra_w", "Return air humidity ratio (room design)", "kg/kg", W_OF.format(h="{ra_h}", t="{ra_t}"), "w"),
     ("q_oa", "Outdoor air", "L/s", "N{src}", "q"),
     ("q_ra", "Recirculated air", "L/s", "W{src}", "q"),
@@ -145,7 +145,7 @@ def add(path_in: Path, path_out: Path) -> dict:
             "unit or a CRAC unit). Where the coil at the off-coil dry bulb removes more moisture than required, the room is below the design "
             "humidity and there is no reheat. Cooling coil duty = air density × supply airflow × enthalpy drop, mixed air to coil leaving air. "
             "Water flow = duty ÷ (specific heat × temperature rise). Coil rows are an estimate from the transfer units of a counterflow coil; the "
-            "coil selection governs. Return air is at the reference room condition of this tab (no return fan heat or duct gain). "
+            "coil selection governs. Return air is the supply-weighted mean room condition of this tab (no return fan heat or duct gain). "
             "Sources GEN-PSY, EQS-COIL, GEN-COIL.")
     r0 = ws.max_row + 3
     h4, h5, h6, d7 = ws["A4"], ws["A5"], ws["A6"], ws["H7"]

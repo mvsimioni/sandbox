@@ -129,15 +129,17 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
         put(ws, g("sens"), f"=SUMIFS({AF.rng('sens')},{crit}{inc})/WperkW", "Calc", "d2")
         put(ws, g("lat"), f"=SUMIFS({AF.rng('lat')},{crit}{inc})/WperkW", "Calc", "d2")
         ref = f"MATCH({key},{AF.rng('ref1' if after else 'ref0')},0)"
-        put(ws, g("rt"), f'=IF({g("sa_room")}>0,INDEX({AF.rng("troom")},{ref}),0)', "Calc", "d1")
-        put(ws, g("rh"), f'=IF({g("sa_room")}>0,INDEX({AF.rng("hroom")},{ref}),0)', "Calc", "d1")
+        # 25 Nov 2026 (Marcus): the return air is the supply-weighted mean of the rooms of the unit, not the first room served
+        wsum = f"SUMPRODUCT(({AF.rng('ahu')}={key}){mask}*{AF.rng('supply')}*" + "{x})/" + g("sa_room")
+        put(ws, g("rt"), f'=IF({g("sa_room")}>0,{wsum.format(x=AF.rng("troom"))},0)', "Calc", "d1")
+        put(ws, g("rh"), f'=IF({g("sa_room")}>0,{wsum.format(x=AF.rng("hroom"))},0)', "Calc", "d1")
         for suffix, oa in (("", g("oa_rule")), ("_ms", g("oa_ms"))):
             put(ws, g("oa_sens" + suffix), f"=AirSensibleFactor*{oa}/WperkW*(OutdoorDB-{g('rt')})", "Calc", "d2")
             put(ws, g("oa_lat" + suffix), f"=AirDensity*{oa}/WperkW*(OutdoorH-{g('rh')})-{g('oa_sens' + suffix)}", "Calc", "d2")
             put(ws, g("coil_s" + suffix), f"={g('sens')}+{g('oa_sens' + suffix)}+{g('fan')}", "Calc", "d2")
             put(ws, g("coil_l" + suffix), f"={g('lat')}+{g('oa_lat' + suffix)}", "Calc", "d2")
             put(ws, g("coil" + suffix), f"={g('coil_s' + suffix)}+{g('coil_l' + suffix)}", "Calc", "d2")
-        put(ws, g("fan"), f"={g('sa_ahu')}/LperM3*FanPressure/FanEfficiency/WperkW", "Calc", "d2")
+        put(ws, g("fan"), f"={g('sa_ahu')}/LperM3*IF(OR({g('type')}=\"FCU\",LEFT({key},3)=\"FCU\",LEFT({key},4)=\"CRAC\"),FcuFanPressure,FanPressure)/FanEfficiency/WperkW", "Calc", "d2")
         put(ws, g("wm2"), f"=IF({g('area_sup')}>0,{g('coil')}*WperkW/{g('area_sup')},0)", "Calc", "d1")
         put(ws, g("req_t"), f"=IF({g('sa_room')}>0,SUMPRODUCT(({AF.rng('ahu')}={key}){mask}*{AF.rng('supply')}*{AF.rng('troom')})/{g('sa_room')}-{g('sens')}*WperkW/(AirSensibleFactor*{g('sa_room')}),0)", "Calc", "d1")
         if not after:
@@ -308,7 +310,7 @@ def write_ahu(ctx: Ctx) -> None:
              H("oa_ms", "Outdoor air as the example: max (sum, Vot)", "L/s", 11),
              H("oa_mb", "Outdoor air, mass-balance basis (information only)", "L/s", 12), H("ret", "Recirculated air = AHU supply − outdoor air", "L/s", 11),
              H("exh", "Exhaust", "L/s", 9), H("relief", "Spill or relief = outdoor air − exhaust − net envelope leakage", "L/s", 13), H("sens", "Room sensible", "kW", 9),
-             H("lat", "Room latent", "kW", 9), H("rt", "Reference room temperature (first room served)", "°C", 10), H("rh", "Reference room enthalpy (first room served)", "kJ/kg", 10),
+             H("lat", "Room latent", "kW", 9), H("rt", "Return air temperature (supply-weighted mean of the rooms)", "°C", 10), H("rh", "Return air enthalpy (supply-weighted mean of the rooms)", "kJ/kg", 10),
              H("oa_sens", "Outdoor air sensible", "kW", 9), H("oa_lat", "Outdoor air latent", "kW", 9), H("fan", "Fan heat", "kW", 8),
              H("coil_s", "Coil sensible", "kW", 9), H("coil_l", "Coil latent", "kW", 9), H("coil", "Coil duty (outdoor-air rule)", "kW", 10),
              H("wm2", "Coil duty per area", "W/m" + U, 9),

@@ -34,7 +34,7 @@ BUILTIN_SOURCES.append(
 
 BUILTIN_SOURCES.append(
     {"id": "EQS-COIL", "document": "5. Equipment Schedules (Corr 5), Air Handling Unit Schedule Part A (cooling coil) and Part B (hot water heating)",
-     "issue": "Corrigendum 5", "page": "AHU-A and AHU-B sheets (pages 13 to 28)", "location": "columns Cooling Coil / Air Side, Cooling Coil / Water Side, Re-Heating Coil / Air Side, Re-Heating Coil / Water Side",
+     "issue": "Corrigendum 5", "page": "AHU-A and AHU-B sheets (pages 13 to 28)", "location": "columns Cooling Coil / Air Side, Cooling Coil / Water Side, Re-Heating Coil / Air Side, Re-Heating Coil / Water Side; FCU and CRAC schedules, column Min External Static Pressure",
      "text_as_read": "cooling coil LATDB 12.0 °C, LATWB 11.0 °C, EWT 8.0 °C, LWT 16.0 °C; re-heating coil EAT 12.0 °C, max LAT 24 °C, EWT 35 °C, LWT 25 °C",
      "method": "Read from the schedule register (most printed value of each column)", "confidence": "high"})
 BUILTIN_SOURCES.append(
@@ -127,6 +127,8 @@ DEFAULTS: Dict[str, Tuple] = {
     "PsyCpV": ("Specific heat of water vapour", 1.86, "kJ/(kg K)", "S", "GEN-PSY", "psychrometric relation"),
     "PsyHfg": ("Latent heat of water at 0 °C", 2501, "kJ/kg", "S", "GEN-PSY", "psychrometric relation"),
     "PsyPct": ("Per cent base (humidity printed in per cent)", 100, "%", "S", "GEN-PSY", "unit conversion"),
+    "FcuFanPressure": ("Fan pressure of a fan coil unit or a CRAC unit (external static of the tender schedule)", 200, "Pa", "D", "EQS-COIL",
+                       "Equipment Schedule: fan coil units 150 or 200 Pa, CRAC units 150 Pa minimum external static; the larger value is used; the internal resistance of the unit is not in it, to confirm"),
     "CoilLATDB": ("Cooling coil leaving air dry bulb (tender schedule)", 12, "°C", "D", "EQS-COIL", "Equipment Schedule, AHU Part A"),
     "CoilLATWB": ("Cooling coil leaving air wet bulb (tender schedule)", 11, "°C", "D", "EQS-COIL", "Equipment Schedule, AHU Part A"),
     "ChwEWT": ("Chilled water entering the coil", 8, "°C", "D", "EQS-COIL", "Equipment Schedule, AHU Part A"),
@@ -156,7 +158,7 @@ GROUPS = [
     ("Load method", ["SafetyFactor", "SupplyTemp", "InfiltrationACH", "RoofSolarGain", "OutdoorDB", "OutdoorWB", "OutdoorH",
                      "AirSensibleFactor", "AirDensity", "AirLatentFactor", "RoundTo", "AreaDecimals", "ConvM3hPerLps", "PercentBase",
                      "WperkW", "LperM3"]),
-    ("AHU totalisation", ["DuctLeakage", "FcuLeakageDucted", "FcuLeakageHiWall", "TenderLeakage", "FanPressure", "FanEfficiency", "OAShare", "OADrop", "PAHUOffT", "PAHUOffH"]),
+    ("AHU totalisation", ["DuctLeakage", "FcuLeakageDucted", "FcuLeakageHiWall", "TenderLeakage", "FanPressure", "FcuFanPressure", "FanEfficiency", "OAShare", "OADrop", "PAHUOffT", "PAHUOffH"]),
     ("Pressure method", ["AirtightLimit", "TighterLimit", "FlowN", "FlowNLow", "FlowNHigh", "DoorCd", "RefPressure",
                          "RatioFail", "RatioVerify", "ApplyFromPa", "SecPerHour", "MMperM", "CM2perM2", "PerimFactor", "GapSides",
                          "GapBottom", "GapHinged", "GapSliding", "GapBedWidth", "GapShaft", "NewtonEps", "OffsetEps",
