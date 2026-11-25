@@ -153,7 +153,7 @@ def add(path_in: Path, path_out: Path) -> dict:
             cur = "A"
         elif v.startswith("B. "):
             cur = "B"
-        elif cur and v and v not in ("AHU or system", "TOTAL") and ws.cell(r, 2).value not in (None, "Type") and ws.cell(r, 34).value:
+        elif cur and v and v not in ("AHU or system", "TOTAL") and ws.cell(r, 2).value != "Type" and ws.cell(r, 34).value:
             sec.setdefault(cur, []).append(r)
     titles = {"A": "C. PSYCHROMETRIC STATE AT THE COIL DUTY: AS ZONED (ROWS OF SECTION A)",
               "B": "D. PSYCHROMETRIC STATE AT THE COIL DUTY: AFTER THE OUTDOOR-AIR RULE (ROWS OF SECTION B)"}
