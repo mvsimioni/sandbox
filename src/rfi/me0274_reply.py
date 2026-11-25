@@ -40,7 +40,10 @@ Outdoor design condition      32 degC DB / 26 degC WB (enthalpy 80.3 kJ/kg)
 Room design condition         24 degC, 60 % RH (criteria range 23-25 degC, RH max 65 %)
 Minimum total supply          6 air changes per hour (offices, meeting rooms, open workspace,
                               stores, lift lobbies). Cleaners Room: 20 air changes per hour.
-Outdoor air                   Offices, meeting rooms, workspace: 10 L/s per person + 0.6 L/s per m2
+Outdoor air                   Offices, workstations, open workspace, meeting rooms: larger of
+                              (10 L/s per person x occupancy x intermittent occupancy factor) and
+                              (0.6 L/s per m2). Intermittent occupancy factor: 0.7 offices,
+                              workstations and open workspace; 0.4 meeting rooms
                               Stores, lobbies, utility: 2 air changes per hour
 Room supply air               Larger of the air-change airflow and the thermal-load airflow,
                               rounded up to 10 L/s
