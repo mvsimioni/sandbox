@@ -33,6 +33,17 @@ BUILTIN_SOURCES.append(
      "method": "Value set by the engineer", "confidence": "high"})
 
 BUILTIN_SOURCES.append(
+    {"id": "EQS-COIL", "document": "5. Equipment Schedules (Corr 5), Air Handling Unit Schedule Part A (cooling coil) and Part B (hot water heating)",
+     "issue": "Corrigendum 5", "page": "AHU-A and AHU-B sheets (pages 13 to 28)", "location": "columns Cooling Coil / Air Side, Cooling Coil / Water Side, Re-Heating Coil / Air Side, Re-Heating Coil / Water Side",
+     "text_as_read": "cooling coil LATDB 12.0 °C, LATWB 11.0 °C, EWT 8.0 °C, LWT 16.0 °C; re-heating coil EAT 12.0 °C, max LAT 24 °C, EWT 35 °C, LWT 25 °C",
+     "method": "Read from the schedule register (most printed value of each column)", "confidence": "high"})
+BUILTIN_SOURCES.append(
+    {"id": "GEN-COIL", "document": "Coil estimate method: water flow from duty and water temperature rise; coil rows from the number of transfer units of a counterflow coil",
+     "issue": "method of the engineer", "page": "method", "location": "cooling coil: log-mean enthalpy difference between the air and saturated air at the water temperature; reheat coil: log-mean temperature difference",
+     "text_as_read": "rows = transfer units ÷ transfer units per row (0.45 per row assumed, to confirm at coil selection)",
+     "method": "Estimate. The coil selection of the manufacturer governs", "confidence": "low"})
+
+BUILTIN_SOURCES.append(
     {"id": "GEN-CLASS", "document": "Project rule for single-pass rooms (engineer's instruction of 23 Nov 2026)",
      "issue": "project rule", "page": "single-pass rooms", "location": "clean or sterile supply against dirty rooms",
      "text_as_read": "A single-pass room sets the outdoor-air fraction of the unit only where it needs 100 % outdoor air for clean or sterile supply. A dirty room that needs no sterile air "
@@ -116,6 +127,15 @@ DEFAULTS: Dict[str, Tuple] = {
     "PsyCpV": ("Specific heat of water vapour", 1.86, "kJ/(kg K)", "S", "GEN-PSY", "psychrometric relation"),
     "PsyHfg": ("Latent heat of water at 0 °C", 2501, "kJ/kg", "S", "GEN-PSY", "psychrometric relation"),
     "PsyPct": ("Per cent base (humidity printed in per cent)", 100, "%", "S", "GEN-PSY", "unit conversion"),
+    "CoilLATDB": ("Cooling coil leaving air dry bulb (tender schedule)", 12, "°C", "D", "EQS-COIL", "Equipment Schedule, AHU Part A"),
+    "CoilLATWB": ("Cooling coil leaving air wet bulb (tender schedule)", 11, "°C", "D", "EQS-COIL", "Equipment Schedule, AHU Part A"),
+    "ChwEWT": ("Chilled water entering the coil", 8, "°C", "D", "EQS-COIL", "Equipment Schedule, AHU Part A"),
+    "ChwLWT": ("Chilled water leaving the coil", 16, "°C", "D", "EQS-COIL", "Equipment Schedule, AHU Part A"),
+    "HwEWT": ("Reheat water entering the coil", 35, "°C", "D", "EQS-COIL", "Equipment Schedule, AHU Part B"),
+    "HwLWT": ("Reheat water leaving the coil", 25, "°C", "D", "EQS-COIL", "Equipment Schedule, AHU Part B"),
+    "WaterCp": ("Specific heat of water", 4.186, "kJ/(kg K)", "S", "GEN-COIL", "physical property"),
+    "WaterDensity": ("Density of water", 1, "kg/L", "S", "GEN-COIL", "physical property"),
+    "CoilNTUPerRow": ("Transfer units of a coil per row (coil row estimate)", 0.45, "–", "A", "GEN-COIL", "assumed, to confirm at coil selection"),
     "EnvCheckShare": ("Envelope rooms: share of the air-change airflow within which the thermal case is marked for a peak solar check", 0.20, "fraction", "A",
                       "GEN-BASIS", "to confirm"),
     "SchedTolPct": ("Tolerance on an airflow increase against a schematic", 0.05, "fraction", "S", "GEN-BASIS", "project design basis"),
@@ -140,6 +160,7 @@ GROUPS = [
                          "GapBottom", "GapHinged", "GapSliding", "GapBedWidth", "GapShaft", "NewtonEps", "OffsetEps",
                          "StartPressure", "PressureBracket", "TolPressure"]),
     ("Check tolerances", ["AreaTolPct", "AreaTolM2", "BalTolPct", "BalTolLps", "SchedTolPct", "SchedTolLps", "ZoneCoverMin", "ZoneCoverMax", "EnvCheckShare"]),
+    ("Coils and water", ["CoilLATDB", "CoilLATWB", "ChwEWT", "ChwLWT", "HwEWT", "HwLWT", "WaterCp", "WaterDensity", "CoilNTUPerRow"]),
     ("Room design condition", ["DesignTRef", "DesignRHMax", "PsyA", "PsyB", "PsyC", "PsyP", "PsyEps", "PsyCpA", "PsyCpV", "PsyHfg", "PsyPct"]),
 ]
 

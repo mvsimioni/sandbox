@@ -87,10 +87,54 @@ def _cols(src: int, x: int) -> List[tuple]:
         f = f"({WS.format(t=t)}-({c('M')}+({t}-{c('K')})*{c('AJ')}))"
         df = f"(PsyEps*PsyP*{ps}/(PsyP-{ps})^2*PsyB*PsyC/(PsyC+{t})^2-{c('AJ')})"
         out.append((f"Apparatus dew point, step {i + 1} (helper)", "°C", f"=IFERROR({t}-{f}/{df},{t})", "t"))
+    out += _coil_cols(src, x, 38 + NEWTON)
     return out
 
 
-FMT = {"t": "0.00;\\−0.00;\\–", "w": "0.00000", "q": "#,##0.0;\\−#,##0.0;\\–", "k": "#,##0.00;\\−#,##0.00;\\–", "p": "0.0%", "r": "0.000", "s": "0.000000"}
+HS = "(PsyCpA*{t}+" + WS + "*(PsyHfg+PsyCpV*{t}))"          # enthalpy of saturated air at t
+
+
+def _coil_cols(src: int, x: int, c0: int) -> List[tuple]:
+    """Reheat duty, chilled water and reheat water flow, coil rows (25 Nov 2026). c0 = first free column."""
+    c = lambda k: f"{k}{x}"
+    n = lambda i: c(L(c0 + i))
+    hs_l, hs_e = HS.format(t="ChwLWT"), HS.format(t="ChwEWT")
+
+    def ntu(h_in: str, h_out: str) -> str:                  # counterflow, enthalpy potential: air in against leaving water, air out against entering water
+        d1, d2 = f"({h_in}-{hs_l})", f"({h_out}-{hs_e})"
+        return (f"=IF(OR({c('J')}=0,{h_in}<={h_out}),0,IF(OR({d1}<=0,{d2}<=0),\"not possible\","
+                f"({h_in}-{h_out})/IF(ABS({d1}-{d2})<OffsetEps,{d1},({d1}-{d2})/LN({d1}/{d2}))))")
+
+    def rows(k: str) -> str:
+        return f"=IF(ISNUMBER({k}),IF({k}>0,ROUNDUP({k}/CoilNTUPerRow,0),0),\"–\")"
+    wwb = WS.format(t=n(5))
+    return [
+        ("Chilled water flow at the coil duty of this tab", "L/s", f"={c('Q')}/(WaterCp*(ChwLWT-ChwEWT)*WaterDensity)", "f"),
+        ("Cooling coil transfer units at the coil duty of this tab", "–", ntu(c("L"), c("T")), "r"),
+        ("Cooling coil rows at the coil duty of this tab (estimate)", "no.", rows(n(1)), "i"),
+        ("Cooling coil is at the schedule leaving condition and the air is reheated (Y or N; N for a fan coil unit)", None, f"=IF(AND({c('J')}>0,{c('S')}>CoilLATDB,B{src}<>\"FCU\"),\"Y\",\"N\")", None),
+        ("Coil leaving dry bulb, schedule", "°C", "=CoilLATDB", "t"),
+        ("Coil leaving wet bulb, schedule", "°C", "=CoilLATWB", "t"),
+        ("Coil leaving humidity ratio, schedule", "kg/kg",
+         f"=((PsyHfg-(WaterCp-PsyCpV)*{n(5)})*{wwb}-PsyCpA*({n(4)}-{n(5)}))/(PsyHfg+PsyCpV*{n(4)}-WaterCp*{n(5)})", "w"),
+        ("Coil leaving enthalpy, schedule", "kJ/kg", f"=PsyCpA*{n(4)}+{n(6)}*(PsyHfg+PsyCpV*{n(4)})", "t"),
+        ("Supply air dew point with the coil at the schedule leaving condition", "°C", "=" + DEW.format(w=n(6)), "t"),
+        ("REHEAT COIL DUTY", "kW", f"=IF({n(3)}=\"Y\",AirSensibleFactor*{c('J')}*({c('S')}-{n(4)})/WperkW,0)", "k"),
+        ("Cooling coil duty with reheat (coil at the schedule leaving condition)", "kW",
+         f"=IF({n(3)}=\"Y\",MAX({c('Q')},AirDensity*{c('J')}/LperM3*({c('L')}-{n(7)})),{c('Q')})", "k"),
+        ("CHILLED WATER FLOW (cooling coil duty with reheat)", "L/s", f"={n(10)}/(WaterCp*(ChwLWT-ChwEWT)*WaterDensity)", "f"),
+        ("REHEAT WATER FLOW", "L/s", f"={n(9)}/(WaterCp*(HwEWT-HwLWT)*WaterDensity)", "f"),
+        ("Cooling coil transfer units with reheat", "–", ntu(c("L"), f"IF({n(3)}=\"Y\",MIN({c('T')},{n(7)}),{c('T')})"), "r"),
+        ("COOLING COIL ROWS (estimate)", "no.", rows(n(13)), "i"),
+        ("Reheat coil transfer units", "–",
+         f"=IF({n(9)}<=0,0,IF(OR(HwEWT<={c('S')},HwLWT<={n(4)}),\"not possible\",({c('S')}-{n(4)})/IF(ABS((HwEWT-{c('S')})-(HwLWT-{n(4)}))<OffsetEps,"
+         f"HwEWT-{c('S')},((HwEWT-{c('S')})-(HwLWT-{n(4)}))/LN((HwEWT-{c('S')})/(HwLWT-{n(4)})))))", "r"),
+        ("REHEAT COIL ROWS (estimate)", "no.", rows(n(15)), "i"),
+        ("Source ID", None, "EQS-COIL; GEN-COIL", None),
+    ]
+
+
+FMT = {"t": "0.00;\\−0.00;\\–", "w": "0.00000", "q": "#,##0.0;\\−#,##0.0;\\–", "k": "#,##0.00;\\−#,##0.00;\\–", "p": "0.0%", "r": "0.000", "s": "0.000000", "f": "#,##0.00;\\−#,##0.00;\\–", "i": "0;\\−0;\\–"}
 
 
 def _style(dst, src):
@@ -117,7 +161,10 @@ def add(path_in: Path, path_out: Path) -> dict:
             "(draw-through) warms the air after the coil. Dry bulb by the sensible air constant, enthalpy by the air density, both on the AHU "
             "supply airflow, so that the states close on the coil duty of this tab. Humidity ratio from enthalpy and dry bulb; dew point and "
             "saturation by the psychrometric constants of the Basis of Design (source GEN-PSY). The return air is at the reference room "
-            "condition (no return fan heat or duct gain). The supply air dew point is the dew point of the off-coil air.")
+            "condition (no return fan heat or duct gain). The supply air dew point is the dew point of the off-coil air. Reheat: where the off-coil "
+            "dry bulb that the sensible load needs is above the coil leaving dry bulb of the tender schedule, the coil cools to the schedule leaving "
+            "condition and a reheat coil warms the air to that dry bulb. Water flow = duty ÷ (specific heat × temperature rise). Coil rows are an "
+            "estimate from the transfer units of a counterflow coil (sources EQS-COIL, GEN-COIL); the coil selection governs.")
     r0 = ws.max_row + 3
     h4, h5, h6, d7 = ws["A4"], ws["A5"], ws["A6"], ws["H7"]
     done = {}
@@ -133,7 +180,7 @@ def add(path_in: Path, path_out: Path) -> dict:
         ws.cell(r0 + 1, 1, note)
         _style(ws.cell(r0 + 1, 1), ws["A2"])
         ws.merge_cells(start_row=r0 + 1, start_column=1, end_row=r0 + 1, end_column=12)
-        ws.row_dimensions[r0 + 1].height = 62
+        ws.row_dimensions[r0 + 1].height = 88
         for c, (head, unit, _, _) in enumerate(cols, 1):
             a, b = ws.cell(r0 + 2, c, head), ws.cell(r0 + 3, c, unit)
             _style(a, h5)
@@ -146,7 +193,7 @@ def add(path_in: Path, path_out: Path) -> dict:
                 _style(cell, ws["A7"] if c == 1 else d7)
                 if fmt:
                     cell.number_format = FMT[fmt]
-                if head.startswith("SUPPLY AIR DEW POINT"):
+                if head.isupper() or head.startswith(("SUPPLY AIR DEW POINT", "CHILLED WATER FLOW (", "COOLING COIL ROWS", "REHEAT")):
                     cell.font = Font(name=d7.font.name, sz=d7.font.sz, b=True)
         done[k] = (r0 + 4, r0 + 3 + len(rows))
         r0 = r0 + 4 + len(rows) + 2
