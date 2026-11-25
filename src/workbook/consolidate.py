@@ -184,7 +184,10 @@ def _build(job: Tuple[str, str, str]) -> str:
     with tempfile.TemporaryDirectory(prefix=f"cons_{num}_") as tmp:
         built = Path(tmp) / Path(dest).name
         ctx = build_workbook(Path(src_json), built)
-        rc = recalc(built, Path(tmp) / "rc")
+        from .psychro_ahu import add as psychro                       # psychrometric state at the coil duty, supply air dew point (25 Nov 2026)
+        withpsy = Path(tmp) / "psy" / built.name
+        psychro(built, withpsy)
+        rc = recalc(withpsy, Path(tmp) / "rc")
         shutil.copy(rc, dest)
     return f"D{num}: {len(ctx.rooms)} rooms"
 
@@ -224,6 +227,11 @@ def main(argv=None) -> int:
     print(f"MOT NSC tags (D-097): {sum(1 for x in tagfix if x['action'] == 'tag corrected')} tag(s) corrected, "
           f"{sum(1 for x in tagfix if x['action'] == 'unit row merged')} duplicate unit row(s) merged", flush=True)
     cap["unit_rows_made"] += ensure_unit_rows(datasets)
+    from .link_rooms import link as link_free                         # D-103: rooms with no unit linked to the latest zoning
+    links = link_free(datasets)
+    cap["unit_rows_made"] += ensure_unit_rows(datasets)
+    print(f"free rooms linked to the zoning (D-103): {sum(1 for x in links if x['rule'] != 'none')} of {len(links)} "
+          f"({', '.join(f'{k}: {v}' for k, v in sorted(Counter(x['rule'] for x in links).items()))})", flush=True)
     print(f"room IDs (D-093): {len(ids['became'])} space(s) became DPA rooms, {len(ids['merged'])} merged into brief rooms, "
           f"{len(ids['removed'])} taken out (no brief room)", flush=True)
     print(f"capture: {len(cap['linked'])} room(s) linked to a unit by zoning, {len(cap['added'])} room(s) added from the drawing", flush=True)
