@@ -43,7 +43,7 @@ INT = {"NORTH INTERNAL ELEVATION (IP)": (0, 1), "SOUTH INTERNAL ELEVATION (IP)":
 
 
 PASS_NAMES = re.compile(r"\b(terr|terrace|bus stop|outdoor|covered|walkway|wc bay|rain garden|link ?bridge|spg|drop.?off|green roof|planter)\b", re.I)
-PROBE_MM = (600.0, 1000.0, 1500.0, 2000.0, 2500.0, 3000.0)
+PROBE_MM = (1500.0, 2000.0, 1000.0, 2500.0, 600.0, 3000.0)   # 1.5 m first: a wall-zone strip of a neighbour outline does not take the facade
 PASS_REACH_MM = 30000.0
 
 
@@ -206,10 +206,11 @@ def run():
                         if best is not None:
                             break
                     if best is not None and _pass_through(cls.get(rooms[best][0]), rooms[best][1]):
-                        dd = PROBE_MM[-1]
+                        # through the open space along the line of sight of the elevation (not the normal of an oblique terrace edge)
+                        dd = max(PROBE_MM)
                         while dd < PASS_REACH_MM:
                             dd += 500.0
-                            q = Point(px - nx * dd, py - ny * dd)
+                            q = Point(px - fx * dd, py - fy * dd)
                             hit = [int(j) for j in tree0.query(q) if rooms[int(j)][2].contains(q)]
                             hit = [j for j in hit if not _pass_through(cls.get(rooms[j][0]), rooms[j][1])]
                             if hit:
@@ -239,7 +240,8 @@ def run():
             prof = profiles.get((s["elevation"], st))
             hidden = s["depth"] > front.get((s["elevation"], int(s["axis_mm"] // 100)), s["depth"]) + FRONT_TOL_MM
             s["hidden"] = hidden
-            s["glass_m2"] = 0.0 if (hidden or prof is None) else _glass(prof, s["axis_mm"]) * s["len_m"]
+            w_ = s["proj_m"] if s.get("behind_open") else s["len_m"]
+            s["glass_m2"] = 0.0 if (hidden or prof is None) else _glass(prof, s["axis_mm"]) * w_
             sp = slats.get((s["elevation"], st))
             s["slat_m2"] = 0.0 if (hidden or sp is None) else _glass(dict(bins=sp["bins"], glass_m2_per_m=sp["slat_m2_per_m"]), s["axis_mm"]) * s["len_m"]
             s["on_elevation"] = prof is not None

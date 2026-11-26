@@ -235,24 +235,12 @@
    "elevation": "WEST INTERNAL ELEVATION (IP)",
    "storey": "L01",
    "axis_mm": [
-    87300,
-    104100
+    93000,
+    96600
    ],
    "action": "add",
-   "area_m2": 25.0,
-   "evidence": "Row of panes with glass ticks behind the escalator batten screen, retail on the east side of the plaza (partly hidden)."
-  },
-  {
-   "id": "OV-WI03-1",
-   "elevation": "WEST INTERNAL ELEVATION (IP)",
-   "storey": "L03",
-   "axis_mm": [
-    78900,
-    112500
-   ],
-   "action": "add",
-   "area_m2": 52.2,
-   "evidence": "Atrium-facing glazing with ticks: Comp Lab 20, transom row 9.2, panes and door at L-K 23 (the row behind the batten screen, about 40 m2, not counted)."
+   "area_m2": 7.0,
+   "evidence": "Three panes with glass ticks below the escalator batten screen at 93-96.6 m (about 3.6 x 2.0 m); round 1 estimated 25 m2 including panes without ticks and the row behind the screen, round 2 counts only the ticked panes."
   },
   {
    "id": "OV-S03-2",
@@ -371,6 +359,109 @@
    "sector": "N",
    "area_m2": 12.0,
    "evidence": "Same shopfront, visible 4.1 m before the external stair hides it (up to about 24 m2 if glazed behind the stair; not counted)."
+  },
+  {
+   "id": "OV-WI03-1",
+   "elevation": "WEST INTERNAL ELEVATION (IP)",
+   "storey": "L03",
+   "axis_mm": [
+    104500,
+    112700
+   ],
+   "action": "add_room",
+   "room_id": "L03-R054",
+   "sector": "W",
+   "area_m2": 17.5,
+   "evidence": "Comp Lab west wall on the atrium: five panes with glass ticks, transom plus 2.4 m main row (round 2 re-measure 17.5 m2)."
+  },
+  {
+   "id": "OV-WI03-2",
+   "elevation": "WEST INTERNAL ELEVATION (IP)",
+   "storey": "L03",
+   "axis_mm": [
+    88800,
+    104300
+   ],
+   "action": "add",
+   "area_m2": 8.2,
+   "evidence": "Transom row of 17 ticked panes (0.55 m) above the batten screen in front of the two training rooms; the row behind the screen is not visible (open point)."
+  },
+  {
+   "id": "OV-EI02-1",
+   "elevation": "EAST INTERNAL ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    85500,
+    113500
+   ],
+   "action": "add_room",
+   "room_id": "L02-R100",
+   "sector": "E",
+   "area_m2": 33.0,
+   "evidence": "Tower 1 entrance on the atrium at L02: transom about 12.8, four door panes about 11, side and left panes about 9 m2, all with glass ticks; L02 has no court ring, so the internal sheet is not read by rule (round 2)."
+  },
+  {
+   "id": "OV-SI04-079",
+   "elevation": "SOUTH INTERNAL ELEVATION (IP)",
+   "storey": "L04",
+   "axis_mm": [
+    108700,
+    117000
+   ],
+   "action": "assign",
+   "room_id": "L04-R079",
+   "evidence": "South court wall behind terrace L04-R092: L04-R080 has a thin strip (y 113.4-114.5) in front of all the wards; each ward takes the bays in front of its own outline (R079 108.7-117.0, R080 117.0-125.4, R081 125.4-133.7, R082 133.8-137.9; round 2)."
+  },
+  {
+   "id": "OV-SI04-080",
+   "elevation": "SOUTH INTERNAL ELEVATION (IP)",
+   "storey": "L04",
+   "axis_mm": [
+    117000,
+    125400
+   ],
+   "action": "assign",
+   "room_id": "L04-R080",
+   "evidence": "South court wall behind terrace L04-R092: L04-R080 has a thin strip (y 113.4-114.5) in front of all the wards; each ward takes the bays in front of its own outline (R079 108.7-117.0, R080 117.0-125.4, R081 125.4-133.7, R082 133.8-137.9; round 2)."
+  },
+  {
+   "id": "OV-SI04-081",
+   "elevation": "SOUTH INTERNAL ELEVATION (IP)",
+   "storey": "L04",
+   "axis_mm": [
+    125400,
+    133700
+   ],
+   "action": "assign",
+   "room_id": "L04-R081",
+   "evidence": "South court wall behind terrace L04-R092: L04-R080 has a thin strip (y 113.4-114.5) in front of all the wards; each ward takes the bays in front of its own outline (R079 108.7-117.0, R080 117.0-125.4, R081 125.4-133.7, R082 133.8-137.9; round 2)."
+  },
+  {
+   "id": "OV-SI04-082",
+   "elevation": "SOUTH INTERNAL ELEVATION (IP)",
+   "storey": "L04",
+   "axis_mm": [
+    133700,
+    138000
+   ],
+   "action": "assign",
+   "room_id": "L04-R082",
+   "evidence": "South court wall behind terrace L04-R092: L04-R080 has a thin strip (y 113.4-114.5) in front of all the wards; each ward takes the bays in front of its own outline (R079 108.7-117.0, R080 117.0-125.4, R081 125.4-133.7, R082 133.8-137.9; round 2)."
+  },
+  {
+   "id": "OV-EI01-2",
+   "elevation": "EAST INTERNAL ELEVATION (IP)",
+   "storey": "L01",
+   "axis_mm": [
+    99100,
+    103800
+   ],
+   "action": "assign",
+   "room_id": "L01-R098",
+   "only_rooms": [
+    "L01-R099"
+   ],
+   "evidence": "Tower 1 entrance glazing read on the NV plaza outline itself; it is the wall of the reception / lobby behind (round 2)."
   }
  ],
  "open": [
@@ -387,6 +478,10 @@
   "North L01 105.5-129 m: halftone glazing with glass ticks seen across the NV drop-off plaza, probably the north wall of ED Wait L01-R168 (AHU-B-02-01EDCAC), at least about 60 m2; wall and height uncertain. Not counted.",
   "North L07 59.4-63.8 m: 12.2 m2 of glass in front of an unzoned space between Corr L07-R044 and Off L07-R002 (no zoning outline). Not given to a room.",
   "West L07 44.7-60.3 m: window module with vertical fins in front of the STAFF-01 offices (upper bound about 22 m2 if glass behind the fins). Not counted.",
-  "West L03 windows at 108-117 m start 0.38 m below the L03 FFL; that strip (about 1.3 m2 per window) falls in the L02 band (below threshold)."
+  "West L03 windows at 108-117 m start 0.38 m below the L03 FFL; that strip (about 1.3 m2 per window) falls in the L02 band (below threshold).",
+  "West internal L03 80-88 m: about 23 m2 of ticked panes and a double door south of the L03 court; room not identified. Not counted.",
+  "West internal L02 75-88 m: ticked panes and doors (about 20-25 m2), possibly a glass balustrade row; room uncertain. Not counted.",
+  "East L03 114.1-116.1 m: 8.5 m2 of NE chamfer glass on steps with no room (next to Nursing Room L03-R039, MV). Not given to a room.",
+  "Glass outside the courts drawn on the internal sheets with no matching facade step (W-int L06-L07 at 140-164 m, W-int L01 139-164 m, E-int L05-L07 140-147 m, E-int L02 126-147 m): other blocks or facades beyond, not counted."
  ]
 }
