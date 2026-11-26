@@ -104,7 +104,8 @@ def _overrides(by_st):
                 s["override"] = (s.get("override", "") + " " + it["id"]).strip()
         elif it["action"] == "to_storey":
             g = sum(s["glass_m2"] for s in ss)
-            tgt = rng(it["to_storey"], el, a) or rng(it["to_storey"], el, a, vis=False)
+            to = set(it["to_rooms"]) if "to_rooms" in it else None
+            tgt = rng(it["to_storey"], el, a, only=to) or rng(it["to_storey"], el, a, vis=False, only=to)
             if g and tgt:
                 for s in ss:
                     s["glass_m2"] = 0.0

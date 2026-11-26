@@ -76,11 +76,14 @@
    "storey": "L03",
    "axis_mm": [
     74300,
-    105500
+    88600
    ],
    "action": "to_storey",
    "to_storey": "L02",
-   "evidence": "L03 row of the K-P curtain wall in front of the void over L02 Pre-Function (74.3-86.5 m) and the lecture theatre stage upper volume (86.5-105.5 m). The same chamfer is drawn on the South elevation (165-175.5 m); it is read once, on the East elevation (OV-S03-1 withdrawn, round 2)."
+   "evidence": "L03 row of the K-P curtain wall in front of the void over L02 Pre-Function (74.3-88.6 m): moved to Pre-Function only (round 3; the stage part 88.6-105.5 m is wall by D-122). The same chamfer is drawn on the South elevation and is read once, here.",
+   "to_rooms": [
+    "L02-R122"
+   ]
   },
   {
    "id": "OV-E03-2",
@@ -108,7 +111,10 @@
    ],
    "action": "add",
    "area_m2": 117.0,
-   "evidence": "Food Court shopfront, grids 4.9-11, halftone panels with glass ticks under the canopy; visible height 2.3 m only (rest hidden by the fascia): lower bound."
+   "evidence": "Food Court shopfront, grids 4.9-11, halftone panels with glass ticks under the canopy; visible height 2.3 m only (rest hidden by the fascia): lower bound.",
+   "only_rooms": [
+    "L02-R193"
+   ]
   },
   {
    "id": "OV-S02-3",
@@ -143,12 +149,36 @@
    "elevation": "EAST ELEVATION (IP)",
    "storey": "L04",
    "axis_mm": [
-    74600,
-    113400
+    85500,
+    105500
    ],
    "action": "add",
-   "area_m2": 49.0,
-   "evidence": "Ward wall behind the L04 terrace (74.6-113.4 m): clear filled panes with ticks read as hatched (canopy posts taken for hatch) and the lower 2 m hidden by the dense terrace railing; only 87.9-91.5 and 100.0-103.5 m are hatched. Same wall as L05 (75.8 m2); round 2 total about 86 m2."
+   "area_m2": 36.5,
+   "evidence": "Ward wall behind the L04 terrace: panes at 85.5-105.5 m with ticks read as hatched (canopy posts taken for hatch); only 87.9-91.5 and 100.0-103.5 m are hatched. Placed by the L05 minus L04 profile (round 3)."
+  },
+  {
+   "id": "OV-E04-2",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L04",
+   "axis_mm": [
+    78700,
+    85500
+   ],
+   "action": "add",
+   "area_m2": 5.2,
+   "evidence": "Lower 2 m of the ward panes hidden by the dense terrace railing (L05 minus L04 profile, round 3)."
+  },
+  {
+   "id": "OV-E04-3",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L04",
+   "axis_mm": [
+    105500,
+    113000
+   ],
+   "action": "add",
+   "area_m2": 5.3,
+   "evidence": "Lower 2 m of the ward panes hidden by the dense terrace railing (L05 minus L04 profile, round 3)."
   },
   {
    "id": "OV-W01-1",
@@ -521,22 +551,6 @@
    "evidence": "100-104.5 m is blank wall on the South elevation; Pt Bay L02-R029 has no glass there (round 2)."
   },
   {
-   "id": "OV-S02-6",
-   "elevation": "SOUTH ELEVATION (IP)",
-   "storey": "L02",
-   "axis_mm": [
-    154600,
-    158600
-   ],
-   "action": "assign",
-   "room_id": "L02-R122",
-   "only_rooms": [
-    "L02-R167",
-    "L02-R168"
-   ],
-   "evidence": "Halftone three-pane window (23.3-32.0) of the set-back south wall of the double-height Pre-Function at y = 73 m, east of stair S.08 (round 2); the L03 part is an open point."
-  },
-  {
    "id": "OV-E03-3",
    "elevation": "EAST ELEVATION (IP)",
    "storey": "L03",
@@ -571,7 +585,6 @@
  ],
  "open": [
   "Staff-block bays at grids 14-15 (L04, L05, N and S court walls, about 19.4 m2 each): the internal sections are cut through the staff block, so these ward windows are not drawn. Not added.",
-  "South L02-L03 grid 20-20.6: grey curtain wall above the MEP enclosure (about 21.6 + 14 m2); whether it is the Pre-Function wall or a building beyond is not clear.",
   "North L01 Pharmacy: about 66 m2 of hatched (obscured) glazing at grids 10-13; counted opaque.",
   "North and east L01 lift-lobby shopfronts in front of NV lift lobbies: no cooling load, not counted.",
   "East L05-L06 corner panels at grids J and R with fins and opening lights (about 4.4 m2 each): glass behind unconfirmed.",
@@ -588,7 +601,7 @@
   "East L03 114.1-116.1 m: 8.5 m2 of NE chamfer glass on steps with no room (next to Nursing Room L03-R039, MV). Not given to a room.",
   "Glass outside the courts drawn on the internal sheets with no matching facade step (W-int L06-L07 at 140-164 m, W-int L01 139-164 m, E-int L05-L07 140-147 m, E-int L02 126-147 m): other blocks or facades beyond, not counted.",
   "South L02-L03 154.6-158.6 m: upper row (about 11.5 m2) of the halftone Pre-Function window in the L03 band: Pre-Function or the void above; not counted.",
-  "East L06 44.6-51.5 m: only the top of the set-back window shows above the plant screen (10.7 m2 read); if it is as high as L05, about 9 m2 more. Not counted.",
-  "East L02 38.7-51.5 m: set-back shopfront in front of Food Court and BOH (MV), about 20 m2: no cooling load, not counted."
+  "East L02 38.7-51.5 m: set-back shopfront in front of Food Court and BOH (MV), about 20 m2: no cooling load, not counted.",
+  "Slatted window-type modules with an opening-light triangle but no glass ticks in front of occupied rooms on North L04 20-62 m (Chg, Trg, MRI, Lounge; 94 m2 slatted) and South L06 30-62 m (Oper, Sterile Prep; 38 m2): counted as no glass, as on the West elevation."
  ]
 }
