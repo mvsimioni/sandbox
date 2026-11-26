@@ -1,4 +1,7 @@
-"""Corrections from the architectural part plans of 26 Nov 2026 (D-107): room names, ventilation modes and room links of the AHU zoning.
+"""Corrections from the architectural drawings (D-107, D-108): room names, ventilation modes and room links of the AHU zoning.
+
+D-108 (26 Nov 2026): the Mode of Ventilation plans AR-IP-MOV-xx-001 (working drawings, May 2026; src.arch.mov, out/registers/arch_mov_tags.csv)
+are the latest source of the mode and govern. The part-plan tags (D-107, D-108) are used only for rooms that the MOV plans do not place.
 
 Source: data/uploads/arch_20261126/IP_part (AR-IP-02-xx-nnn, 1:50). Each room tag (Revit room number, short name, area, mode) is placed on the
 zoning background by src.arch.part_plans (out/registers/arch_part_tags.csv). A tag lies in the plan room (zoning outline) that contains it.
@@ -36,8 +39,8 @@ QA = ROOT / "out/qa"
 PROTECTED = ("D-029", "D-036", "D-037", "D-038", "D-095", "D-100", "D-101")
 UNIT_KINDS = ("AHU", "FCU", "AHU spill", "CRAC")
 TAGRE = re.compile(r"(?:P?AHU|FCU|CRAC|DXFCU)-[A-Z0-9][\w/-]*")
-SRC_TEXT = ("Architectural part plans AR-IP-02 (1:50), issue of 26 Nov 2026 (data/uploads/arch_20261126/IP_part): room tag with Revit room "
-            "number, short name, area and ventilation mode")
+SRC_TEXT = ("Mode of Ventilation plans AR-IP-MOV-xx-001 (working drawings, May 2026; data/uploads/mov_20261126) and architectural part plans "
+            "AR-IP-02 (1:50; data/uploads/arch_20261126/IP_part): room tag with Revit room number, short name, area and mode of ventilation")
 csv.field_size_limit(1 << 30)
 
 
@@ -56,9 +59,12 @@ def _write(p: Path, rows, cols):
 
 def located_tags() -> Dict[str, List[Dict[str, Any]]]:
     """storey -> tags with the plan room that holds them (one row per number and name)."""
-    rows, _ = _read(REG / "arch_part_tags.csv")
+    # D-108: the Mode of Ventilation plans (May 2026) govern; a part-plan tag is used only for a room number the MOV plans do not place
+    mov = [dict(x, source="MOV") for x in (_read(REG / "arch_mov_tags.csv")[0] if (REG / "arch_mov_tags.csv").exists() else [])]
+    part = [dict(x, source="part plan") for x in _read(REG / "arch_part_tags.csv")[0]]
+    in_mov = {x["number"] for x in mov if x["bg_x"]}
     seen, out = set(), defaultdict(list)
-    for x in rows:
+    for x in mov + [x for x in part if x["number"] not in in_mov]:
         if not x["bg_x"] or (x["number"], x["name"]) in seen:
             continue
         seen.add((x["number"], x["name"]))
@@ -83,7 +89,7 @@ def zoning() -> List[Dict[str, Any]]:
     for st, tags in sorted(located_tags().items()):
         path = REG / f"zone_assignment_{st}.csv"
         rows, cols = _read(path)
-        for c in ("arch_numbers", "arch_names", "arch_modes", "room_name_tender"):
+        for c in ("arch_numbers", "arch_names", "arch_modes", "arch_source", "room_name_tender"):
             if c not in cols:
                 cols.append(c)
         polys = {p["room_id"]: wkt.loads(p["polygon_pv_wkt"]) for p in _read(REG / f"room_polygons_{st}.csv")[0] if p["polygon_pv_wkt"]}
@@ -99,6 +105,7 @@ def zoning() -> List[Dict[str, Any]]:
             r["arch_numbers"] = " | ".join(x["number"] for x in xs)
             r["arch_names"] = " | ".join(x["name"] for x in xs)
             r["arch_modes"] = " | ".join(x["mode"] or "-" for x in xs)
+            r["arch_source"] = " | ".join(sorted({x["source"] for x in xs}))
             names = {x["name"] for x in xs if x["name"]}
             if len(names) == 1:
                 new = names.pop()
@@ -144,11 +151,11 @@ def zoning() -> List[Dict[str, Any]]:
                     continue
                 cls = score.most_common(1)[0][0]
                 nk = next(o["class_kind"] for o in rows if o["class"] == cls)
-                note = f"Drawn air-conditioned on the part plans ({r['arch_names']}); unit of the neighbouring room with the longest shared boundary, assumed (D-107)."
+                note = f"Drawn air-conditioned on the part plans ({r['arch_names']}); unit of the neighbouring room with the longest shared boundary, assumed (D-107, D-108)."
                 new = (cls, nk)
             else:
                 new = target
-                note = f"Drawn {target[0]} on the part plans ({r['arch_names']}, {r['arch_numbers']}) (D-107)."
+                note = f"Drawn {target[0]} on the part plans ({r['arch_names']}, {r['arch_numbers']}) (D-107, D-108)."
             log.append(dict(storey=st, room_id=rid, change="class", before=r["class"], after=new[0], evidence=note))
             r["class_before_ruling"] = r.get("class_before_ruling") or r["class"]
             r["class"], r["class_kind"] = new
@@ -180,8 +187,8 @@ def workbooks(datasets: Dict[str, Dict[str, Any]], root: Path = ROOT) -> List[Di
             sid = f"ARCH-{num}"
             if not any(s["id"] == sid for s in d["sources"]):
                 d["sources"].append(dict(id=sid, document=SRC_TEXT, issue="26 Nov 2026", page=x["sheet"], location=f"tag {num}",
-                                         text_as_read=f"{num} '{x['name']}', {x['area_m2']} m², {x['mode'] or 'no mode'}; in plan room {x['plan_room']} ({z.get('room_name', '')}, class {cls})",
-                                         method="Room tag of the part plan placed on the zoning background; unit of the plan room that holds it (D-107)",
+                                         text_as_read=f"{x['source']} tag {num} '{x['name']}', {x['area_m2']} m², {x['mode'] or 'no mode'}; in plan room {x['plan_room']} ({z.get('room_name', '')}, class {cls})",
+                                         method="Room tag of the part plan placed on the zoning background; unit of the plan room that holds it (D-107, D-108)",
                                          confidence="high"))
             r["plan_room_id"] = x["plan_room"]
             r.setdefault("prov", {})["zoning"] = ["D", sid]
@@ -196,15 +203,15 @@ def workbooks(datasets: Dict[str, Dict[str, Any]], root: Path = ROOT) -> List[Di
                 new_unit, new_st = r.get("ahu"), r.get("system_type")
             changed = (new_unit or new_st or "") != before
             r["ahu"], r["system_type"] = new_unit, new_st
-            note = (f"Drawing (D-107): tag {num} '{x['name']}' ({x['mode'] or 'no mode'}) is in plan room {x['plan_room']} "
+            note = (f"Drawing (D-107, D-108): tag {num} '{x['name']}' ({x['mode'] or 'no mode'}) is in plan room {x['plan_room']} "
                     f"({z.get('room_name', '')}), class {cls}.")
             r.setdefault("gaps", {}).pop("ahu", None)
             if changed:
                 r["remark"] = (r.get("remark") or "").rstrip() + f" Unit changed from {before or 'none'} to {new_unit or new_st or 'none'}: " + note
-            log.append(dict(workbook=f"D{n}", room=r["number"], name=r.get("name"), revit_number=num, drawing_name=x["name"], drawing_mode=x["mode"],
+            log.append(dict(workbook=f"D{n}", room=r["number"], name=r.get("name"), revit_number=num, source=x["source"], drawing_name=x["name"], drawing_mode=x["mode"],
                             plan_room=x["plan_room"], zone_class=cls, before=before, after=new_unit or new_st or "", changed="Y" if changed else "N"))
     QA.mkdir(parents=True, exist_ok=True)
-    _write(QA / "arch_room_links.csv", log, ["workbook", "room", "name", "revit_number", "drawing_name", "drawing_mode", "plan_room", "zone_class",
+    _write(QA / "arch_room_links.csv", log, ["workbook", "room", "name", "revit_number", "source", "drawing_name", "drawing_mode", "plan_room", "zone_class",
                                              "before", "after", "changed"])
     return log
 
