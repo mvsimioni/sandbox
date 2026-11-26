@@ -256,6 +256,8 @@ def build(issue: Path):
 
     activity = {}
 
+    rh_min0 = None
+
     def act_sched(w):
         if w not in activity:
             activity[w] = const_sched(f"Activity {w:.0f} W", w)
@@ -399,8 +401,11 @@ def build(issue: Path):
         th.setCoolingSetpointTemperatureSchedule(const_sched(f"{zname} clg", tset))
         th.setHeatingSetpointTemperatureSchedule(const_sched(f"{zname} htg (no heating)", 10.0))
         z.setThermostatSetpointDualSetpoint(th)
+        if rh_min0 is None:
+            rh_min0 = const_sched("RH min 0 no humidification", 0.0, "Humidity")
         hs = os_.model.ZoneControlHumidistat(m)
         hs.setDehumidifyingRelativeHumiditySetpointSchedule(const_sched(f"{zname} RH max", 60.0, "Humidity"))
+        hs.setHumidifyingRelativeHumiditySetpointSchedule(rh_min0)  # E+ 24.2 requires it; 0 % = no humidification
         z.setZoneControlHumidistat(hs)
         il = os_.model.ZoneHVACIdealLoadsAirSystem(m)
         il.setDehumidificationControlType("Humidistat")
