@@ -1,0 +1,302 @@
+{
+ "_about": "Forensic envelope review D-120, round 1 (26 Nov 2026): corrections to the elevation glass read by src.arch.elev_glazing that the drawing conventions do not let a rule detect. Axis = building mm along the elevation (X from grid 2, Y from grid A). Areas are measured on the elevation PDFs (1:250 vectors). 'add' spreads the area over the visible facade steps in the range (rooms found by the inward probe); 'exclude' sets the glass of the range to 0; 'to_storey' moves the glass of a double-height space read in the upper band to the storey of the room.",
+ "items": [
+  {
+   "id": "OV-N01-1",
+   "elevation": "NORTH ELEVATION (IP)",
+   "storey": "L01",
+   "axis_mm": [
+    121200,
+    186000
+   ],
+   "action": "exclude",
+   "evidence": "Grey-filled fascia band (grids 16-19) and soffit strip (19-23) with no glass ticks; not glass."
+  },
+  {
+   "id": "OV-N01-2",
+   "elevation": "NORTH ELEVATION (IP)",
+   "storey": "L01",
+   "axis_mm": [
+    33600,
+    63840
+   ],
+   "action": "add",
+   "area_m2": 109.8,
+   "evidence": "ED Wait / Triage / Reg shopfront, grids 6-9.6, drawn in outline with glass ticks (no fill), FFL to soffit +4.45 m; set back 6-10 m under the L02 overhang."
+  },
+  {
+   "id": "OV-N01-3",
+   "elevation": "NORTH ELEVATION (IP)",
+   "storey": "L01",
+   "axis_mm": [
+    67200,
+    100700
+   ],
+   "action": "add",
+   "area_m2": 57.0,
+   "evidence": "Outpatient Pharmacy shopfront, grids 10-13.5, outline with glass ticks; clear panes only (about 66 m2 of hatched obscured glazing not counted)."
+  },
+  {
+   "id": "OV-N06-1",
+   "elevation": "NORTH ELEVATION (IP)",
+   "storey": "L06",
+   "axis_mm": [
+    50400,
+    58800
+   ],
+   "action": "add",
+   "area_m2": 8.0,
+   "evidence": "Bay 8-9: two clear panes with glass ticks and no hatch read as opaque."
+  },
+  {
+   "id": "OV-N06-2",
+   "elevation": "NORTH ELEVATION (IP)",
+   "storey": "L06",
+   "axis_mm": [
+    149000,
+    168400
+   ],
+   "action": "exclude",
+   "evidence": "Linkbridge 02 glazing (red dashed outline, tag LB01 / LINKBRIDGE 02) drawn in front of the block; not glass of the rooms behind."
+  },
+  {
+   "id": "OV-N07-1",
+   "elevation": "NORTH ELEVATION (IP)",
+   "storey": "L07",
+   "axis_mm": [
+    149000,
+    168400
+   ],
+   "action": "exclude",
+   "evidence": "Linkbridge 02 glazing in front of AHU plant, FLL and genset yard."
+  },
+  {
+   "id": "OV-N03-1",
+   "elevation": "NORTH ELEVATION (IP)",
+   "storey": "L03",
+   "axis_mm": [
+    165800,
+    175500
+   ],
+   "action": "to_storey",
+   "to_storey": "L02",
+   "evidence": "Upper row of the two-storey NE curtain wall (L02 FFL to +32.0); L03 has no room there (double-height L02 volume)."
+  },
+  {
+   "id": "OV-S03-1",
+   "elevation": "SOUTH ELEVATION (IP)",
+   "storey": "L03",
+   "axis_mm": [
+    165000,
+    175500
+   ],
+   "action": "to_storey",
+   "to_storey": "L02",
+   "evidence": "Upper part of the 8.45 m high Pre-Function curtain wall; L03 plan shows a void over L02 Pre-Function."
+  },
+  {
+   "id": "OV-E03-1",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L03",
+   "axis_mm": [
+    74300,
+    105500
+   ],
+   "action": "to_storey",
+   "to_storey": "L02",
+   "evidence": "L03 row of the K-P curtain wall in front of the void over L02 Pre-Function (74.3-86.5 m) and the lecture theatre stage upper volume (86.5-105.5 m)."
+  },
+  {
+   "id": "OV-S02-1",
+   "elevation": "SOUTH ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    165700,
+    173300
+   ],
+   "action": "add",
+   "area_m2": 19.7,
+   "evidence": "Eight Pre-Function curtain-wall panels (6.6 x 2.97 m) with glass ticks, drawn without fill."
+  },
+  {
+   "id": "OV-S02-2",
+   "elevation": "SOUTH ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    24360,
+    75600
+   ],
+   "action": "add",
+   "area_m2": 117.0,
+   "evidence": "Food Court shopfront, grids 4.9-11, halftone panels with glass ticks under the canopy; visible height 2.3 m only (rest hidden by the fascia): lower bound."
+  },
+  {
+   "id": "OV-S02-3",
+   "elevation": "SOUTH ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    98520,
+    129600
+   ],
+   "action": "add",
+   "area_m2": 58.0,
+   "evidence": "Training rooms shopfront, grids 13.3-17, halftone glazed panels with ticks; visible height only: lower bound."
+  },
+  {
+   "id": "OV-S06-1",
+   "elevation": "SOUTH ELEVATION (IP)",
+   "storey": "L06",
+   "axis_mm": [
+    109440,
+    120360
+   ],
+   "action": "add",
+   "area_m2": 3.4,
+   "evidence": "Two 1.0 x 1.7 m panes with glass ticks read as slatted."
+  },
+  {
+   "id": "OV-E01-1",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L01",
+   "axis_mm": [
+    85000,
+    105200
+   ],
+   "action": "add",
+   "area_m2": 60.0,
+   "evidence": "Retail shopfront (FCU-B-01-01RETAIL-03), 16 panes with glass ticks and a glazed double door, outline only, FFL to +2.96 m."
+  },
+  {
+   "id": "OV-E04-1",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L04",
+   "axis_mm": [
+    85500,
+    106000
+   ],
+   "action": "add",
+   "area_m2": 30.0,
+   "evidence": "Ward wall behind the L04 terrace: 13.4 m of clear filled panes with ticks read as hatched (canopy posts taken for hatch); only 87.9-91.5 and 100.0-103.5 m are hatched."
+  },
+  {
+   "id": "OV-W01-1",
+   "elevation": "WEST ELEVATION (IP)",
+   "storey": "L01",
+   "axis_mm": [
+    39900,
+    48100
+   ],
+   "action": "add",
+   "area_m2": 29.3,
+   "evidence": "ED west wall set back about 15 m behind the external covered area: six panes with glass ticks, grey, sill at FFL, 4.35 m high (glazed doors not counted)."
+  },
+  {
+   "id": "OV-NI04-1",
+   "elevation": "NORTH INTERNAL ELEVATION (IP)",
+   "storey": "L04",
+   "axis_mm": [
+    112800,
+    138000
+   ],
+   "action": "add",
+   "area_m2": 13.6,
+   "evidence": "Terrace planter boxes and railing in front of the ward windows read as hatched; same 18 panes as L05 (58.0 m2)."
+  },
+  {
+   "id": "OV-SI04-1",
+   "elevation": "SOUTH INTERNAL ELEVATION (IP)",
+   "storey": "L04",
+   "axis_mm": [
+    112800,
+    138000
+   ],
+   "action": "add",
+   "area_m2": 11.3,
+   "evidence": "Planter overlay in bays 15-17; same 18 panes as L05 (57.8 m2)."
+  },
+  {
+   "id": "OV-WI04-1",
+   "elevation": "WEST INTERNAL ELEVATION (IP)",
+   "storey": "L04",
+   "axis_mm": [
+    78900,
+    112500
+   ],
+   "action": "add",
+   "area_m2": 14.5,
+   "evidence": "Planter boxes and railing in front of bays N-M and M-L; same 24 panes as L05 (76.5 m2)."
+  },
+  {
+   "id": "OV-EI01-1",
+   "elevation": "EAST INTERNAL ELEVATION (IP)",
+   "storey": "L01",
+   "axis_mm": [
+    87300,
+    112500
+   ],
+   "action": "add",
+   "area_m2": 56.0,
+   "evidence": "Shopfront and Tower 1 entrance between the NV plaza and the lobby / reception, panes with glass ticks, uncoloured or light purple (+/-25 %)."
+  },
+  {
+   "id": "OV-WI01-1",
+   "elevation": "WEST INTERNAL ELEVATION (IP)",
+   "storey": "L01",
+   "axis_mm": [
+    87300,
+    104100
+   ],
+   "action": "add",
+   "area_m2": 25.0,
+   "evidence": "Row of panes with glass ticks behind the escalator batten screen, retail on the east side of the plaza (partly hidden)."
+  },
+  {
+   "id": "OV-WI03-1",
+   "elevation": "WEST INTERNAL ELEVATION (IP)",
+   "storey": "L03",
+   "axis_mm": [
+    78900,
+    112500
+   ],
+   "action": "add",
+   "area_m2": 52.2,
+   "evidence": "Atrium-facing glazing with ticks: Comp Lab 20, transom row 9.2, panes and door at L-K 23 (the row behind the batten screen, about 40 m2, not counted)."
+  },
+  {
+   "id": "OV-S03-2",
+   "elevation": "SOUTH ELEVATION (IP)",
+   "storey": "L03",
+   "axis_mm": [
+    55900,
+    79900
+   ],
+   "action": "assign",
+   "room_id": "L03-R162-T15",
+   "evidence": "Lab window strip behind the NV planter terrace L03-R184; the open lab (Special Haematology / Special Chemistry / Chemistry Lab Automation, zone AHU-B-04-03SPECHEM-01A/B) has only tag outlines in the zoning, so its glass goes to the Special Haematology tag room of that zone."
+  },
+  {
+   "id": "OV-S03-3",
+   "elevation": "SOUTH ELEVATION (IP)",
+   "storey": "L03",
+   "axis_mm": [
+    84700,
+    97400
+   ],
+   "action": "assign",
+   "room_id": "L03-R162-T09",
+   "evidence": "Facade rooms here are the Urinalysis Bench, corridor and equipment bay of the SPECHEM open lab; Blood Bank L03-R130 is interior (north of an AC corridor)."
+  }
+ ],
+ "open": [
+  "East L02 86.5-105.5 m: about 126 m2 (true area) of curtain wall in front of the lecture theatre stage. The zoning outline in front of it is labelled S.33 (stair, MV) but is the stage; no workbook room carries the stage. Room and mode to be confirmed.",
+  "Staff-block bays at grids 14-15 (L04, L05, N and S court walls, about 19.4 m2 each): the internal sections are cut through the staff block, so these ward windows are not drawn. Not added.",
+  "South L02-L03 grid 20-20.6: grey curtain wall above the MEP enclosure (about 21.6 + 14 m2); whether it is the Pre-Function wall or a building beyond is not clear.",
+  "North L01 Pharmacy: about 66 m2 of hatched (obscured) glazing at grids 10-13; counted opaque.",
+  "North and east L01 lift-lobby shopfronts in front of NV lift lobbies: no cooling load, not counted.",
+  "East L05-L06 corner panels at grids J and R with fins and opening lights (about 4.4 m2 each): glass behind unconfirmed.",
+  "West occupied rooms behind louvre blocks (L03 Mtg, L05/L06 Off and Mtg; upper bounds 6.5-15 m2): glass behind unconfirmed.",
+  "Vision glass drawn in front of toilets (L02 NE, L06 court): obscured glass or spandrel to be confirmed.",
+  "South L05 85.9-91.9 m: glazing in front of MG vacuum plant (MV); shadow box to be confirmed.",
+  "West L03 atrium shopfront row behind the batten screen (about 40 m2): not counted."
+ ]
+}

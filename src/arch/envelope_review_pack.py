@@ -53,7 +53,7 @@ def run():
         for t in QA.glob(f"tile_{tag}_{st}_*.png"):
             shutil.copy(t, d / t.name)
         # rooms table
-        agg = defaultdict(lambda: dict(facade_m=0.0, glass=0.0, slat=0.0, hidden=0.0, axis=[]))
+        agg = defaultdict(lambda: dict(facade_m=0.0, glass=0.0, slat=0.0, hidden=0.0, axis=[], behind=set(), ov=set()))
         for s in ss:
             if not s["room"]:
                 continue
@@ -63,13 +63,17 @@ def run():
             a["slat"] += float(s.get("slat_m2") or 0)
             a["hidden"] += float(s["len_m"]) if s["hidden"] == "True" else 0.0
             a["axis"].append(float(s["axis_mm"]))
+            if s.get("behind_open"):
+                a["behind"].add(s["behind_open"])
+            a["ov"].update((s.get("override") or "").split())
         with (d / "rooms.csv").open("w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
             w.writerow(["room_id", "room_name", "zoning_class", "axis_from_mm", "axis_to_mm", "facade_m", "glass_m2_read", "slatted_m2_read",
-                        "hidden_m"])
+                        "hidden_m", "through_open_space", "corrections"])
             for (rid, nm), v in sorted(agg.items(), key=lambda kv: min(kv[1]["axis"])):
                 w.writerow([rid, nm, zone.get(rid, ""), round(min(v["axis"])), round(max(v["axis"])), round(v["facade_m"], 1),
-                            round(v["glass"], 1), round(v["slat"], 1), round(v["hidden"], 1)])
+                            round(v["glass"], 1), round(v["slat"], 1), round(v["hidden"], 1),
+                            " ".join(sorted(v["behind"])), " ".join(sorted(v["ov"]))])
         # plan crops along this facade: one per tile range of 6 grid bays (~50 m), 25 m deep
         pdf = ZON / f"AIGH_IP_AHU_Zoning_{st}.pdf"
         if not pdf.exists():

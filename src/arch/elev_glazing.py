@@ -31,6 +31,7 @@ FFL = {"LB3": 0.0, "B3": 3.8, "B2": 8.3, "B1": 12.8, "L01": 17.0, "L02": 23.0, "
        "L07": 53.0, "L08": 59.0}
 STOREYS = ["LB3", "B3", "B2", "B1", "L01", "L02", "L03", "L04", "L05", "L06", "L07"]
 GLASS = (0.87, 0.87, 0.87)
+BACK_GLASS = (0.97, 0.97, 0.97)       # halftone panels of set-back walls; glass only where a glass tick is drawn in them (D-120 round 1)
 MIN_PANEL_M = 0.30
 BIN = 100.0              # mm, glass profile bin along the grid axis
 PROFILES = {}
@@ -74,6 +75,24 @@ def axes(p):
             nxt = [(t2, r2) for t2, r2 in ws if abs(r2.y0 - r.y0) < 1.5 and 0 < r2.x0 - r.x1 < 20 and re.fullmatch(r"\d+\.\d\d", t2)]
             if nxt:
                 lv.append((float(nxt[0][0]), (r.y0 + r.y1) / 2))
+    # the level is the drawn level line, which sits about 5 pt (0.44 m) below the centre of its 'FFL' label (forensic review D-120,
+    # round 1): take the nearest long horizontal line 2-8 pt below each label
+    M = p.rotation_matrix
+    H = []
+    for dr in p.get_drawings():
+        for it in dr["items"]:
+            if it[0] == "l":
+                q1, q2 = it[1] * M, it[2] * M
+                if abs(q1.y - q2.y) < 0.2 and abs(q1.x - q2.x) > 3:
+                    H.append(q1.y)
+    H = np.array(H)
+    lv2 = []
+    for v, yc in lv:
+        dy = H - yc
+        dy = dy[(dy > 2.0) & (dy < 8.0)]
+        if len(dy):
+            lv2.append((v, yc + float(np.median(dy[np.abs(dy - np.median(dy)) < 0.3]) if (np.abs(dy - np.median(dy)) < 0.3).any() else float(np.median(dy)))))
+    lv = lv2 or lv
     L = np.array([v for v in lv if v[0] in FFL.values()])
     d, c = np.polyfit(L[:, 0], L[:, 1], 1)
     return axis, (a, b), (c, d), {t: x for t, x in lab.items() if t in gm}, float(np.max(np.abs(L[:, 1] - (c + d * L[:, 0]))))
@@ -82,16 +101,19 @@ def axes(p):
 def panels(p):
     """Light-grey shapes in page view; diagonal-hatched ones flagged."""
     M = p.rotation_matrix
-    glass, diag, red = [], [], []
+    glass, diag, red, back = [], [], [], []
     for d in p.get_drawings():
         f = d.get("fill")
         if f is not None and tuple(round(x, 2) for x in f) == (1.0, 0.0, 0.0):       # opening-light triangle: the panel is glass
             r = d["rect"] * M
             red.append(shapely.Point((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2))
-        if f is not None and tuple(round(x, 2) for x in f) == GLASS:
+        if f is not None and tuple(round(x, 2) for x in f) in (GLASS, BACK_GLASS):
             r = d["rect"] * M
             r.normalize()
-            glass.append(r)
+            if tuple(round(x, 2) for x in f) == BACK_GLASS:
+                back.append(r)
+            else:
+                glass.append(r)
         elif d.get("fill") is None and d.get("color") is not None:
             for it in d["items"]:
                 if it[0] == "l":
@@ -100,6 +122,9 @@ def panels(p):
                     if dx > 0.4 and dy > 0.4 and 0.3 < dx / dy < 3:
                         sgn = 1 if (p2.x - p1.x) * (p2.y - p1.y) > 0 else -1
                         diag.append(((p1.x + p2.x) / 2, (p1.y + p2.y) / 2, sgn))
+    if back and diag:
+        t = shapely.STRtree([shapely.Point(x, y) for x, y, _ in diag])
+        glass += [r for r in back if r.width > 3.0 and r.height > 3.0 and len(t.query(box(r.x0, r.y0, r.x1, r.y1).buffer(-0.2))) > 0]
     return glass, diag, red
 
 

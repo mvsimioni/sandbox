@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import csv
 import math
+import re
 import pickle
 from collections import defaultdict
 from pathlib import Path
@@ -39,6 +40,74 @@ FRONT_TOL_MM = 1000.0
 EXT = {"NORTH ELEVATION (IP)": (0, 1), "SOUTH ELEVATION (IP)": (0, -1), "EAST ELEVATION (IP)": (1, 0), "WEST ELEVATION (IP)": (-1, 0)}
 INT = {"NORTH INTERNAL ELEVATION (IP)": (0, 1), "SOUTH INTERNAL ELEVATION (IP)": (0, -1), "EAST INTERNAL ELEVATION (IP)": (1, 0),
        "WEST INTERNAL ELEVATION (IP)": (-1, 0)}
+
+
+PASS_NAMES = re.compile(r"\b(terr|terrace|bus stop|outdoor|covered|walkway|wc bay|rain garden|link ?bridge|spg|drop.?off|green roof|planter)\b", re.I)
+PROBE_MM = (600.0, 1000.0, 1500.0, 2000.0, 2500.0, 3000.0)
+PASS_REACH_MM = 30000.0
+
+
+def _pass_through(cls, name):
+    """Open or naturally ventilated space in front of the envelope (terrace, covered area, NV corridor): the glass seen on the elevation there
+    is the wall of the conditioned room behind it (forensic review D-120, round 1)."""
+    c = (cls or "").lower()
+    return c == "nv" or "external" in c or (c in ("", "no information", "not conditioned") and bool(PASS_NAMES.search(name or "")))
+
+
+def _classes(st):
+    p = REG / f"zone_assignment_{st}.csv"
+    return {z["room_id"]: z.get("class", "") for z in csv.DictReader(p.open(encoding="utf-8"))} if p.exists() else {}
+
+
+OVERRIDES = Path(__file__).with_name("envelope_overrides_d120.json")
+
+
+def _overrides(by_st):
+    """Corrections of the forensic review (D-120) that no drawing rule can find: outline-only glazing, link-bridge glass, double-height
+    spaces read in the upper band, panes mis-read as hatched. Each is applied to the facade steps of its elevation, storey and axis range."""
+    import json
+    if not OVERRIDES.exists():
+        return []
+    unplaced = []
+
+    def rng(st, el, a, vis=True):
+        return [s for s in by_st.get(st, []) if s["elevation"] == el and a[0] <= s["axis_mm"] <= a[1] and (not vis or not s["hidden"])]
+
+    def spread(ss, area, tag):
+        L = sum(s["len_m"] for s in ss)
+        for s in ss:
+            s["glass_m2"] += area * s["len_m"] / L
+            s["override"] = (s.get("override", "") + " " + tag).strip()
+
+    for it in json.loads(OVERRIDES.read_text(encoding="utf-8"))["items"]:
+        el, st, a = it["elevation"], it["storey"], it["axis_mm"]
+        ss = rng(st, el, a)
+        if it["action"] == "exclude":
+            for s in rng(st, el, a, vis=False):
+                s["glass_m2"] = 0.0
+                s["override"] = (s.get("override", "") + " " + it["id"]).strip()
+        elif it["action"] == "add":
+            if ss:
+                spread(ss, it["area_m2"], it["id"])
+            else:
+                unplaced.append(it["id"])
+        elif it["action"] == "assign":
+            rid = it["room_id"]
+            nm = next((n for r_, n, _ in _rooms(st) if r_ == rid), "")
+            for s in ss:
+                s["room"], s["room_name"] = rid, nm or s["room_name"]
+                s["override"] = (s.get("override", "") + " " + it["id"]).strip()
+        elif it["action"] == "to_storey":
+            g = sum(s["glass_m2"] for s in ss)
+            tgt = rng(it["to_storey"], el, a) or rng(it["to_storey"], el, a, vis=False)
+            if g and tgt:
+                for s in ss:
+                    s["glass_m2"] = 0.0
+                    s["override"] = (s.get("override", "") + " " + it["id"]).strip()
+                spread(tgt, g, it["id"])
+            elif g:
+                unplaced.append(it["id"])
+    return unplaced
 
 
 def _rooms(st):
@@ -65,14 +134,16 @@ def _glass(prof, x_mm):
 def run():
     profiles = pickle.loads((REG / "elev_glazing_profiles.pkl").read_bytes())
     slats = pickle.loads((REG / "elev_slat_profiles.pkl").read_bytes())
-    steps_all = []
+    steps_all, by_st = [], {}
     for st in STOREYS:
         rooms = _rooms(st)
+        cls = _classes(st)
         if not rooms:
             continue
         geoms = [g.buffer(-250).buffer(250) or g for _, _, g in rooms]
         geoms = [g if not g.is_empty else rooms[i][2] for i, g in enumerate(geoms)]
         tree = shapely.STRtree(geoms)
+        tree0 = shapely.STRtree([g for _, _, g in rooms])
         plate = shapely.union_all([g.buffer(CLOSE_MM) for _, _, g in rooms]).buffer(-CLOSE_MM)
         rings = []
         for poly in getattr(plate, "geoms", [plate]):
@@ -104,8 +175,16 @@ def run():
                     t = (i + 0.5) / n
                     px, py = a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t
                     p = Point(px, py)
-                    best, bk = None, None
-                    for tol in (TOL_MM, REACH_MM):
+                    best, bk, behind = None, None, ""
+                    # inward probe: the room that contains the point 0.6-2 m inside the facade (a thin wall-zone strip of a neighbour
+                    # polygon does not take the facade); through open / NV spaces, on to the first conditioned room behind
+                    for dd in PROBE_MM:
+                        q = Point(px - nx * dd, py - ny * dd)
+                        hit = [int(j) for j in tree0.query(q) if rooms[int(j)][2].contains(q)]
+                        if hit:
+                            best = min(hit, key=lambda j: rooms[j][2].area)
+                            break
+                    for tol in (() if best is not None else (TOL_MM, REACH_MM)):
                         for j in tree.query(p.buffer(tol)):
                             d = geoms[int(j)].distance(p)
                             if d <= tol:
@@ -114,11 +193,23 @@ def run():
                                     best, bk = int(j), k
                         if best is not None:
                             break
+                    if best is not None and _pass_through(cls.get(rooms[best][0]), rooms[best][1]):
+                        dd = PROBE_MM[-1]
+                        while dd < PASS_REACH_MM:
+                            dd += 500.0
+                            q = Point(px - nx * dd, py - ny * dd)
+                            hit = [int(j) for j in tree0.query(q) if rooms[int(j)][2].contains(q)]
+                            hit = [j for j in hit if not _pass_through(cls.get(rooms[j][0]), rooms[j][1])]
+                            if hit:
+                                behind = rooms[best][0]
+                                best = min(hit, key=lambda j: rooms[j][2].area)
+                                break
                     axis_pos = px if fx == 0 else py
                     depth = -(px * fx + py * fy)            # smaller = nearer the viewer of that elevation
                     steps.append(dict(storey=st, kind=kind, elevation=ename, room=rooms[best][0] if best is not None else "",
                                       room_name=rooms[best][1] if best is not None else "", sector=sector, x=round(px), y=round(py),
-                                      axis_mm=axis_pos, depth=depth, len_m=L / n / 1000.0, proj_m=L / n / 1000.0 * abs(cosf), cosf=cosf))
+                                      axis_mm=axis_pos, depth=depth, len_m=L / n / 1000.0, proj_m=L / n / 1000.0 * abs(cosf), cosf=cosf,
+                                      behind_open=behind))
         # front step per elevation and axis bin
         front = {}
         for s in steps:
@@ -129,10 +220,13 @@ def run():
             prof = profiles.get((s["elevation"], st))
             hidden = s["depth"] > front[(s["elevation"], int(s["axis_mm"] // 100))] + FRONT_TOL_MM
             s["hidden"] = hidden
-            s["glass_m2"] = 0.0 if (hidden or prof is None) else _glass(prof, s["axis_mm"]) * s["proj_m"]
+            s["glass_m2"] = 0.0 if (hidden or prof is None) else _glass(prof, s["axis_mm"]) * s["len_m"]
             sp = slats.get((s["elevation"], st))
-            s["slat_m2"] = 0.0 if (hidden or sp is None) else _glass(dict(bins=sp["bins"], glass_m2_per_m=sp["slat_m2_per_m"]), s["axis_mm"]) * s["proj_m"]
+            s["slat_m2"] = 0.0 if (hidden or sp is None) else _glass(dict(bins=sp["bins"], glass_m2_per_m=sp["slat_m2_per_m"]), s["axis_mm"]) * s["len_m"]
             s["on_elevation"] = prof is not None
+        by_st[st] = steps
+    unplaced = _overrides(by_st)
+    for st, steps in by_st.items():
         steps_all += steps
         agg = defaultdict(lambda: dict(facade_m=0.0, glass_m2=0.0, slat_m2=0.0, hidden_m=0.0, court_m=0.0, elevations=set()))
         for s in steps:
@@ -156,10 +250,12 @@ def run():
                             round(v["glass_m2"] / fa, 3) if fa else 0, round(v["hidden_m"], 2), round(v["court_m"], 2),
                             "; ".join(sorted(v["elevations"]))])
     with (REG / "room_glazing_steps.csv").open("w", newline="", encoding="utf-8") as fh:
-        keys = ["storey", "kind", "elevation", "room", "room_name", "sector", "x", "y", "axis_mm", "len_m", "proj_m", "glass_m2", "slat_m2", "hidden"]
+        keys = ["storey", "kind", "elevation", "room", "room_name", "sector", "x", "y", "axis_mm", "len_m", "proj_m", "glass_m2", "slat_m2", "hidden", "behind_open", "override"]
         w = csv.DictWriter(fh, fieldnames=keys, extrasaction="ignore")
         w.writeheader()
         w.writerows(steps_all)
+    if unplaced:
+        print("overrides with no facade step in range:", unplaced)
     return len(steps_all)
 
 
