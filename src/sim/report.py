@@ -18,7 +18,7 @@ from openpyxl.utils import get_column_letter
 ROOT = Path(__file__).resolve().parent.parent.parent
 SIM = ROOT / "out/sim"
 SQL = SIM / "run_sizing_min/eplusout.sql"
-ISSUE = "out/issue/DRAFT_2026-11-26_R18"
+ISSUE = "out/issue/DRAFT_2026-11-26_R19"
 
 DAYS = [("SS553", "SS 553:2026 cl. 5.4.4 cooling day, 33 °C DB / 27 °C WB, 21 May (basis)"),
         ("DP", "ASHRAE 2025 HoF Changi 0.4 % dehumidification, DP 27.2 °C / MCDB 29.4 °C (comparison)"),

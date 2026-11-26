@@ -8,7 +8,8 @@ numbered grids, Y along the lettered grids = north, origin grid 2/A) joined, sim
 each piece is extruded over the floor-to-floor height of its storey (FFL of the building sections AA to EE; slab 250 mm, Marcus). A wall is exterior where it
 lies on the storey footprint boundary (all rooms of the storey joined, gaps under 1 m closed; courtyards included); other walls are
 adiabatic. A ceiling is a roof where more than half of it is not under the footprint of the storey above. Basement exterior walls and floors
-are adiabatic (assumption). Windows: window-to-wall ratio and shading coefficient (SC1 x SC2) of the facade orientation from the ETTV report;
+are adiabatic (assumption). Windows: the glass measured on the elevations for the rooms of each unit and orientation (D-120), as one window-to-wall
+ratio on the exterior walls of the zone (out/sim/glass_placement.csv); shading coefficient (SC1 x SC2) of the facade orientation from the ETTV report;
 glazing U 1.65, SHGC = 0.87 x SC. Walls: area-weighted opaque U of the orientation (ETTV).
 
 Loads: per room from the 'Level xx Room Zones' sheets of the issued workbooks (people and W per person, lighting W, small power W,
@@ -185,6 +186,22 @@ def _ettv():
 ORIENT = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
 
 
+def measured_glass():
+    """(storey, unit, orientation) -> glass m2 measured on the elevations for the rooms of that unit (D-120 forensic envelope review,
+    out/registers/room_glazing_<ST>.csv)."""
+    out = defaultdict(float)
+    for st in ORDER:
+        p = REG / f"room_glazing_{st}.csv"
+        if not p.exists():
+            continue
+        za = {z["room_id"]: z for z in _read(REG / f"zone_assignment_{st}.csv")}
+        for r in _read(p):
+            z = za.get(r["room_id"])
+            if z and z["class_kind"] in UNIT_KINDS and float(r["glass_m2"] or 0) > 0:
+                out[(st, z["class"], r["sector"])] += float(r["glass_m2"])
+    return out
+
+
 def _orient(az):
     return ORIENT[int(((az % 360) + 22.5) // 45) % 8]
 
@@ -196,6 +213,8 @@ def build(issue: Path):
     oa_unit = ahu_outdoor_air(issue)
     zones, foot = zones_geometry()
     ettv = _ettv()
+    mglass = measured_glass()
+    glass_log = []
     m = os_.model.Model()
     m.getBuilding().setName("AIGH Inpatient block LB3-L07")
     m.getBuilding().setNorthAxis(0.0)
@@ -304,6 +323,7 @@ def build(issue: Path):
         fp = foot[st]
         bnd = fp.boundary
         area = 0.0
+        ext = {}
         for i, p in enumerate(polys):
             pts = list(p.exterior.coords)[:-1]
             if Polygon(pts).exterior.is_ccw:
@@ -346,11 +366,23 @@ def build(issue: Path):
                     n = s.outwardNormal()
                     o = _orient(math.degrees(math.atan2(n.x(), n.y())))
                     s.setConstruction(wall_cons.get(o, wall_cons["N"]))
-                    wwr = (ettv.get(o) or ettv["N"])[0] or 0.4
-                    if s.grossArea() > 1.0:
-                        sub = s.setWindowToWallRatio(min(wwr, 0.9), 0.0, True)
-                        if not sub.empty():
-                            sub.get().setConstruction(glz.get(o, glz["N"]))
+                    ext.setdefault(o, []).append(s)
+        # windows: the glass measured on the elevations for the rooms of this unit and orientation (D-120), spread over the exterior walls of
+        # the zone in that orientation as one window-to-wall ratio (at most 0.9); measured glass with no wall to carry it is reported
+        for o in set(ext) | {k[2] for k in mglass if k[0] == st and k[1] == u}:
+            g = mglass.get((st, u, o), 0.0)
+            walls = [w for w in ext.get(o, []) if w.grossArea() > 1.0]
+            gross = sum(w.grossArea() for w in walls)
+            wwr = min(0.9, g / gross) if gross > 0 else 0.0
+            placed = 0.0
+            if wwr > 0.005:
+                for w in walls:
+                    sub = w.setWindowToWallRatio(wwr, 0.0, True)
+                    if not sub.empty():
+                        sub.get().setConstruction(glz.get(o, glz["N"]))
+                        placed += sub.get().grossArea()
+            glass_log.append(dict(storey=st, unit=u, orientation=o, measured_m2=round(g, 1), wall_gross_m2=round(gross, 1), wwr=round(wwr, 3),
+                                  placed_m2=round(placed, 1)))
         # loads (zone totals spread over the spaces by floor area)
         a = a or defaultdict(float)
         spaces = list(z.spaces())
@@ -497,13 +529,19 @@ def build(issue: Path):
         w = csv.DictWriter(fh, fieldnames=list(zinfo[0]))
         w.writeheader()
         w.writerows(zinfo)
-    return dict(zones=len(zinfo), spaces=sum(z["spaces"] for z in zinfo), outline_m2=round(sum(z["outline_m2"] for z in zinfo)),
+    with (OUT / "glass_placement.csv").open("w", newline="", encoding="utf-8") as fh:
+        w_ = csv.DictWriter(fh, fieldnames=["storey", "unit", "orientation", "measured_m2", "wall_gross_m2", "wwr", "placed_m2"])
+        w_.writeheader()
+        w_.writerows(glass_log)
+    tot_m = sum(mglass.values())
+    tot_p = sum(x["placed_m2"] for x in glass_log)
+    return dict(glass_measured_m2=round(tot_m), glass_placed_m2=round(tot_p), zones=len(zinfo), spaces=sum(z["spaces"] for z in zinfo), outline_m2=round(sum(z["outline_m2"] for z in zinfo)),
                 rooms_m2=round(sum(z["rooms_m2"] for z in zinfo)), skipped=skipped[:20], n_skipped=len(skipped), ft_errors=errs[:5],
                 ft_warnings=len(warns), loads_rooms=len(loads), units_with_oa=len(oa_unit))
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--issue", default="out/issue/DRAFT_2026-11-26_R11")
+    ap.add_argument("--issue", default="out/issue/DRAFT_2026-11-26_R19")
     a = ap.parse_args()
     print(json.dumps(build(ROOT / a.issue), indent=1))
