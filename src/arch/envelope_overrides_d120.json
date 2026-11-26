@@ -99,18 +99,6 @@
    "evidence": "Top row (L03 FFL to +32.0) of the two-storey NE curtain wall, read on the East elevation on the void/roof outline L03-R088 (MG TRANSFER, MV) or on no room; belongs to the double-height L02 volume behind (replaces OV-N03-1, which found no step: round 2)."
   },
   {
-   "id": "OV-S02-1",
-   "elevation": "SOUTH ELEVATION (IP)",
-   "storey": "L02",
-   "axis_mm": [
-    165700,
-    173300
-   ],
-   "action": "add",
-   "area_m2": 19.7,
-   "evidence": "Eight Pre-Function curtain-wall panels (6.6 x 2.97 m) with glass ticks, drawn without fill."
-  },
-  {
    "id": "OV-S02-2",
    "elevation": "SOUTH ELEVATION (IP)",
    "storey": "L02",
@@ -131,20 +119,12 @@
     129600
    ],
    "action": "add",
-   "area_m2": 58.0,
-   "evidence": "Training rooms shopfront, grids 13.3-17, halftone glazed panels with ticks; visible height only: lower bound."
-  },
-  {
-   "id": "OV-S06-1",
-   "elevation": "SOUTH ELEVATION (IP)",
-   "storey": "L06",
-   "axis_mm": [
-    109440,
-    120360
-   ],
-   "action": "add",
-   "area_m2": 3.4,
-   "evidence": "Two 1.0 x 1.7 m panes with glass ticks read as slatted."
+   "area_m2": 39.0,
+   "evidence": "Training rooms shopfront: ticked halftone panes at 104.5-112.6 and 121-129.6 m, 2.3 m visible height (lower bound); 113.5-120 m panes have no ticks (round 2 re-measure 39 m2).",
+   "only_rooms": [
+    "L02-R165",
+    "L02-R166"
+   ]
   },
   {
    "id": "OV-E01-1",
@@ -163,12 +143,12 @@
    "elevation": "EAST ELEVATION (IP)",
    "storey": "L04",
    "axis_mm": [
-    85500,
-    106000
+    74600,
+    113400
    ],
    "action": "add",
-   "area_m2": 30.0,
-   "evidence": "Ward wall behind the L04 terrace: 13.4 m of clear filled panes with ticks read as hatched (canopy posts taken for hatch); only 87.9-91.5 and 100.0-103.5 m are hatched."
+   "area_m2": 49.0,
+   "evidence": "Ward wall behind the L04 terrace (74.6-113.4 m): clear filled panes with ticks read as hatched (canopy posts taken for hatch) and the lower 2 m hidden by the dense terrace railing; only 87.9-91.5 and 100.0-103.5 m are hatched. Same wall as L05 (75.8 m2); round 2 total about 86 m2."
   },
   {
    "id": "OV-W01-1",
@@ -490,6 +470,103 @@
     "L02-R108"
    ],
    "evidence": "Lecture theatre stage (outline L02-R108): the curtain wall in front of it is not a window (Marcus, 26 Nov 2026, D-122); wall only."
+  },
+  {
+   "id": "OV-E02-1",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    73600,
+    118500
+   ],
+   "action": "exclude",
+   "only_rooms": [
+    "L02-R100",
+    "L02-R107",
+    "L02-R146",
+    "L02-R082",
+    "L02-R166",
+    "L02-R139",
+    "L02-R145"
+   ],
+   "evidence": "Walls 35-77 m behind the lecture block on the East view (Recept, interior store, retail, training, terrace): the curtain-wall glass in front belongs to the lecture block (round 2)."
+  },
+  {
+   "id": "OV-S02-4",
+   "elevation": "SOUTH ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    166000,
+    175300
+   ],
+   "action": "exclude",
+   "only_rooms": [
+    "L02-R095",
+    "L02-R087"
+   ],
+   "evidence": "South-facing notch edge at y 104-105 m, 20-30 m behind the Pre-Function SE chamfer: not the facade (round 2)."
+  },
+  {
+   "id": "OV-S02-5",
+   "elevation": "SOUTH ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    98000,
+    105000
+   ],
+   "action": "exclude",
+   "only_rooms": [
+    "L02-R029"
+   ],
+   "evidence": "100-104.5 m is blank wall on the South elevation; Pt Bay L02-R029 has no glass there (round 2)."
+  },
+  {
+   "id": "OV-S02-6",
+   "elevation": "SOUTH ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    154600,
+    158600
+   ],
+   "action": "assign",
+   "room_id": "L02-R122",
+   "only_rooms": [
+    "L02-R167",
+    "L02-R168"
+   ],
+   "evidence": "Halftone three-pane window (23.3-32.0) of the set-back south wall of the double-height Pre-Function at y = 73 m, east of stair S.08 (round 2); the L03 part is an open point."
+  },
+  {
+   "id": "OV-E03-3",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L03",
+   "axis_mm": [
+    38700,
+    51900
+   ],
+   "action": "assign",
+   "room_id": "L03-R162-T12",
+   "only_rooms": [
+    "L03-R161",
+    "L03-R173",
+    "L03-R181",
+    "L03-R162-T13"
+   ],
+   "evidence": "Set-back glazed wall at x = 80 m, behind NV corridor L03-R174: the SPECHEM open lab, which has only tag outlines; the probe crossed it and reached cold rooms and the Microbiology room of another zone (round 2). Given to the Chemistry Lab Automation tag room of the SPECHEM zone."
+  },
+  {
+   "id": "OV-E02-2",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    38700,
+    51500
+   ],
+   "action": "add_room",
+   "room_id": "L02-R177",
+   "sector": "E",
+   "area_m2": 6.0,
+   "evidence": "Part of the set-back shopfront under the canopy fascia in front of retail L02-R177 (about 6 m2 of 25-29 m2 visible; the rest fronts Food Court and BOH, MV; round 2)."
   }
  ],
  "open": [
@@ -509,6 +586,9 @@
   "West internal L03 80-88 m: about 23 m2 of ticked panes and a double door south of the L03 court; room not identified. Not counted.",
   "West internal L02 75-88 m: ticked panes and doors (about 20-25 m2), possibly a glass balustrade row; room uncertain. Not counted.",
   "East L03 114.1-116.1 m: 8.5 m2 of NE chamfer glass on steps with no room (next to Nursing Room L03-R039, MV). Not given to a room.",
-  "Glass outside the courts drawn on the internal sheets with no matching facade step (W-int L06-L07 at 140-164 m, W-int L01 139-164 m, E-int L05-L07 140-147 m, E-int L02 126-147 m): other blocks or facades beyond, not counted."
+  "Glass outside the courts drawn on the internal sheets with no matching facade step (W-int L06-L07 at 140-164 m, W-int L01 139-164 m, E-int L05-L07 140-147 m, E-int L02 126-147 m): other blocks or facades beyond, not counted.",
+  "South L02-L03 154.6-158.6 m: upper row (about 11.5 m2) of the halftone Pre-Function window in the L03 band: Pre-Function or the void above; not counted.",
+  "East L06 44.6-51.5 m: only the top of the set-back window shows above the plant screen (10.7 m2 read); if it is as high as L05, about 9 m2 more. Not counted.",
+  "East L02 38.7-51.5 m: set-back shopfront in front of Food Court and BOH (MV), about 20 m2: no cooling load, not counted."
  ]
 }

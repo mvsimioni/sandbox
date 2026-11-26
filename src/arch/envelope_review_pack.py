@@ -50,6 +50,8 @@ def run():
         tag = re.sub(r"[^A-Za-z]+", "_", el).strip("_")
         d = QA / tag / st
         d.mkdir(parents=True, exist_ok=True)
+        for t in d.glob("tile_*.png"):
+            t.unlink()
         for t in QA.glob(f"tile_{tag}_{st}_*.png"):
             shutil.copy(t, d / t.name)
         # rooms table
