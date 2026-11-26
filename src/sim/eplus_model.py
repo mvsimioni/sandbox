@@ -447,6 +447,22 @@ def build(issue: Path):
     dh.setSolarModelIndicator("ASHRAETau2017")
     dh.setAshraeClearSkyOpticalDepthForBeamIrradiance(0.463)
     dh.setAshraeClearSkyOpticalDepthForDiffuseIrradiance(2.322)
+    # Comparison only (not the basis): Changi TMYx DDY "Ann Clg .4% Condns WB=>MDB", matches ASHRAE 2025 HoF 486980 row (2) i/j
+    dw = os_.model.DesignDay(m)
+    dw.setName("Singapore-Changi.Intl.AP Ann Clg .4% Condns WB=>MDB")
+    dw.setMonth(5)
+    dw.setDayOfMonth(21)
+    dw.setDayType("SummerDesignDay")
+    dw.setMaximumDryBulbTemperature(30.8)
+    dw.setDailyDryBulbTemperatureRange(5.8)
+    dw.setHumidityConditionType("Wetbulb")
+    dw.setWetBulbOrDewPointAtMaximumDryBulb(28.0)
+    dw.setBarometricPressure(101245)
+    dw.setWindSpeed(3.6)
+    dw.setWindDirection(40)
+    dw.setSolarModelIndicator("ASHRAETau2017")
+    dw.setAshraeClearSkyOpticalDepthForBeamIrradiance(0.463)
+    dw.setAshraeClearSkyOpticalDepthForDiffuseIrradiance(2.322)
 
     for v in ("Zone Ideal Loads Supply Air Total Cooling Rate", "Zone Ideal Loads Supply Air Sensible Cooling Rate",
               "Zone Ideal Loads Supply Air Latent Cooling Rate", "Zone Ideal Loads Outdoor Air Total Cooling Rate", "Zone Air Temperature",
