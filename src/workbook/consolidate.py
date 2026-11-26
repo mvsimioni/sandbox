@@ -235,6 +235,10 @@ def main(argv=None) -> int:
     cap["unit_rows_made"] += ensure_unit_rows(datasets)
     from .iof_overrides import apply as iof_set                       # D-106: occupancy factors typed by the engineer
     print(f"intermittent occupancy factors (D-106): {len(iof_set(datasets))} room(s)", flush=True)
+    from .ss553_table1 import apply as t1_set                         # D-111: SS 553 Table 1 rates on the SS 553 rooms
+    from collections import Counter as _C
+    t1 = t1_set(datasets)
+    print(f"SS 553 Table 1 (D-111): {len(t1)} room(s): " + ", ".join(f"{k} {v}" for k, v in _C(x['type'] for x in t1).most_common()), flush=True)
     print(f"free rooms linked to the zoning (D-103): {sum(1 for x in links if x['rule'] != 'none')} of {len(links)} "
           f"({', '.join(f'{k}: {v}' for k, v in sorted(Counter(x['rule'] for x in links).items()))})", flush=True)
     print(f"room IDs (D-093): {len(ids['became'])} space(s) became DPA rooms, {len(ids['merged'])} merged into brief rooms, "

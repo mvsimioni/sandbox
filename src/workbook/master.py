@@ -332,8 +332,8 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
     tags = sorted(dict.fromkeys(a["tag"] for r in recs for a in r["ahus"]), key=storey_order)
     put(am, "A1", "AHU Master", "Title")
     put(am, "A2", "Each AHU once, sorted by storey and tag. Room supply is the sum over the departments; calculated airflow adds the duct leakage. "
-        "Outdoor air (D-110): on a unit with only HFDS / ASHRAE 170 rooms, the straight sum of the room outdoor air of all its departments; on SS 553 and mixed units, "
-        "the highest room outdoor-air fraction of any department on the unit × the calculated airflow until the SS 553 Table 1 rates are set; never below the balance basis. Tender airflow is information only: "
+        "Outdoor air (D-110): on a unit with only HFDS / ASHRAE 170 rooms, the straight sum of the room outdoor air of all its departments; plus the SS 553 Table 1 "
+        "rate × area of the other rooms (D-111); never below the balance basis (pressure targets and exhaust may raise it). Tender airflow is information only: "
         "it is never a target or a limit. A calculated airflow above tender is marked VERIFY. Outdoor air above the tender outdoor airflow is marked VERIFY and its reduction cells stay blank. "
         "A reduction is stated only where the calculated airflow is below tender and the room list of the unit is complete.", "Note")
     mh = [("ahu", "AHU or system", "", 28), ("type", "Type", "", 9), ("nd", "Departments", "no.", 13), ("n", "Rooms", "no.", 8), ("area", "Area", "m²", 10),
@@ -387,7 +387,7 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
         put(am, g("oac"), f"=SUMIFS({rng('AC')},{rng('A')},{g('ahu')})", "Calc", "d1")
         put(am, g("oan"), f"=SUMIFS({rng('AD')},{rng('A')},{g('ahu')})", "Calc", "d1")
         put(am, g("cls"), f'=IF(AND({g("oac")}>0,{g("oan")}>0),"MIXED",IF({g("oac")}>0,"HFDS/170",IF({g("oan")}>0,"SS 553","")))', "Calc")
-        put(am, g("oamin"), f'=IF({g("cls")}="HFDS/170",{g("oac")},{g("frac")}*{g("calc")})', "Calc", "d1")
+        put(am, g("oamin"), f'={g("oac")}+{g("oan")}', "Calc", "d1")                    # D-111
         put(am, g("oa_rule"), f"=MIN({g('calc')},MAX({g('oamin')},{g('oab')}))", "Calc", "d1")
         # R1-10 decided item 3 (information only, feeds nothing): larger of (sum of room outdoor air x (1 + DuctLeakage)) and (highest fraction of the rooms that are
         # not single pass x calculated airflow)

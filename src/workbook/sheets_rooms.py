@@ -245,6 +245,12 @@ def write_criteria(ctx: Ctx) -> None:
         _prov_cells(ctx, ws, g("code"), g("src"), code, src, has)
         # D-110: the HFDS row prints 'Refer to SS553' for outdoor air (same source as the criteria row)
         put(ws, g("ss553"), "Y" if c.get("oa_ss553") else None, "Link").alignment = Alignment(horizontal="center")
+        # D-111: SS 553 Table 1 type and rate (or 62.1 for a meeting room, rule N3), with its own source
+        t1 = c.get("ss553_t1") or {}
+        for k, f, kind, fmt in (("t1type", "kind", "text", None), ("t1_lpm2", "lpm2", "num", "d2"), ("t1_lpp", "lpp", "num", "d1")):
+            _val(ctx, ws, g(k), t1.get(f), "D", fmt=fmt, kind=kind, cref=g("t1code"), sref=g("t1src"), src=t1.get("src", ""),
+                 label=f"SS 553 {f}", room=r["number"])
+        _prov_cells(ctx, ws, g("t1code"), g("t1src"), "D", t1.get("src", ""), bool(t1))
         spc = c.get("sp_class") or None
         _val(ctx, ws, g("spc"), spc, "A", kind="text", cref=g("spc_c"), sref=g("spc_s"), src="GEN-CLASS", label="single-pass class", room=r["number"])
         _prov_cells(ctx, ws, g("spc_c"), g("spc_s"), "A", "GEN-CLASS", spc is not None)
@@ -322,7 +328,11 @@ ENG_F: Dict[str, str] = {
     "nenv": "=COUNTIF([EN.room],{no})",
     "occ": "={RI.people}", "iof": '=IF({RI.iof}="",1,{RI.iof})', "oa_ach": "={CR.oa_ach}", "oa_lpp": "={CR.oa_lpp}", "oa_lpm2": "={CR.oa_lpm2}", "oa_spec": "={CR.oa_spec}",
     # D-110 (26 Nov 2026): the occupant diversity (IOF, D-106) no longer reduces outdoor air (HFDS/170 rule C4, C5; SS 553 per area)
-    "oa": "=IF(AND({fix}=1,{oa_spec}>0),{oa_spec},MAX({occ}*{oa_lpp},{oa_lpm2}*{area},{oa_ach}*{vol}/ConvM3hPerLps,{oa_spec}))",
+    # D-111: SS 553 rooms: Table 1 rate x area, or 62.1 Rp x occupancy + Ra x area (meeting); cl 5.3.5 store or riser below 6 m2 and storage-only
+    # cold room exempt (0); QP rate (cl 5.3.6) and a store of 6 m2 or more keep the booklet rate below
+    "oa": ('=IF(AND({fix}=1,{oa_spec}>0),{oa_spec},IF(OR({CR.t1type}="COLD ROOM (cl 5.3.5)",AND({CR.t1type}="STORE OR RISER (cl 5.3.5)",{area}<6)),0,'
+           'IF(N({CR.t1_lpm2})+N({CR.t1_lpp})>0,N({CR.t1_lpp})*{occ}+N({CR.t1_lpm2})*{area},'
+           'MAX({occ}*{oa_lpp},{oa_lpm2}*{area},{oa_ach}*{vol}/ConvM3hPerLps,{oa_spec}))))'),
     "sa_ach": "={CR.sa_ach}", "sa_lpm2": "={CR.sa_lpm2}", "sa_spec": "={CR.sa_spec}",
     "sa_lps": "=MAX({sa_lpm2}*{area},{sa_ach}*{vol}/ConvM3hPerLps,{sa_spec},{oa})",       # the outdoor air is a floor of the supply
     "ex_ach": "={CR.ex_ach}", "ex_lpm2": "={CR.ex_lpm2}", "ex_spec": "={CR.ex_spec}",

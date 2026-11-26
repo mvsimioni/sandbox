@@ -299,6 +299,11 @@ def room_loads(room: Dict[str, Any], c: Dict[str, Any], tables: Dict[str, Any]) 
     oa_pp = _z(crit.get("oa_lps_per_person"))
     # D-110: no occupant diversity (IOF) on outdoor air
     oa_req = max(people * oa_pp, _z(crit.get("oa_lps_per_m2")) * area, _z(crit.get("min_oa_ach")) * vol / 3.6, _z(crit.get("oa_specified_lps")))
+    t1 = crit.get("ss553_t1") or {}                                   # D-111: SS 553 Table 1 / 62.1 / cl 5.3.5 exemption
+    if t1.get("kind") == "COLD ROOM (cl 5.3.5)" or (t1.get("kind") == "STORE OR RISER (cl 5.3.5)" and area < 6):
+        oa_req = 0.0
+    elif _z(t1.get("lpm2")) + _z(t1.get("lpp")) > 0:
+        oa_req = _z(t1.get("lpp")) * people + _z(t1.get("lpm2")) * area
     # D-110 outdoor-air scope: HFDS / ASHRAE 170 (air changes or specified flow, no per-person or per-area rate, no 'Refer to SS553') or SS 553
     if _z(crit.get("min_oa_ach")) + _z(crit.get("oa_specified_lps")) + oa_pp + _z(crit.get("oa_lps_per_m2")) == 0:
         oa_scope = ""
@@ -551,7 +556,7 @@ def ahu_totals(tag: str, rooms: List[Dict[str, Any]], c: Dict[str, Any], unit: O
     oa_clin = sum(r["oa_lps"] for r in supply_rooms if r.get("oa_scope") == "HFDS/170")
     oa_nc = sum(r["oa_lps"] for r in supply_rooms if r.get("oa_scope") == "SS 553")
     ahu_class = "MIXED" if oa_clin > 0 and oa_nc > 0 else ("HFDS/170" if oa_clin > 0 else ("SS 553" if oa_nc > 0 else ""))
-    oa_min = oa_clin if ahu_class == "HFDS/170" else oa_highest
+    oa_min = oa_clin + oa_nc                                          # D-111
     oa_need = max(oa_min, oa_balance)
     oa_short = max(oa_need - supply_leak, 0.0)
     oa_final = min(oa_need, supply_leak)

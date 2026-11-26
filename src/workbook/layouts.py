@@ -75,6 +75,9 @@ def cr_spec() -> Spec:
             ("trange", "Design temperature inside the range", "", 10),
             ("after", "After-hours", "", 10), ("press", "P / N / –", "", 7), ("clin", "Clinical criteria (not FCU)", "", 9),
             ("ss553", "HFDS row refers to SS 553 for outdoor air", "", 9), ("oascope", "Outdoor-air scope (D-110)", "", 11),
+            ("t1type", "SS 553 occupancy type (Table 1, cl 5.3.5, 5.3.6) or 62.1 (D-111)", "", 22),
+            ("t1_lpm2", "SS 553 Table 1 rate (or 62.1 Ra)", "L/s per m²", 9), ("t1_lpp", "62.1 Rp", "L/s per person", 9),
+            ("t1code", "Code", "", 5), ("t1src", "Source ID", "", 11),
             ("remark", "Remark", "", 50)]
 
 
