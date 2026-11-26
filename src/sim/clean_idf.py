@@ -112,13 +112,56 @@ def clean(text: str, solar: str | None = None):
     return out, dict(surfaces=len(objs), dropped=len(dropped), vertices_fixed=fixed, windows_dropped=wins, ideal_oa_space_lists=nlinks)
 
 
+DDY = "data/uploads/weather_20261126/SGP_SG_Singapore-Changi.Intl.AP.486980_TMYx.ddy"
+SS553 = "data/uploads/weather_20261126/ss553_designday.idf"
+OUTVARS = ("Zone Ideal Loads Supply Air Total Cooling Rate", "Zone Ideal Loads Supply Air Sensible Cooling Rate",
+           "Zone Ideal Loads Supply Air Latent Cooling Rate", "Zone Ideal Loads Outdoor Air Total Cooling Rate", "Zone Air Temperature",
+           "Zone Air Relative Humidity")
+
+
+def _ddy_obj(text: str, name: str) -> str:
+    i = text.index(name)
+    j = text.rindex("SizingPeriod:DesignDay,", 0, i)
+    out = []
+    for ln in text[j:].splitlines():
+        code = ln.split("!")[0].rstrip()
+        out.append(code)
+        if code.endswith(";"):
+            break
+    return "\n".join(out) + "\n\n"
+
+
+def design_days(text: str) -> str:
+    """SS 553:2026 cooling day (basis), ASHRAE 0.4 % DP=>MDB (dehumidification) and 0.4 % WB=>MDB (comparison) from the Changi DDY."""
+    text = re.sub(r"(?m)^SizingPeriod:DesignDay,\n.*?;[^\n]*\n", "", text, flags=re.S)
+    ss = open(SS553, encoding="utf-8").read()
+    ss = ss[ss.index("SizingPeriod:DesignDay,"):]
+    ddy = open(DDY, encoding="latin-1").read()
+    return text + "\n" + ss + "\n" + _ddy_obj(ddy, "Ann Clg .4% Condns DP=>MDB") + _ddy_obj(ddy, "Ann Clg .4% Condns WB=>MDB")
+
+
+def outputs(text: str) -> str:
+    have = set(re.findall(r"(?m)^Output:Variable,\n\s*\*,\n\s*([^,]+),", text))
+    return text + "".join(f"\nOutput:Variable,\n  *,\n  {v},\n  Hourly;\n" for v in OUTVARS if v not in have)
+
+
+def annual(text: str) -> str:
+    i = text.index("SimulationControl,")
+    j = text.index(";", i)
+    return text[:i] + "SimulationControl,\n  Yes,\n  No,\n  No,\n  No,\n  Yes,\n  ,\n  " + text[j:]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("src")
     ap.add_argument("dst")
     ap.add_argument("--solar")
+    ap.add_argument("--annual", action="store_true", help="weather-file run period instead of the design days")
     a = ap.parse_args()
     out, info = clean(open(a.src, encoding="utf-8").read(), a.solar)
+    out = outputs(design_days(out))
+    if a.annual:
+        out = annual(out)
     open(a.dst, "w", encoding="utf-8").write(out)
     print(info)
 

@@ -5,7 +5,7 @@ Rooms that are MV, NV, not conditioned or without information are not modelled; 
 
 Geometry: the zoning outlines of the rooms of a zone (zoning_building_mm_wkt, else polygon_building_mm_wkt; building frame X along the
 numbered grids, Y along the lettered grids = north, origin grid 2/A) joined, simplified (0.25 m) and split into hole-free pieces (spaces);
-each piece is extruded over the floor-to-floor height of its storey (floor levels printed on the zone plans). A wall is exterior where it
+each piece is extruded over the floor-to-floor height of its storey (FFL of the building sections AA to EE; slab 250 mm). A wall is exterior where it
 lies on the storey footprint boundary (all rooms of the storey joined, gaps under 1 m closed; courtyards included); other walls are
 adiabatic. A ceiling is a roof where more than half of it is not under the footprint of the storey above. Basement exterior walls and floors
 are adiabatic (assumption). Windows: window-to-wall ratio and shading coefficient (SC1 x SC2) of the facade orientation from the ETTV report;
@@ -43,14 +43,17 @@ REG = ROOT / "out/registers"
 OUT = ROOT / "out/sim"
 csv.field_size_limit(1 << 30)
 
-# FFL (m) printed on the zone plans (data/uploads/arch_20261126/IP_zone, most frequent FFL string); L08 from the elevation register
-FFL = {"LB3": 0.0, "B3": 3.8, "B2": 8.3, "B1": 11.6, "L01": 17.0, "L02": 23.0, "L03": 29.0, "L04": 35.0, "L05": 41.0, "L06": 47.0,
+# FFL (m) of the building sections AR-SW-20-ZZ-001/002/003 (Sections AA to EE, tender drawings Mar 2025; Marcus 26 Nov 2026,
+# data/uploads/sections_20261126): Lower Basement 3 0.00, Basement 3 3.80, Basement 2 8.30, Basement 1 (IP) 12.80, 1st storey 17.00
+# (1st storey MZ 20.00, not modelled as a storey), 2nd 23.00, then 6.00 m to the 8th storey at 59.00. Level to level = difference.
+FFL = {"LB3": 0.0, "B3": 3.8, "B2": 8.3, "B1": 12.8, "L01": 17.0, "L02": 23.0, "L03": 29.0, "L04": 35.0, "L05": 41.0, "L06": 47.0,
        "L07": 53.0, "L08": 59.0}
 ORDER = ["LB3", "B3", "B2", "B1", "L01", "L02", "L03", "L04", "L05", "L06", "L07"]
 BASEMENT = {"LB3", "B3", "B2", "B1"}
 UNIT_KINDS = ("AHU", "FCU", "CRAC")
 
 # labelled assumptions (no project value)
+SLAB_T = 0.25         # m, structural slab of the building sections (measured at 1:500 on Section EE, L01 to L07: 12-13 px at 600 dpi = 0.25-0.28 m)
 ROOF_U = 0.5          # W/m2K, ASSUMPTION: no roof U in the project documents (ETTV covers walls); typical concrete roof with insulation
 SHGC_PER_SC = 0.87    # SHGC = 0.87 x SC (definition of the shading coefficient)
 GLAZING_U = 1.65      # W/m2K, ETTV F1 vision glazing (all orientations)
@@ -229,10 +232,10 @@ def build(issue: Path):
         wall_cons[o] = c
     roof = os_.model.Construction(m)
     roof.setName(f"Roof U{ROOF_U} (ASSUMPTION)")
-    roof.setLayers(os_.model.MaterialVector([mat_nomass("Roof insulation", 1 / ROOF_U - 0.04 - 0.10 - 0.15 / 1.442), conc("Roof slab 150", 0.15)]))
+    roof.setLayers(os_.model.MaterialVector([mat_nomass("Roof insulation", 1 / ROOF_U - 0.04 - 0.10 - SLAB_T / 1.442), conc("Roof slab 250", SLAB_T)]))
     slab = os_.model.Construction(m)
-    slab.setName("Internal slab 200 (adiabatic)")
-    slab.setLayers(os_.model.MaterialVector([conc("Slab 200", 0.2)]))
+    slab.setName("Internal slab 250 (adiabatic)")
+    slab.setLayers(os_.model.MaterialVector([conc("Slab 250", SLAB_T)]))
     part = os_.model.Construction(m)
     part.setName("Partition (adiabatic)")
     part.setLayers(os_.model.MaterialVector([conc("Partition 100", 0.1)]))
@@ -477,6 +480,8 @@ def build(issue: Path):
     m.getOutputControlReportingTolerances()
     os_.model.OutputTableSummaryReports  # noqa
     m.save(os_.path(str(OUT / "AIGH_IP.osm")), True)
+    # 3D scene of the OpenStudio model (the ThreeJS format of the OpenStudio geometry viewer), for src.sim.view3d
+    (OUT / "AIGH_IP_threejs.json").write_text(os_.model.ThreeJSForwardTranslator().modelToThreeJS(m, True).toJSON(False), encoding="utf-8")
     ft = os_.energyplus.ForwardTranslator()
     ws = ft.translateModel(m)
     idf = str(ws)

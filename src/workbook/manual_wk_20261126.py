@@ -108,6 +108,26 @@ def d47_facade(datasets: Dict[str, Dict[str, Any]], log: List[Dict[str, Any]]) -
         d["sources"].append(dict(SRC["D47"]))
 
 
+def d43_rooms(datasets: Dict[str, Dict[str, Any]], log: List[Dict[str, Any]]) -> None:
+    """D43 rooms of AHU-B-07-07STAFF-02 typed by Winson Khoo (system type VAV; Innovation Lab 50 persons / 100 m2). Applied again after the
+    consolidation, which places rooms that were not yet in D43 when apply() ran."""
+    for n, d in datasets.items():
+        for r in d["rooms"]:
+            if r.get("storey") != "L07" or not str(r.get("number", "")).startswith("ITEC "):
+                continue
+            if r["number"] in ("ITEC 01.07.01", "ITEC 01.07.03", "ITEC 04.07.01", "ITEC 04.07.04", "ITEC 04.07.05", "ITEC 05.07.01") \
+                    and r.get("system_type") != "VAV":
+                r["system_type"] = "VAV"
+                r.setdefault("prov", {})["system_type"] = ["D", SRC["D43"]["id"]]
+                log.append(dict(workbook=f"D{n}", room=r["number"], change="system type VAV"))
+            if r["number"] == "ITEC 05.07.01" and r.get("occupancy_per_100m2") != 50.0:
+                r["occupancy_per_100m2"] = 50.0
+                r.setdefault("prov", {})["occupancy_density"] = ["D", SRC["D43"]["id"]]
+                log.append(dict(workbook=f"D{n}", room=r["number"], change="occupancy density 50 per 100 m2"))
+            if not any(s_["id"] == SRC["D43"]["id"] for s_ in d["sources"]):
+                d["sources"].append(dict(SRC["D43"]))
+
+
 def apply(datasets: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     log: List[Dict[str, Any]] = []
     by = {n: {r["number"]: r for r in d["rooms"]} for n, d in datasets.items()}
