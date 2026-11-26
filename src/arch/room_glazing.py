@@ -70,8 +70,9 @@ def _overrides(by_st):
         return []
     unplaced = []
 
-    def rng(st, el, a, vis=True):
-        return [s for s in by_st.get(st, []) if s["elevation"] == el and a[0] <= s["axis_mm"] <= a[1] and (not vis or not s["hidden"])]
+    def rng(st, el, a, vis=True, only=None):
+        return [s for s in by_st.get(st, []) if s["elevation"] == el and a[0] <= s["axis_mm"] <= a[1] and (not vis or not s["hidden"])
+                and (only is None or s["room"] in only)]
 
     def spread(ss, area, tag):
         L = sum(s["len_m"] for s in ss)
@@ -81,7 +82,7 @@ def _overrides(by_st):
 
     for it in json.loads(OVERRIDES.read_text(encoding="utf-8"))["items"]:
         el, st, a = it["elevation"], it["storey"], it["axis_mm"]
-        ss = rng(st, el, a)
+        ss = rng(st, el, a, only=set(it["only_rooms"]) if "only_rooms" in it else None)
         if it["action"] == "below_ground":
             for s in rng(st, el, a, vis=False):
                 s["glass_m2"], s["slat_m2"], s["ground"] = 0.0, 0.0, True
@@ -109,8 +110,15 @@ def _overrides(by_st):
                     s["glass_m2"] = 0.0
                     s["override"] = (s.get("override", "") + " " + it["id"]).strip()
                 spread(tgt, g, it["id"])
-            elif g:
+            else:
                 unplaced.append(it["id"])
+        elif it["action"] == "add_room":
+            # glass of a wall that is behind another part of the building on the elevation but seen on it (e.g. across an open forecourt)
+            rid = it["room_id"]
+            nm = next((n for r_, n, _ in _rooms(st) if r_ == rid), "")
+            by_st.setdefault(st, []).append(dict(storey=st, kind="external", elevation=el, room=rid, room_name=nm, sector=it["sector"], x=0, y=0,
+                                                 axis_mm=a[0], depth=0.0, len_m=0.0, proj_m=0.0, cosf=1.0, behind_open="", nx=0.0, ny=0.0,
+                                                 hidden=False, glass_m2=it["area_m2"], slat_m2=0.0, on_elevation=True, override=it["id"]))
     return unplaced
 
 
@@ -213,16 +221,23 @@ def run():
                     steps.append(dict(storey=st, kind=kind, elevation=ename, room=rooms[best][0] if best is not None else "",
                                       room_name=rooms[best][1] if best is not None else "", sector=sector, x=round(px), y=round(py),
                                       axis_mm=axis_pos, depth=depth, len_m=L / n / 1000.0, proj_m=L / n / 1000.0 * abs(cosf), cosf=cosf,
-                                      behind_open=behind))
+                                      behind_open=behind, nx=nx, ny=ny))
         # front step per elevation and axis bin
+        # every wall of the storey that faces an elevation can hide what is behind it on that elevation, whichever elevation it is read on
+        # (a 45 degree chamfer read on the East elevation still hides the notch behind it on the North one; D-120 round 2)
         front = {}
         for s in steps:
-            k = (s["elevation"], int(s["axis_mm"] // 100))
-            if k not in front or s["depth"] < front[k]:
-                front[k] = s["depth"]
+            for ename, (fx, fy) in (EXT if s["kind"] == "external" else INT).items():
+                if s["nx"] * fx + s["ny"] * fy <= 0.2:
+                    continue
+                ax_ = s["x"] if fx == 0 else s["y"]
+                dep = -(s["x"] * fx + s["y"] * fy)
+                k = (ename, int(ax_ // 100))
+                if k not in front or dep < front[k]:
+                    front[k] = dep
         for s in steps:
             prof = profiles.get((s["elevation"], st))
-            hidden = s["depth"] > front[(s["elevation"], int(s["axis_mm"] // 100))] + FRONT_TOL_MM
+            hidden = s["depth"] > front.get((s["elevation"], int(s["axis_mm"] // 100)), s["depth"]) + FRONT_TOL_MM
             s["hidden"] = hidden
             s["glass_m2"] = 0.0 if (hidden or prof is None) else _glass(prof, s["axis_mm"]) * s["len_m"]
             sp = slats.get((s["elevation"], st))

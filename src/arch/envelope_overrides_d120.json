@@ -10,7 +10,7 @@
     186000
    ],
    "action": "exclude",
-   "evidence": "Grey-filled fascia band (grids 16-19) and soffit strip (19-23) with no glass ticks; not glass."
+   "evidence": "Grey-filled fascia band (grids 16-19) and soffit strip (19-23) with no glass ticks; not glass. Applied before OV-N01-4/-5."
   },
   {
    "id": "OV-N01-2",
@@ -71,30 +71,6 @@
    "evidence": "Linkbridge 02 glazing in front of AHU plant, FLL and genset yard."
   },
   {
-   "id": "OV-N03-1",
-   "elevation": "NORTH ELEVATION (IP)",
-   "storey": "L03",
-   "axis_mm": [
-    165800,
-    175500
-   ],
-   "action": "to_storey",
-   "to_storey": "L02",
-   "evidence": "Upper row of the two-storey NE curtain wall (L02 FFL to +32.0); L03 has no room there (double-height L02 volume)."
-  },
-  {
-   "id": "OV-S03-1",
-   "elevation": "SOUTH ELEVATION (IP)",
-   "storey": "L03",
-   "axis_mm": [
-    165000,
-    175500
-   ],
-   "action": "to_storey",
-   "to_storey": "L02",
-   "evidence": "Upper part of the 8.45 m high Pre-Function curtain wall; L03 plan shows a void over L02 Pre-Function."
-  },
-  {
    "id": "OV-E03-1",
    "elevation": "EAST ELEVATION (IP)",
    "storey": "L03",
@@ -104,7 +80,23 @@
    ],
    "action": "to_storey",
    "to_storey": "L02",
-   "evidence": "L03 row of the K-P curtain wall in front of the void over L02 Pre-Function (74.3-86.5 m) and the lecture theatre stage upper volume (86.5-105.5 m)."
+   "evidence": "L03 row of the K-P curtain wall in front of the void over L02 Pre-Function (74.3-86.5 m) and the lecture theatre stage upper volume (86.5-105.5 m). The same chamfer is drawn on the South elevation (165-175.5 m); it is read once, on the East elevation (OV-S03-1 withdrawn, round 2)."
+  },
+  {
+   "id": "OV-E03-2",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L03",
+   "axis_mm": [
+    105500,
+    118500
+   ],
+   "action": "to_storey",
+   "to_storey": "L02",
+   "only_rooms": [
+    "L03-R088",
+    ""
+   ],
+   "evidence": "Top row (L03 FFL to +32.0) of the two-storey NE curtain wall, read on the East elevation on the void/roof outline L03-R088 (MG TRANSFER, MV) or on no room; belongs to the double-height L02 volume behind (replaces OV-N03-1, which found no step: round 2)."
   },
   {
    "id": "OV-S02-1",
@@ -351,6 +343,34 @@
    ],
    "action": "below_ground",
    "evidence": "Ground is at the L02 level for grids A-G on the east elevation; the L01 face there is not exposed."
+  },
+  {
+   "id": "OV-N01-4",
+   "elevation": "NORTH ELEVATION (IP)",
+   "storey": "L01",
+   "axis_mm": [
+    163300,
+    175400
+   ],
+   "action": "add_room",
+   "room_id": "L01-R117",
+   "sector": "N",
+   "area_m2": 33.0,
+   "evidence": "North shopfront of the retail unit, outline with glass ticks and a glazed double door, head at +19.97 (2.96 m), 12.1 m, seen across the NV forecourt; its facade steps are hidden behind the bus-stop canopy outline (round 2)."
+  },
+  {
+   "id": "OV-N01-5",
+   "elevation": "NORTH ELEVATION (IP)",
+   "storey": "L01",
+   "axis_mm": [
+    159000,
+    163100
+   ],
+   "action": "add_room",
+   "room_id": "L01-R107",
+   "sector": "N",
+   "area_m2": 12.0,
+   "evidence": "Same shopfront, visible 4.1 m before the external stair hides it (up to about 24 m2 if glazed behind the stair; not counted)."
   }
  ],
  "open": [
@@ -363,6 +383,10 @@
   "West occupied rooms behind louvre blocks (L03 Mtg, L05/L06 Off and Mtg; upper bounds 6.5-15 m2): glass behind unconfirmed.",
   "Vision glass drawn in front of toilets (L02 NE, L06 court): obscured glass or spandrel to be confirmed.",
   "South L05 85.9-91.9 m: glazing in front of MG vacuum plant (MV); shadow box to be confirmed.",
-  "West L03 atrium shopfront row behind the batten screen (about 40 m2): not counted."
+  "West L03 atrium shopfront row behind the batten screen (about 40 m2): not counted.",
+  "North L01 105.5-129 m: halftone glazing with glass ticks seen across the NV drop-off plaza, probably the north wall of ED Wait L01-R168 (AHU-B-02-01EDCAC), at least about 60 m2; wall and height uncertain. Not counted.",
+  "North L07 59.4-63.8 m: 12.2 m2 of glass in front of an unzoned space between Corr L07-R044 and Off L07-R002 (no zoning outline). Not given to a room.",
+  "West L07 44.7-60.3 m: window module with vertical fins in front of the STAFF-01 offices (upper bound about 22 m2 if glass behind the fins). Not counted.",
+  "West L03 windows at 108-117 m start 0.38 m below the L03 FFL; that strip (about 1.3 m2 per window) falls in the L02 band (below threshold)."
  ]
 }
