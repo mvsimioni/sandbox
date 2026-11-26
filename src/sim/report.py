@@ -18,14 +18,18 @@ from openpyxl.utils import get_column_letter
 ROOT = Path(__file__).resolve().parent.parent.parent
 SIM = ROOT / "out/sim"
 SQL = SIM / "run_sizing_min/eplusout.sql"
+ISSUE = "out/issue/DRAFT_2026-11-26_R17"
 
 DAYS = [("SS553", "SS 553:2026 cl. 5.4.4 cooling day, 33 °C DB / 27 °C WB, 21 May (basis)"),
         ("DP", "ASHRAE 2025 HoF Changi 0.4 % dehumidification, DP 27.2 °C / MCDB 29.4 °C (comparison)"),
         ("WB", "ASHRAE 2025 HoF Changi 0.4 % evaporation, WB 28.0 °C / MCDB 30.8 °C (comparison)")]
 
 ASSUMPTIONS = [
-    ("Geometry", "One thermal zone per storey and unit; outline = union of the zoning room outlines of the unit, simplified 0.25 m", "Zoning R11 (D-108)"),
-    ("Geometry", "Floor-to-floor heights from the FFL printed on the zone plans; L08 from the elevation register", "IP_zone plans"),
+    ("Geometry", "One thermal zone per storey and unit; outline = union of the zoning room outlines of the unit, simplified 0.25 m", "Zoning Rev H (D-108, D-112)"),
+    ("Geometry", "Floor-to-floor heights from the FFL of the building sections: LB3 0.00, B3 3.80, B2 8.30, B1 12.80, L01 17.00, L02 23.00, "
+                 "then 6.00 m per storey to L08 59.00 (L01 mezzanine at 20.00 not modelled as a storey)", "Sections AR-SW-20-ZZ-001 to 003"),
+    ("Geometry", "Structural slab 250 mm (floors, ceilings and roof), measured at 1:500 on Section EE (no thickness is written on the sections)",
+     "Section EE, measured; to confirm"),
     ("Geometry", "External wall = wall within 0.8 m of the storey footprint edge; this also catches walls at shafts, voids and light wells "
                  "(over-counts envelope on internal zones)", "ASSUMPTION"),
     ("Geometry", "Sliver surfaces below 0.05 m² removed (44); 133 zones not fully enclosed (volume only)", "Model cleaning"),
@@ -35,12 +39,12 @@ ASSUMPTIONS = [
     ("Envelope", "Walls to rooms not modelled (MV, NV, unconditioned) adiabatic", "ASSUMPTION"),
     ("Solar", "No mutual shading of building wings (MinimalShadowing); conservative on solar gain", "ASSUMPTION"),
     ("Loads", "People, lighting, small power, equipment sensible/latent and infiltration per room from the Room Zones sheets, summed per zone",
-     "Workbooks R11"),
+     "Workbooks R17"),
     ("Loads", "All internal loads at 100 % for 24 h (hospital), no diversity", "ASSUMPTION / placeholder for schedules"),
-    ("Outdoor air", "Unit outdoor air from the AHU tab section B, shared over the unit's zones by room supply", "Workbooks R11"),
+    ("Outdoor air", "Unit outdoor air from the AHU tab section B, shared over the unit's zones by room supply", "Workbooks R17"),
     ("HVAC", "Ideal loads air system per zone: no fan heat, no reheat, no coil leaving condition; minimum supply 12 °C", "Model method"),
     ("HVAC", "Cooling setpoint = supply-weighted design room temperature; dehumidifying humidistat 60 % RH; no humidification",
-     "Workbooks R11 / ASSUMPTION for 60 %"),
+     "Workbooks R17 / ASSUMPTION for 60 %"),
     ("Design days", "Date 21 May, wind and clear-sky tau (0.463 / 2.322) from the Changi TMYx DDY; SS 553 gives no date", "Confirm the date"),
     ("Weather", "Changi TMYx EPW for the annual run; site from the EPW", "Weather set 26 Nov 2026"),
     ("Scope", "8 units with no zoning outline not modelled; 117 zones with no room rows carry envelope load only", "See Not matched"),
@@ -123,7 +127,7 @@ def main():
         h, tot, oa, sen, lat = bp[tag]
         srows.append([desc, h, round(tot), round(oa), round(sen), round(lat),
                       round(sum(f(x, f"{tag} coil kW") or 0 for x in m)), round(sum(f(x, f"{tag} room kW") or 0 for x in m))])
-    srows.append(["Workbooks R11, same units: COOLING COIL DUTY (AHU tab section D) / room sensible + latent (section B)", None, None, None,
+    srows.append(["Workbooks R17, same units: COOLING COIL DUTY (AHU tab section D) / room sensible + latent (section B)", None, None, None,
                   None, None, round(sum(f(x, "workbook coil kW (D)") for x in m)), round(sum(f(x, "workbook room kW") or 0 for x in m))])
     _sheet(ws, ["Design day", "Block peak hour", "Block coil load, kW", "of which outdoor air, kW", "Block sensible, kW", "Block latent, kW",
                 f"Coil load, {len(m)} matched units (sum of unit peaks), kW", "Room load, matched units, kW"], srows,
@@ -138,7 +142,7 @@ def main():
     ws3 = wb.create_sheet("Not matched")
     sys.path.insert(0, str(ROOT))
     from src.sim.results import workbook_duties
-    wbd = workbook_duties(ROOT / "out/issue/DRAFT_2026-11-26_R11")
+    wbd = workbook_duties(ROOT / ISSUE)
     mu = {x["unit"] for x in rows}
     nm = [["In the model, no workbook AHU-tab row", x["unit"], x["storeys"], f(x, "rooms_m2"), f(x, "SS553 coil kW")]
           for x in rows if not f(x, "workbook room kW")]
