@@ -81,31 +81,41 @@ def _arch_src(arch: str) -> Dict[str, Any]:
                 confidence="high" if hit else "low")
 
 
+def d47_facade(datasets: Dict[str, Dict[str, Any]], log: List[Dict[str, Any]]) -> None:
+    """L07 facade of the D47 admin workspace as typed by Winson Khoo: the five S rows, no facade on the other L07 rooms of D47. Applied
+    again after the zone-facade share (D-102), which would otherwise split the zone facade over the rooms with no plan outline."""
+    d = datasets.get("47")
+    if not d:
+        return
+    fac = {n: (g, w, L) for n, g, w, L in D47_FACADE}
+    for r in d["rooms"]:
+        if r.get("storey") != "L07":
+            continue
+        old = sum(e.get("glazing_m2") or 0 for e in (r.get("envelope") or []))
+        if r["number"] in fac:
+            g, w, L = fac[r["number"]]
+            r["envelope"] = [dict(segment=f"{r['number']}-S", building_part="Facade", face="S", azimuth_deg=180, orientation="S",
+                                  glazing_m2=g, wall_m2=w, roof_m2=0, shading="shading coefficient of the ETTV report, area weighted",
+                                  method="ETTV ratio x facade length x storey height", source=SRC["D47"]["id"], code="D",
+                                  remark=f"Facade length {L} m on the S facade of storey L07, storey height 6 m (Winson Khoo, 26 Nov 2026; D-114)")]
+        elif r.get("envelope"):
+            r["envelope"] = []
+        else:
+            continue
+        log.append(dict(workbook="D47", room=r["number"], change="L07 facade", before_glazing=old,
+                        after_glazing=sum(e["glazing_m2"] for e in r["envelope"])))
+    if not any(s_["id"] == SRC["D47"]["id"] for s_ in d["sources"]):
+        d["sources"].append(dict(SRC["D47"]))
+
+
 def apply(datasets: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     log: List[Dict[str, Any]] = []
     by = {n: {r["number"]: r for r in d["rooms"]} for n, d in datasets.items()}
     used = set()
     # D47
     if "47" in datasets:
-        d = datasets["47"]
-        fac = {n: (g, w, L) for n, g, w, L in D47_FACADE}
-        for r in d["rooms"]:
-            if r.get("storey") != "L07":
-                continue
-            old = sum(e.get("glazing_m2") or 0 for e in (r.get("envelope") or []))
-            if r["number"] in fac:
-                g, w, L = fac[r["number"]]
-                r["envelope"] = [dict(segment=f"{r['number']}-S", building_part="Facade", face="S", azimuth_deg=180, orientation="S",
-                                      glazing_m2=g, wall_m2=w, roof_m2=0, shading="shading coefficient of the ETTV report, area weighted",
-                                      method="ETTV ratio x facade length x storey height", source=SRC["D47"]["id"], code="D",
-                                      remark=f"Facade length {L} m on the S facade of storey L07, storey height 6 m (Winson Khoo, 26 Nov 2026; D-114)")]
-            elif r.get("envelope"):
-                r["envelope"] = []
-            else:
-                continue
-            log.append(dict(workbook="D47", room=r["number"], change="L07 facade", before_glazing=old,
-                            after_glazing=sum(e["glazing_m2"] for e in r["envelope"])))
-        _sf(d, 0.20, SRC["D47"]["id"])
+        d47_facade(datasets, log)
+        _sf(datasets["47"], 0.20, SRC["D47"]["id"])
         used.add("D47")
     # D43
     if "43" in datasets:
@@ -120,12 +130,12 @@ def apply(datasets: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
             r["envelope"] = [e for e in r["envelope"] if e.get("face") != "W"]
             log.append(dict(workbook="D43", room=r["number"], change="W facade removed"))
         for n in ("ITEC 01.07.01", "ITEC 01.07.03", "ITEC 04.07.01", "ITEC 04.07.04", "ITEC 04.07.05", "ITEC 05.07.01"):
-            if n in b and b[n].get("ahu") == "AHU-B-07-07STAFF-02":
+            if n in b and b[n].get("storey") == "L07":
                 b[n]["system_type"] = "VAV"
                 b[n].setdefault("prov", {})["system_type"] = ["D", SRC["D43"]["id"]]
                 log.append(dict(workbook="D43", room=n, change="system type VAV"))
         r = b.get("ITEC 05.07.01")
-        if r and not r.get("occupancy_people"):
+        if r:
             r["occupancy_per_100m2"] = 50.0
             r.setdefault("prov", {})["occupancy_density"] = ["D", SRC["D43"]["id"]]
             log.append(dict(workbook="D43", room=r["number"], change="occupancy density 50 per 100 m2"))

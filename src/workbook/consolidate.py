@@ -259,6 +259,8 @@ def main(argv=None) -> int:
     rep["services"] = svc
     rep["mot_tags"] = tagfix
     rep["zone_facade"] = share_zone_facade(datasets)
+    from .manual_wk_20261126 import d47_facade                         # D-114: Winson's L07 facade of D47 governs over the zone share
+    d47_facade(datasets, [])
     from .room_coverage import run as coverage
     cov = coverage(Path("."), datasets, write=True)
     rep["coverage_not_represented"] = [r for r in cov if not r["represented_by"]]
