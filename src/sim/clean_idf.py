@@ -90,9 +90,26 @@ def clean(text: str, solar: str | None = None):
             return ""
         return m.group(0)
     out = re.sub(r"(?m)^FenestrationSurface:Detailed,\n.*?;[^\n]*\n", _win, out, flags=re.S)
+    # ideal loads: point at the zone's DSOA space list (the translator writes the first space's DSOA only, i.e. one share of the OA)
+    lists = set(x.upper() for x in re.findall(r"(?m)^DesignSpecification:OutdoorAir:SpaceList,\n\s*([^,]+),", out))
+    nlinks = 0
+
+    def _ideal(m):
+        nonlocal nlinks
+        body = m.group(0)
+
+        def _f(mm):
+            nonlocal nlinks
+            name = mm.group(2).strip()
+            if name.upper().endswith(" OA") and (name[:-3] + " DSOA Space List").upper() in lists:
+                nlinks += 1
+                return mm.group(1) + name[:-3] + " DSOA Space List" + mm.group(3)
+            return mm.group(0)
+        return re.sub(r"(?m)^(  )([^,\n]+)(,\s*!- Design Specification Outdoor Air Object Name)", _f, body)
+    out = re.sub(r"(?m)^ZoneHVAC:IdealLoadsAirSystem,\n.*?;[^\n]*\n", _ideal, out, flags=re.S)
     if solar:
         out = re.sub(r"(?m)^(  )[^,\n]*(,\s*!- Solar Distribution)", r"\g<1>" + solar + r"\2", out, count=1)
-    return out, dict(surfaces=len(objs), dropped=len(dropped), vertices_fixed=fixed, windows_dropped=wins)
+    return out, dict(surfaces=len(objs), dropped=len(dropped), vertices_fixed=fixed, windows_dropped=wins, ideal_oa_space_lists=nlinks)
 
 
 def main():
