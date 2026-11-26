@@ -78,6 +78,38 @@ def block_peaks():
     return out
 
 
+def _annual(ws, sql):
+    """Monthly cooling energy (ideal loads, MWh thermal), annual peak hour and its weather, hours above the design enthalpies."""
+    c = sqlite3.connect(sql)
+    q = """select d.Name, t.Month, sum(r.Value) from ReportData r join ReportDataDictionary d using(ReportDataDictionaryIndex)
+           join Time t using(TimeIndex) where d.Name in ('Zone Ideal Loads Supply Air Total Cooling Rate',
+           'Zone Ideal Loads Outdoor Air Total Cooling Rate','Zone Ideal Loads Supply Air Latent Cooling Rate') group by 1,2"""
+    m = defaultdict(dict)
+    for n, mo, v in c.execute(q):
+        m[mo][n] = v / 1e6
+    names = ["Zone Ideal Loads Supply Air Total Cooling Rate", "Zone Ideal Loads Outdoor Air Total Cooling Rate",
+             "Zone Ideal Loads Supply Air Latent Cooling Rate"]
+    rows = [[mo] + [round(m[mo].get(n, 0)) for n in names] for mo in sorted(m)]
+    rows.append(["Year"] + [round(sum(m[mo].get(n, 0) for mo in m)) for n in names])
+    _sheet(ws, ["Month", "Coil cooling energy, MWh (thermal)", "of which outdoor air, MWh", "Latent, MWh"], rows, [10, 22, 22, 16])
+    pk = c.execute("""select t.Month, t.Day, t.Hour, sum(r.Value) s from ReportData r join ReportDataDictionary d using(ReportDataDictionaryIndex)
+                      join Time t using(TimeIndex) where d.Name='Zone Ideal Loads Supply Air Total Cooling Rate'
+                      group by r.TimeIndex order by s desc limit 1""").fetchone()
+    from CoolProp.HumidAirProp import HAPropsSI
+    epw = [r for r in csv.reader(open(ROOT / "data/uploads/weather_20261126/SGP_SG_Singapore-Changi.Intl.AP.486980_TMYx.epw",
+                                      encoding="latin-1"))][8:]
+    hh = lambda r: HAPropsSI("H", "T", float(r[6]) + 273.15, "D", float(r[7]) + 273.15, "P", float(r[9])) / 1000
+    w = next(r for r in epw if int(r[1]) == pk[0] and int(r[2]) == pk[1] and int(r[3]) == pk[2])
+    ws.append([])
+    ws.append([f"Annual peak hour: {pk[1]:02d}/{pk[0]:02d} hour {pk[2]}, coil load {pk[3] / 1e6:.1f} MW; weather file DB {w[6]} °C, "
+               f"DP {w[7]} °C, h {hh(w):.1f} kJ/kg. This dew point is above the ASHRAE extreme annual WB (29.1 °C) and lasts one hour: "
+               "a weather-file extreme, not a design condition."])
+    ws.append([f"Weather-file hours above the SS 553 enthalpy (85.0 kJ/kg): {sum(1 for r in epw if hh(r) > 85.0)}; above the ASHRAE "
+               f"0.4 % WB point (89.9 kJ/kg): {sum(1 for r in epw if hh(r) > 89.9)} of 8,760."])
+    ws.append(["Annual run: Changi TMYx EPW, all internal loads 24 h at 100 %, ideal loads (no fan heat, no reheat, no plant efficiency): "
+               "thermal energy at the coil, not electricity."])
+
+
 def main():
     rows = list(csv.DictReader((SIM / "results_design_days.csv").open(encoding="utf-8")))
     f = lambda x, k: float(x[k]) if x.get(k) not in (None, "") else None
@@ -118,6 +150,9 @@ def main():
         for row in w.iter_rows():
             for c in row:
                 c.alignment = Alignment(wrap_text=True, vertical="top")
+    ann = SIM / "run_annual/eplusout.sql"
+    if ann.exists():
+        _annual(wb.create_sheet("Annual"), ann)
     out = SIM / "AIGH_IP_thermal_model_design_days.xlsx"
     wb.save(out)
     print(out, len(rows), len(nm))
