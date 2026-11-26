@@ -34,6 +34,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import openpyxl
+from src.arch.room_glazing import _pass_through
 import openstudio as os_
 from shapely import wkt
 from shapely.geometry import LineString, MultiPolygon, Polygon, box
@@ -160,8 +161,11 @@ def zones_geometry():
                 continue
             g = MultiPolygon([Polygon([(x / 1000, y / 1000) for x, y in q.exterior.coords], [[(x / 1000, y / 1000) for x, y in i.coords] for i in q.interiors])
                               for q in getattr(g, "geoms", [g]) if q.geom_type == "Polygon"]).buffer(0)
-            allp.append(g)
             z = za.get(p["room_id"])
+            # open and NV spaces (terraces, covered areas, NV corridors) are outdoors for the envelope: the walls behind them are exterior,
+            # as in the elevation measurement (D-120, src.arch.room_glazing._pass_through)
+            if not (z and _pass_through(z.get("class"), p.get("room_name", ""))):
+                allp.append(g)
             if z and z["class_kind"] in UNIT_KINDS:
                 by_unit[z["class"]].append(g)
         if not allp:
@@ -517,6 +521,8 @@ def build(issue: Path):
     ft = os_.energyplus.ForwardTranslator()
     ws = ft.translateModel(m)
     idf = str(ws)
+    # the translator may already write these single-instance objects: keep only the ones written below
+    idf = re.sub(r"(?ms)^\s*(Output:Table:SummaryReports|OutputControl:Table:Style|Output:SQLite),.*?;\s*$", "", idf)
     idf += "".join(f"\nOutput:Variable,\n  *,\n  {v},\n  Hourly;\n" for v in (
         "Zone Ideal Loads Supply Air Total Cooling Rate", "Zone Ideal Loads Supply Air Sensible Cooling Rate",
         "Zone Ideal Loads Supply Air Latent Cooling Rate", "Zone Ideal Loads Outdoor Air Total Cooling Rate", "Zone Air Temperature",
