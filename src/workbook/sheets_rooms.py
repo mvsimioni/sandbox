@@ -508,7 +508,10 @@ def write_airflow(ctx: Ctx) -> None:
             put(ws, g(f"max{rr}"), expand(ctx, f"=_xlfn.MAXIFS([AF.frac],[AF.ahu],{{ahu}},[AF.in{rr}],1)", L, i), "Calc", "pct1")
             put(ws, g(f"nxt{rr}"), expand(
                 ctx, f"=SUMPRODUCT(MAX(([AF.ahu]={{ahu}})*([AF.in{rr}]=1)*(ROW([AF.frac])<>ROW())*[AF.frac]))", L, i), "Calc", "pct1")
-            put(ws, g(f"trg{rr}"), f"=IF({inn}=1,IF(AND({g('frac')}>0,{g('frac')}={g(f'max{rr}')},"
+            # D-113 (26 Nov 2026, Marcus): no FCU separation on an HFDS/170 unit (straight sum: separating a room does not lower the outdoor air)
+            ah_ = ctx.lay.get("AH")
+            hf_ = (f'IFERROR(INDEX({ah_.rng("ahucls")},MATCH({g("ahu")},{ah_.rng("ahu")},0)),"")="HFDS/170"' if ah_ and ctx.ahus else "FALSE")
+            put(ws, g(f"trg{rr}"), f"=IF(AND({inn}=1,NOT({hf_})),IF(AND({g('frac')}>0,{g('frac')}={g(f'max{rr}')},"
                                    f"{g('supply')}/{g(f'tot{rr}')}<OAShare,{g(f'max{rr}')}-{g(f'nxt{rr}')}>OADrop),1,0),0)",
                 "Calc", "d0")
             put(ws, g(f"sep{rr}"), f'=IF({g("clin")}="YES",0,{g(f"trg{rr}")})', "Calc", "d0")
