@@ -74,6 +74,7 @@ def cr_spec() -> Spec:
             ("pv", "Vapour pressure at design condition", "kPa", 9), ("hd", "Design room enthalpy", "kJ/kg", 9),
             ("trange", "Design temperature inside the range", "", 10),
             ("after", "After-hours", "", 10), ("press", "P / N / –", "", 7), ("clin", "Clinical criteria (not FCU)", "", 9),
+            ("ss553", "HFDS row refers to SS 553 for outdoor air", "", 9), ("oascope", "Outdoor-air scope (D-110)", "", 11),
             ("remark", "Remark", "", 50)]
 
 
@@ -160,7 +161,8 @@ def af_spec() -> Spec:
                ("env_chk", "Envelope room: peak solar check", "", 11), ("fix", "Fixed by specification (MOT)", "0 / 1", 8),
                ("oa_spec", "Outdoor air, specified", "L/s", 9), ("spec_off", "Offset, as specified", "L/s", 9),
                ("off_chk", "Specified offset against offset needed", "", 12), ("terminal", "Terminal tag", "", 14), ("exfan", "Exhaust fan tag", "", 14),
-               ("clin", "Clinical criteria", "", 8), ("systype", "System type (input)", "", 9)]
+               ("clin", "Clinical criteria", "", 8), ("systype", "System type (input)", "", 9),
+               ("oascope", "Outdoor-air scope (D-110)", "", 10)]
     for r in range(1, OA_ROUNDS + 1):
         s += [(f"in{r}", f"Round {r}: in AHU", "0 / 1", 7), (f"tot{r}", f"Round {r}: AHU supply", "L/s", 9),
               (f"max{r}", f"Round {r}: highest fraction", "–", 8), (f"nxt{r}", f"Round {r}: next fraction", "–", 8),
@@ -234,7 +236,7 @@ AHU_KEYS = ["ahu", "type", "n", "area", "area_sup", "vol", "noh", "sa_room", "le
             "sched_c", "sched_s", "tsrc", "zr", "za", "zc", "zs", "oth", "othc", "oths", "cov", "red", "redp", "rem", "nfix", "area_ok", "leadtxt", "nocrit", "area_nocrit",
             "fsp", "spr", "spl", "spy", "spnote", "oaflg", "nok",
             "ducted", "oa_frac", "oa_bal", "offnet", "oa_short", "dn", "dsup", "dexh", "balnote", "second", "second_s", "norr_why",
-            "dirsup", "dirn", "spillreq", "ucvadd"]
+            "dirsup", "dirn", "spillreq", "ucvadd", "oa_clin", "oa_nc", "ahucls", "oa_min", "oa_how"]
 FCU_KEYS = ["k", "no", "name", "ahu", "why", "area", "sens_kw", "lat_kw", "supply", "oa", "oasrc", "oaby", "oacond", "oa_t", "oa_h",
             "oa_sens", "oa_lat", "coil_s", "coil_l", "coil", "cap_sched", "cap_drawn", "cap", "flag",
             "tender", "tsrc", "calc", "red", "redp", "rem"]

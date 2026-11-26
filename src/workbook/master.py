@@ -64,7 +64,8 @@ def read_department_workbook(path: Path) -> Dict[str, Any]:
                         tender_oa_lps=row[idx["sched_oa"]], rooms_ok=row[idx["nok"]] or 0, rooms_no_criteria=row[idx["nocrit"]] or 0, area_no_criteria_m2=row[idx["area_nocrit"]] or 0.0,
                         frac_not_single_pass=row[idx["fsp"]] or 0.0, single_pass_room=row[idx["spr"]] or "", single_pass_room_supply_lps=row[idx["spl"]] or 0.0,
                         frac_other_rooms=row[idx["spy"]] or 0.0, oa_balance_lps=row[idx["oa_bal"]] or 0.0, second_rooms=row[idx["second"]],
-                        no_reduction=row[idx["norr_why"]] or ""))
+                        no_reduction=row[idx["norr_why"]] or "",
+                        oa_clin_lps=row[idx["oa_clin"]] or 0.0, oa_nc_lps=row[idx["oa_nc"]] or 0.0))
     checks: Dict[str, Any] = {}
     if "Checks" in wb.sheetnames:
         for row in wb["Checks"].iter_rows(min_row=7, values_only=True):
@@ -251,7 +252,8 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
           ("key", "Key (helper)", "", 12), ("idx", "Row (helper)", "", 8),
           ("nok", "Rooms with a criteria row and a supply airflow", "no.", 12),
           ("oab", "Outdoor air, balance basis (exhaust, offset air, spill air)", "L/s", 14), ("sl", "Rooms of the second room list", "no.", 12),
-          ("nr", "Reason for no reduction against tender (tender base)", "", 40), ("nrk", "Unit with a reason (helper)", "", 12)]
+          ("nr", "Reason for no reduction against tender (tender base)", "", 40), ("nrk", "Unit with a reason (helper)", "", 12),
+          ("oac", "Outdoor air of the HFDS / ASHRAE 170 rooms, straight sum (D-110)", "L/s", 14), ("oan", "Outdoor air of the SS 553 rooms (D-110)", "L/s", 14)]
     from openpyxl.utils import get_column_letter as _gcl
     for i, (k, h, u, w) in enumerate(dh):
         col = _gcl(i + 1)
@@ -288,6 +290,8 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
             put(dr, f"Z{row}", a.get("second_rooms") if a.get("second_rooms") not in ("", None) else None, "Input", "d0")
             put(dr, f"AA{row}", a.get("no_reduction") or None, "Input").alignment = Alignment(horizontal="left")
             put(dr, f"AB{row}", f'=IF(AA{row}<>"",A{row},"")', "Calc")
+            put(dr, f"AC{row}", a.get("oa_clin_lps") or 0, "Input", "d1")
+            put(dr, f"AD{row}", a.get("oa_nc_lps") or 0, "Input", "d1")
             put(dr, f"J{row}", "D", "Code")
             put(dr, f"K{row}", f"DEPT-{dn}", "Tag")
             link_to(dr[f"K{row}"], "Sources", f"A{src_row[f'DEPT-{dn}']}")
@@ -328,13 +332,14 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
     tags = sorted(dict.fromkeys(a["tag"] for r in recs for a in r["ahus"]), key=storey_order)
     put(am, "A1", "AHU Master", "Title")
     put(am, "A2", "Each AHU once, sorted by storey and tag. Room supply is the sum over the departments; calculated airflow adds the duct leakage. "
-        "Outdoor air is the highest room outdoor-air fraction of any department on the unit × the calculated airflow. Tender airflow is information only: "
+        "Outdoor air (D-110): on a unit with only HFDS / ASHRAE 170 rooms, the straight sum of the room outdoor air of all its departments; on SS 553 and mixed units, "
+        "the highest room outdoor-air fraction of any department on the unit × the calculated airflow until the SS 553 Table 1 rates are set; never below the balance basis. Tender airflow is information only: "
         "it is never a target or a limit. A calculated airflow above tender is marked VERIFY. Outdoor air above the tender outdoor airflow is marked VERIFY and its reduction cells stay blank. "
         "A reduction is stated only where the calculated airflow is below tender and the room list of the unit is complete.", "Note")
     mh = [("ahu", "AHU or system", "", 28), ("type", "Type", "", 9), ("nd", "Departments", "no.", 13), ("n", "Rooms", "no.", 8), ("area", "Area", "m²", 10),
           ("nh", "Rooms with no ceiling height", "no.", 12),
           ("sa", "Room supply", "L/s", 11), ("leak", "Duct leakage", "%", 9), ("calc", "Calculated airflow", "L/s", 11),
-          ("oa", "Sum of room outdoor air", "L/s", 11), ("frac", "Highest room outdoor-air fraction", "%", 12), ("oa_rule", "AHU outdoor air = fraction × calculated airflow", "L/s", 14),
+          ("oa", "Sum of room outdoor air", "L/s", 11), ("frac", "Highest room outdoor-air fraction", "%", 12), ("oa_rule", "AHU outdoor air = larger of the minimum of the rule (D-110) and the balance basis", "L/s", 14),
           ("oa_mb", "Outdoor air, mass-balance basis (information only)", "L/s", 14),
           ("tender", "Tender airflow", "L/s", 11), ("toa", "Tender outdoor airflow", "L/s", 11), ("code", "Code", "", 5), ("sid", "Source ID", "", 24), ("tsrc", "Tender source", "", 40),
           ("zr", "Rooms of the unit in the zone schedule", "no.", 12), ("za", "Area of the unit in the zone schedule", "m²", 12), ("cov", "Room list of the unit (rooms counted)", "", 36),
@@ -345,7 +350,9 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
           ("nok", "Rooms with a criteria row and a supply airflow", "no.", 12),
           ("spnote", "Single-pass note (helper)", "", 20),
           ("oab", "Outdoor air, balance basis (exhaust, offset air, spill air)", "L/s", 14), ("sl", "Rooms of the second room list", "no.", 12),
-          ("nr", "Reason for no reduction against tender (tender base)", "", 40)]
+          ("nr", "Reason for no reduction against tender (tender base)", "", 40),
+          ("oac", "Outdoor air of the HFDS / ASHRAE 170 rooms, straight sum (D-110)", "L/s", 14), ("oan", "Outdoor air of the SS 553 rooms (D-110)", "L/s", 14),
+          ("cls", "Unit class (HFDS/170, SS 553 or MIXED)", "", 12), ("oamin", "Minimum outdoor air of the rule (D-110)", "L/s", 14)]
     from openpyxl.utils import get_column_letter
     col = {k: get_column_letter(i + 1) for i, (k, *_r) in enumerate(mh)}
     for i, (k, h, u, w) in enumerate(mh):
@@ -375,8 +382,13 @@ def build_master(inputs: Path, out: Path, root: Path = Path(".")) -> Dict[str, A
         put(am, g("oab"), f"=SUMIFS({rng('Y')},{rng('A')},{g('ahu')})", "Calc", "d1")
         put(am, g("sl"), f'=IF(COUNTIFS({rng("A")},{g("ahu")},{rng("Z")},">0")=0,"",_xlfn.MAXIFS({rng("Z")},{rng("A")},{g("ahu")}))', "Calc", "d0")
         put(am, g("nr"), f'=IF(ISNUMBER(MATCH({g("ahu")},{rng("AB")},0)),INDEX({rng("AA")},MATCH({g("ahu")},{rng("AB")},0)),"")', "Calc")
-        # D-032: the larger of the fraction basis and the air that leaves the rooms of all the departments on the unit
-        put(am, g("oa_rule"), f"=MIN({g('calc')},MAX({g('frac')}*{g('calc')},{g('oab')}))", "Calc", "d1")
+        # D-110: minimum outdoor air = straight sum of the HFDS / ASHRAE 170 room outdoor air on an HFDS/170 unit; SS 553 and mixed units stay on the
+        # fraction basis until the SS 553 Table 1 rates are set. D-032: the air that leaves the rooms of all the departments stays a floor.
+        put(am, g("oac"), f"=SUMIFS({rng('AC')},{rng('A')},{g('ahu')})", "Calc", "d1")
+        put(am, g("oan"), f"=SUMIFS({rng('AD')},{rng('A')},{g('ahu')})", "Calc", "d1")
+        put(am, g("cls"), f'=IF(AND({g("oac")}>0,{g("oan")}>0),"MIXED",IF({g("oac")}>0,"HFDS/170",IF({g("oan")}>0,"SS 553","")))', "Calc")
+        put(am, g("oamin"), f'=IF({g("cls")}="HFDS/170",{g("oac")},{g("frac")}*{g("calc")})', "Calc", "d1")
+        put(am, g("oa_rule"), f"=MIN({g('calc')},MAX({g('oamin')},{g('oab')}))", "Calc", "d1")
         # R1-10 decided item 3 (information only, feeds nothing): larger of (sum of room outdoor air x (1 + DuctLeakage)) and (highest fraction of the rooms that are
         # not single pass x calculated airflow)
         put(am, g("oa_mb"), f"=MAX({g('oa')}*(1+{g('leak')}),_xlfn.MAXIFS({rng('R')},{rng('A')},{g('ahu')})*{g('calc')})", "Calc", "d1")

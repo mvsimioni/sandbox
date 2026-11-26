@@ -83,8 +83,19 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
         put(ws, g("oa_frac"), f"={g('frac')}*{g('sa_ahu')}", "Calc", "d1")
         put(ws, g("offnet"), f'=SUMIFS({AF.rng("off")},{crit}{inc},{AF.rng("kind")},"SUPPLY")-SUMIFS({AF.rng("off")},{crit}{inc},{AF.rng("kind")},"EXHAUST")', "Calc", "d1")
         put(ws, g("oa_bal"), f"={g('exh')}+MAX({g('offnet')},0)+{g('spillreq')}", "Calc", "d1")
-        put(ws, g("oa_short"), f"=MAX(MAX({g('oa_frac')},{g('oa_bal')})-{g('sa_ahu')},0)", "Calc", "d1")
-        put(ws, g("oa_rule"), f"=MIN({g('sa_ahu')},MAX({g('oa_frac')},{g('oa_bal')}))", "Calc", "d1")
+        # D-110 (26 Nov 2026): minimum outdoor air of the multispace AHU. HFDS / ASHRAE 170 rooms: straight sum of the room outdoor air (no diversity,
+        # no Ez, no Ev; 170 cl 7.1(a)(6)(i), IC 170-2013-14, IC 170-2017-4). SS 553 rooms: SS 553 Table 1 rate x floor area summed (pending Table 1:
+        # the fraction basis stays until the rates are set). MIXED: both, pending. The balance basis (air that leaves the rooms) stays a floor.
+        put(ws, g("oa_clin"), f'=SUMIFS({AF.rng("oa")},{crit}{inc},{AF.rng("oascope")},"HFDS/170")', "Calc", "d1")
+        put(ws, g("oa_nc"), f'=SUMIFS({AF.rng("oa")},{crit}{inc},{AF.rng("oascope")},"SS 553")', "Calc", "d1")
+        _hl(ws, g("ahucls"), (f'=IF(AND({g("oa_clin")}>0,{g("oa_nc")}>0),"MIXED",IF({g("oa_clin")}>0,"HFDS/170",'
+                              f'IF({g("oa_nc")}>0,"SS 553","")))'), "Calc", left=True)
+        put(ws, g("oa_min"), f'=IF({g("ahucls")}="HFDS/170",{g("oa_clin")},{g("oa_frac")})', "Calc", "d1")
+        _hl(ws, g("oa_how"), (f'=IF({g("ahucls")}="HFDS/170","Straight sum of the room outdoor air (HFDS / ASHRAE 170 rooms)",'
+                              f'IF({g("ahucls")}="","No room with an outdoor-air rate","Highest fraction × AHU supply, pending SS 553 Table 1 rates"))'
+                              f'&IF({g("oa_bal")}>{g("oa_min")},"; the air that leaves the rooms governs","")'), "Calc", left=True)
+        put(ws, g("oa_short"), f"=MAX(MAX({g('oa_min')},{g('oa_bal')})-{g('sa_ahu')},0)", "Calc", "d1")
+        put(ws, g("oa_rule"), f"=MIN({g('sa_ahu')},MAX({g('oa_min')},{g('oa_bal')}))", "Calc", "d1")
         put(ws, g("dn"), f'=COUNTIFS({crit}{inc},{AF.rng("spc")},"DIRTY"{sup})', "Calc", "d0")
         put(ws, g("dsup"), f'=SUMIFS({AF.rng("supply")},{crit}{inc},{AF.rng("spc")},"DIRTY")', "Calc", "d1")
         put(ws, g("dexh"), f'=SUMIFS({AF.rng("exhaust")},{crit}{inc},{AF.rng("spc")},"DIRTY")', "Calc", "d1")
@@ -112,10 +123,12 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
         put(ws, g("spnote"), (f'=IF({g("spr")}="","","The fraction "&TEXT({g("frac")},"0.0#")&" comes from "&{g("spr")}&" (single pass, "'
                               f'&TEXT(IF({g("sa_room")}>0,{g("spl")}/{g("sa_room")},0),"0.0 %")&" of the supply). The other rooms on this unit have a fraction of "'
                               f'&TEXT({g("spy")},"0.0#")&" or less.")'), "Calc")
-        put(ws, g("balnote"), (f'=IF({g("spnote")}="","",{g("spnote")}&" ")'
+        put(ws, g("balnote"), (f'=IF({g("ahucls")}="HFDS/170","Outdoor air = straight sum of the room outdoor air (D-110). ",'
+                               f'IF({g("ahucls")}<>"","Outdoor air on the highest-fraction basis until the SS 553 Table 1 rates are set (D-110, pending). ",""))&'
+                               f'IF({g("spnote")}="","",{g("spnote")}&" ")'
                                f'&IF({g("dn")}>0,{g("dn")}&IF({g("dn")}=1," single-pass room is"," single-pass rooms are")&" dirty (supply "&TEXT({g("dsup")},"#,##0")&" L/s, exhaust "&TEXT({g("dexh")},"#,##0")&" L/s). '
                                f'"&IF({g("dn")}=1,"It takes","Each takes")&" recirculated supply from this unit and a dedicated exhaust with no return. It does not set the outdoor-air fraction. ","")'
-                               f'&IF({g("oa_bal")}>{g("oa_frac")},"The air that leaves the rooms sets the outdoor air ("&TEXT({g("oa_bal")},"#,##0")&" L/s): exhaust, offset air and spill air. ","")'
+                               f'&IF({g("oa_bal")}>{g("oa_min")},"The air that leaves the rooms sets the outdoor air ("&TEXT({g("oa_bal")},"#,##0")&" L/s): exhaust, offset air and spill air. ","")'
                                f'&IF({g("oa_short")}>0,"The air that leaves the rooms is "&TEXT({g("oa_short")},"#,##0")&" L/s more than the AHU supply. The make-up air must come from another source. ","")'
                                f'&IF({g("dirn")}>0,{g("dirn")}&IF({g("dirn")}=1," room has"," rooms have")&" a pressure direction and no pressure value (supply "&TEXT({g("dirsup")},"#,##0")&" L/s): directional airflow only, no offset is calculated, so the offset air is not in this balance. ","")'), "Calc")
         if not after:
@@ -293,7 +306,8 @@ def write_ahu(ctx: Ctx) -> None:
     ws = ctx.wb["AHU"]
     L, L2 = ctx.lay["AH"], ctx.lay["AH2"]
     title_block(ws, "AHU", "Airflow totalisation and coil duty per AHU. Supply = room supply + duct leakage (named cell). Outdoor air "
-                "= the outdoor-air fraction of the highest-standard room × AHU supply (rule). The plain sum and the multiple-space "
+                "= minimum of the rule (D-110): straight sum of the room outdoor air on HFDS / ASHRAE 170 units; SS 553 and mixed units stay on the "
+                "outdoor-air fraction of the highest-standard room × AHU supply until the SS 553 Table 1 rates are set. The plain sum and the multiple-space "
                 "value of the example are shown beside it. Rooms and Area count every room on the unit. Table B repeats the AHU without "
                 "the rooms the outdoor-air rule separates. Outdoor air is the larger of the fraction basis and the balance basis (the exhaust with no return, "
                 "the net offset air that leaves through the envelope and the spill air). Only clean or sterile single-pass rooms (100 % outdoor air) set the fraction. "
@@ -304,7 +318,7 @@ def write_ahu(ctx: Ctx) -> None:
              H("noh", "Rooms with no ceiling height", "no.", 9), H("sa_room", "Room supply", "L/s", 10), H("leak", "Duct leakage", "%", 8),
              H("sa_ahu", "AHU supply airflow", "L/s", 10), H("oa_sum", "Sum of room outdoor air", "L/s", 10),
              H("crit", "Highest-standard room (sets the fraction)", "", 46), H("frac", "Highest room outdoor-air fraction", "–", 9),
-             H("oa_rule", "AHU outdoor air = larger of fraction × supply and the air that leaves the rooms", "L/s", 13), H("vou", "Vou (sum of Voc)", "L/s", 9),
+             H("oa_rule", "AHU outdoor air = larger of the minimum of the rule (D-110) and the air that leaves the rooms", "L/s", 13), H("vou", "Vou (sum of Voc)", "L/s", 9),
              H("vps", "Vps (sum of Vsc)", "L/s", 9), H("xs", "Xs = Vou / Vps", "–", 8), H("zd", "Zd, highest Voc / Vsc", "–", 8),
              H("ev", "Ev = 1 + Xs − Zd", "–", 8), H("vot", "Vot = Vou / Ev", "L/s", 9),
              H("oa_ms", "Outdoor air as the example: max (sum, Vot)", "L/s", 11),
@@ -330,7 +344,7 @@ def write_ahu(ctx: Ctx) -> None:
              H("spl", "Supply of that room", "L/s", 10), H("spy", "Highest fraction of the other rooms", "–", 12), H("spnote", "Single-pass note (helper)", "", 20),
              H("oaflg", "Order of the units with outdoor air above tender (helper)", "no.", 12),
              H("nok", "Rooms with a criteria row and a supply airflow", "no.", 12),
-             H("ducted", "Fan coil unit ducted (Y or N)", "", 9), H("oa_frac", "Outdoor air, fraction basis = highest fraction × AHU supply", "L/s", 12),
+             H("ducted", "Fan coil unit ducted (Y or N)", "", 9), H("oa_frac", "Outdoor air, fraction basis = highest fraction × AHU supply (critical-zone method; comparison only on HFDS/170 units, D-110 rule C6)", "L/s", 12),
              H("oa_bal", "Outdoor air, balance basis = exhaust + net offset air + spill air", "L/s", 12),
              H("offnet", "Net envelope leakage out of the rooms (offset air)", "L/s", 12), H("oa_short", "Make-up air above the AHU supply", "L/s", 11),
              H("dn", "Dirty single-pass rooms", "no.", 9), H("dsup", "Supply of dirty single-pass rooms", "L/s", 10), H("dexh", "Exhaust of dirty single-pass rooms", "L/s", 10),
@@ -338,10 +352,15 @@ def write_ahu(ctx: Ctx) -> None:
              H("norr_why", "Reason for no reduction against tender (tender base)", "", 30),
              H("dirsup", "Supply of rooms with a pressure direction and no value", "L/s", 12), H("dirn", "Rooms with a pressure direction and no value", "no.", 12),
              H("spillreq", "Spill air to plant rooms served by this unit", "L/s", 11),
-             H("ucvadd", "Extra supply for the future ultra-clean duty", "L/s", 11)]
+             H("ucvadd", "Extra supply for the future ultra-clean duty", "L/s", 11),
+             H("oa_clin", "Outdoor air of the HFDS / ASHRAE 170 rooms, straight sum (D-110 rule C4)", "L/s", 13),
+             H("oa_nc", "Outdoor air of the SS 553 rooms (D-110 rules N1 to N3; rates pending SS 553 Table 1)", "L/s", 13),
+             H("ahucls", "Unit class (HFDS/170, SS 553 or MIXED)", "", 11),
+             H("oa_min", "Minimum outdoor air of the rule (D-110)", "L/s", 12),
+             H("oa_how", "Basis of the minimum outdoor air (D-110)", "", 44)]
     bands = {"ahu": "A. AS ZONED: AIRFLOW", "frac": "OUTDOOR AIR", "vou": "MULTIPLE SPACE (example)", "ret": "RETURN, EXHAUST, RELIEF",
              "sens": "COIL DUTY", "oa_sens_ms": "COIL DUTY ON THE EXAMPLE'S OUTDOOR-AIR BASIS", "req_t": "CHECKS", "sched": "TENDER AIRFLOW AND REDUCTION",
-             "zr": "ROOM LIST OF THE UNIT"}
+             "zr": "ROOM LIST OF THE UNIT", "oa_clin": "MINIMUM OUTDOOR AIR (D-110)"}
     write_headers(ws, L, heads, 4, bands)
     _ahu_table(ctx, ws, L, False)
     # second table
@@ -362,7 +381,7 @@ def write_ahu(ctx: Ctx) -> None:
         put(ws, f"A{tr}", "TOTAL", "ResultTag")
         for k in ("n", "noh", "area", "area_sup", "vol", "sa_room", "sa_ahu", "oa_sum", "oa_rule", "oa_ms", "ret", "exh", "relief", "sens", "lat",
                   "oa_sens", "oa_lat", "fan", "coil_s", "coil_l", "coil", "coil_ms", "coil_s_ms", "coil_l_ms",
-                  "oa_sens_ms", "oa_lat_ms", "oa_mb", "oa_frac", "oa_bal", "offnet", "oa_short", "dsup", "dexh", "dn", "dirsup", "dirn", "spillreq", "ucvadd"):
+                  "oa_sens_ms", "oa_lat_ms", "oa_mb", "oa_frac", "oa_bal", "oa_clin", "oa_nc", "oa_min", "offnet", "oa_short", "dsup", "dexh", "dn", "dirsup", "dirn", "spillreq", "ucvadd"):
             put(ws, f"{LL.col(k)}{tr}", f"=SUM({LL.col(k)}{LL.first}:{LL.col(k)}{LL.last})", "Total",
                 "d0" if k in ("n", "noh", "dn", "dirn") else ("d1" if k in ("area", "area_sup", "vol", "sa_room", "sa_ahu", "oa_sum", "oa_rule", "oa_ms", "oa_mb", "ret", "exh", "relief") else "d2"))
     ctx.ahu_total_row = L.last + 1

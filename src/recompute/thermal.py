@@ -297,7 +297,15 @@ def room_loads(room: Dict[str, Any], c: Dict[str, Any], tables: Dict[str, Any]) 
 
     # airflow requirements independent of load
     oa_pp = _z(crit.get("oa_lps_per_person"))
-    oa_req = max(people * oa_pp * iof, _z(crit.get("oa_lps_per_m2")) * area, _z(crit.get("min_oa_ach")) * vol / 3.6, _z(crit.get("oa_specified_lps")))
+    # D-110: no occupant diversity (IOF) on outdoor air
+    oa_req = max(people * oa_pp, _z(crit.get("oa_lps_per_m2")) * area, _z(crit.get("min_oa_ach")) * vol / 3.6, _z(crit.get("oa_specified_lps")))
+    # D-110 outdoor-air scope: HFDS / ASHRAE 170 (air changes or specified flow, no per-person or per-area rate, no 'Refer to SS553') or SS 553
+    if _z(crit.get("min_oa_ach")) + _z(crit.get("oa_specified_lps")) + oa_pp + _z(crit.get("oa_lps_per_m2")) == 0:
+        oa_scope = ""
+    elif not crit.get("oa_ss553") and oa_pp == 0 and _z(crit.get("oa_lps_per_m2")) == 0:
+        oa_scope = "HFDS/170"
+    else:
+        oa_scope = "SS 553"
     min_supply = max(_z(crit.get("supply_lps_m2")) * area, _z(crit.get("min_total_ach")) * vol / 3.6,
                      _z(crit.get("supply_specified_lps")), oa_req)     # the outdoor air is a floor of the supply
     exh_calc = max(_z(crit.get("exhaust_lps_m2")) * area, _z(crit.get("exhaust_ach")) * vol / 3.6)
@@ -315,7 +323,7 @@ def room_loads(room: Dict[str, Any], c: Dict[str, Any], tables: Dict[str, Any]) 
 
     return {
         "area_m2": area, "area_basis": area_basis, "height_m": height, "volume_m3": vol,
-        "room_t_c": room_t, "room_h_kjkg": room_h, "people": people, "iof": iof,
+        "room_t_c": room_t, "room_h_kjkg": room_h, "people": people, "iof": iof, "oa_scope": oa_scope,
         "people_sensible_w": people_sens, "lighting_w": lighting, "power_w": power, "glazing_w": glass,
         "transmission_w": transmission, "infiltration_lps": infil_lps, "infiltration_sensible_w": infil_sens,
         "people_latent_w": people_lat, "equipment_latent_w": equip_lat, "infiltration_latent_w": infil_lat,
@@ -496,6 +504,8 @@ def _apply_airflow(res: Dict[str, Any], c: Dict[str, Any], pres: Optional[Dict[s
     elif res["single_pass"] and res["sp_class"] == "CLEAN":
         oa = supply               # D-031: clean or sterile supply is 100 % outdoor air
     oa = min(oa, supply) if supply > 0 else 0.0
+    if not res.get("oa_scope") and oa > 0 and (res["fixed_by_specification"] or (res["single_pass"] and res["sp_class"] == "CLEAN")):
+        res["oa_scope"] = "HFDS/170"
     res.update({
         "supply_lps_unrounded": supply_raw, "supply_lps": supply, "extract_lps": extract, "exhaust_lps": exhaust,
         "return_lps": extract - exhaust,
@@ -537,7 +547,12 @@ def ahu_totals(tag: str, rooms: List[Dict[str, Any]], c: Dict[str, Any], unit: O
     # D-032: the air that leaves the zone (exhaust with no return, net positive offset air) is made up from outdoor air
     off_net = sum(r.get("offset_lps", 0.0) * (1.0 if r.get("offset_kind") == "supply" else -1.0 if r.get("offset_kind") == "exhaust" else 0.0) for r in rooms)
     oa_balance = exhaust + max(off_net, 0.0) + spill_req
-    oa_need = max(oa_highest, oa_balance)
+    # D-110: HFDS/170 unit = straight sum of the room outdoor air; SS 553 and mixed units stay on the fraction basis until SS 553 Table 1 is set
+    oa_clin = sum(r["oa_lps"] for r in supply_rooms if r.get("oa_scope") == "HFDS/170")
+    oa_nc = sum(r["oa_lps"] for r in supply_rooms if r.get("oa_scope") == "SS 553")
+    ahu_class = "MIXED" if oa_clin > 0 and oa_nc > 0 else ("HFDS/170" if oa_clin > 0 else ("SS 553" if oa_nc > 0 else ""))
+    oa_min = oa_clin if ahu_class == "HFDS/170" else oa_highest
+    oa_need = max(oa_min, oa_balance)
     oa_short = max(oa_need - supply_leak, 0.0)
     oa_final = min(oa_need, supply_leak)
     dirty = [r for r in supply_rooms if r.get("sp_class") == "DIRTY"]
@@ -578,7 +593,8 @@ def ahu_totals(tag: str, rooms: List[Dict[str, Any]], c: Dict[str, Any], unit: O
         "oa_method": c["oamethod"], "oa_lps": oa, "oa_fraction": oa / base if base else 0.0,
         "highest_standard_room": crit["number"] if crit else None, "highest_oa_fraction": frac,
         "oa_sum_rooms_lps": sum_oa, "oa_multispace_vot_lps": vot, "oa_rev_a_lps": oa_rev_a,
-        "oa_highest_fraction_lps": oa_highest, "oa_balance_lps": oa_balance, "spill_req_lps": spill_req, "oa_short_lps": oa_short,
+        "oa_highest_fraction_lps": oa_highest, "oa_clin_lps": oa_clin, "oa_nc_lps": oa_nc, "ahu_class": ahu_class, "oa_min_lps": oa_min,
+        "oa_balance_lps": oa_balance, "spill_req_lps": spill_req, "oa_short_lps": oa_short,
         "offset_net_lps": off_net,
         "return_lps": return_air, "recirculated_lps": return_air, "exhaust_lps": exhaust,
         "positive_air_lps": base - return_air - exhaust, "spill_lps": oa - exhaust - off_net,

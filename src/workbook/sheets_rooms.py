@@ -243,6 +243,8 @@ def write_criteria(ctx: Ctx) -> None:
             _val(ctx, ws, g(k), c.get(f), code, fmt=fmt, kind=kind, cref=g("code"), sref=g("src"), src=src,
                  label=f"criteria {f}", room=r["number"], style=PRES_NAME if c.get("presumed") else None)
         _prov_cells(ctx, ws, g("code"), g("src"), code, src, has)
+        # D-110: the HFDS row prints 'Refer to SS553' for outdoor air (same source as the criteria row)
+        put(ws, g("ss553"), "Y" if c.get("oa_ss553") else None, "Link").alignment = Alignment(horizontal="center")
         spc = c.get("sp_class") or None
         _val(ctx, ws, g("spc"), spc, "A", kind="text", cref=g("spc_c"), sref=g("spc_s"), src="GEN-CLASS", label="single-pass class", room=r["number"])
         _prov_cells(ctx, ws, g("spc_c"), g("spc_s"), "A", "GEN-CLASS", spc is not None)
@@ -261,6 +263,10 @@ def write_criteria(ctx: Ctx) -> None:
                        f'OR({g("td")}<IF({g("tmin")}="",{g("tmax")},{g("tmin")}),{g("td")}>IF({g("tmax")}="",{g("tmin")},{g("tmax")}))),"FAIL","PASS"))'),
             "clin": (f'=IF(OR(ISNUMBER({g("pa")}),{g("regime")}="NEGATIVE",{g("single")}="Y",ISNUMBER(SEARCH("HEPA",{g("filter")})),'
                      f'{g("cls")}="1"),"YES","NO")'),
+            # D-110: HFDS/170 scope = outdoor air set by air changes or a specified flow (HFDS T.1.1.1.1, ASHRAE 170, MOT NSC), with no per-person or
+            # per-area rate and no 'Refer to SS553'. SS 553 scope = any other room with an outdoor-air rate. Blank = no outdoor-air requirement.
+            "oascope": (f'=IF(N({g("oa_ach")})+N({g("oa_spec")})+N({g("oa_lpp")})+N({g("oa_lpm2")})=0,"",'
+                        f'IF(AND({g("ss553")}<>"Y",N({g("oa_lpp")})=0,N({g("oa_lpm2")})=0),"HFDS/170","SS 553"))'),
         }
         for k, f in calc.items():
             cc = put(ws, g(k), f, "Calc", "d1" if k in ("pa", "td", "hd", "pv") else ("d2" if k == "rhd" else None))
@@ -315,7 +321,8 @@ ENG_F: Dict[str, str] = {
     "vol": "={area}*{h}", "glz": "={RI.glz}", "wall": "={RI.wall}", "roof": "={RI.roof}",
     "nenv": "=COUNTIF([EN.room],{no})",
     "occ": "={RI.people}", "iof": '=IF({RI.iof}="",1,{RI.iof})', "oa_ach": "={CR.oa_ach}", "oa_lpp": "={CR.oa_lpp}", "oa_lpm2": "={CR.oa_lpm2}", "oa_spec": "={CR.oa_spec}",
-    "oa": "=IF(AND({fix}=1,{oa_spec}>0),{oa_spec},MAX({occ}*{oa_lpp}*{iof},{oa_lpm2}*{area},{oa_ach}*{vol}/ConvM3hPerLps,{oa_spec}))",
+    # D-110 (26 Nov 2026): the occupant diversity (IOF, D-106) no longer reduces outdoor air (HFDS/170 rule C4, C5; SS 553 per area)
+    "oa": "=IF(AND({fix}=1,{oa_spec}>0),{oa_spec},MAX({occ}*{oa_lpp},{oa_lpm2}*{area},{oa_ach}*{vol}/ConvM3hPerLps,{oa_spec}))",
     "sa_ach": "={CR.sa_ach}", "sa_lpm2": "={CR.sa_lpm2}", "sa_spec": "={CR.sa_spec}",
     "sa_lps": "=MAX({sa_lpm2}*{area},{sa_ach}*{vol}/ConvM3hPerLps,{sa_spec},{oa})",       # the outdoor air is a floor of the supply
     "ex_ach": "={CR.ex_ach}", "ex_lpm2": "={CR.ex_lpm2}", "ex_spec": "={CR.ex_spec}",
@@ -436,9 +443,10 @@ AF_F: Dict[str, str] = {
     "spec_off": '=IF(AND({fix}=1,{kind}<>""),IF({kind}="EXHAUST",{extract}-{supply},{supply}-{extract}),"")',
     "off_chk": '=IF(ISNUMBER({spec_off}),IF({spec_off}>={off}-BalTolLps,"OK","SHORT"),"")',
     "terminal": "={RI.terminal}", "exfan": "={RI.exfan}", "clin": '=IF({fix}=1,"YES",{CR.clin})', "systype": "={RI.systype}",
+    "oascope": '=IF(AND({CR.oascope}="",OR({fix}=1,{spc}="CLEAN"),{oa}>0),"HFDS/170",{CR.oascope})',
 }
 AF_STYLE = {"no": "LinkTag", "name": "Link", "storey": "Link", "ahu": "LinkTag", "sys": "Link", "terminal": "LinkTag",
-            "exfan": "LinkTag", "clin": "Calc", "systype": "Link", "single": "Link", "ok": "Check", "gov": "Calc",
+            "exfan": "LinkTag", "clin": "Calc", "oascope": "Calc", "systype": "Link", "single": "Link", "ok": "Check", "gov": "Calc",
             "supply": "Result", "oa": "Calc", "off_chk": "Check", "spc": "Link", "lo_chk": "Check", "env_chk": "Check"}
 AF_LINK = {"fix", "oa_spec", "area", "vol", "sens", "lat", "troom", "hroom", "ac", "th", "ex_min", "supply", "oa_air", "spc"}
 
@@ -465,7 +473,7 @@ def write_airflow(ctx: Ctx) -> None:
             f = re.sub(r"\{ENG\.(\w+)\}", lambda m: eng(m.group(1)), f)
             f = expand(ctx, f, L, i, {"RI": i, "CR": i})
             st = AF_STYLE.get(k, "Link" if k in AF_LINK else "Calc")
-            fmt = None if k in ("no", "name", "storey", "ahu", "sys", "gov", "single", "ok", "terminal", "exfan", "clin", "systype", "off_chk", "spc", "lo_chk", "env_chk") \
+            fmt = None if k in ("no", "name", "storey", "ahu", "sys", "gov", "single", "ok", "terminal", "exfan", "clin", "oascope", "systype", "off_chk", "spc", "lo_chk", "env_chk") \
                 else ("pct1" if k == "frac" else ("d0" if k == "fix" else "d1"))
             c = put(ws, g(k), f, st, fmt, text=fmt is None and st != "Check")
             if fmt is None:
