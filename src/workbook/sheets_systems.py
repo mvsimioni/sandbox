@@ -94,8 +94,18 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
         put(ws, g("oa_min"), f'={g("oa_clin")}+{g("oa_nc")}', "Calc", "d1")
         _hl(ws, g("oa_how"), (f'=IF({g("ahucls")}="HFDS/170","Straight sum of the room outdoor air (HFDS / ASHRAE 170 rooms)",'
                               f'IF({g("ahucls")}="SS 553","Sum of SS 553 Table 1 rate × area (and QP rates, cl 5.3.6)",'
-                              f'IF({g("ahucls")}="MIXED","HFDS/170 straight sum + SS 553 sum (mixed unit, to confirm with the team)","No room with an outdoor-air rate")))'
+                              f'IF({g("ahucls")}="MIXED","HFDS/170 straight sum + SS 553 sum; mixed unit follows the "&{g("gov")}&" criteria (larger supply, D-115)","No room with an outdoor-air rate")))'
                               f'&IF({g("oa_bal")}>{g("oa_min")},"; the air that leaves the rooms governs","")'), "Calc", left=True)
+        # D-115: a mixed unit follows the criteria of the rooms with the larger sum of supply airflow
+        put(ws, g("sa_clin"), f'=SUMIFS({AF.rng("supply")},{crit}{inc},{AF.rng("oascope")},"HFDS/170")', "Calc", "d1")
+        put(ws, g("sa_nc"), f'=SUMIFS({AF.rng("supply")},{crit}{inc},{AF.rng("oascope")},"SS 553")', "Calc", "d1")
+        _hl(ws, g("gov"), f'=IF({g("ahucls")}="MIXED",IF({g("sa_clin")}>={g("sa_nc")},"HFDS/170","SS 553"),{g("ahucls")})', "Calc", left=True)
+        # D-117: operating theatres (clean single-pass rooms) also in the normal (recirculation) mode; the pressure targets still hold (balance basis)
+        put(ws, g("n_sp"), f'=COUNTIFS({crit}{inc},{AF.rng("isot")},1,{AF.rng("supply")},">0")', "Calc", "d0")
+        put(ws, g("oa_sp_sum"), f"=SUMIFS({AF.rng('oa_sp')},{crit}{inc})", "Calc", "d1")
+        put(ws, g("oa_sp"), f"=MIN({g('sa_ahu')},MAX({g('oa_sp_sum')},{g('oa_bal')}))", "Calc", "d1")
+        put(ws, g("oa_norm_sum"), f"=SUMIFS({AF.rng('oa_norm')},{crit}{inc})", "Calc", "d1")
+        put(ws, g("oa_norm"), f"=MIN({g('sa_ahu')},MAX({g('oa_norm_sum')},{g('oa_bal')}))", "Calc", "d1")
         put(ws, g("oa_short"), f"=MAX(MAX({g('oa_min')},{g('oa_bal')})-{g('sa_ahu')},0)", "Calc", "d1")
         put(ws, g("oa_rule"), f"=MIN({g('sa_ahu')},MAX({g('oa_min')},{g('oa_bal')}))", "Calc", "d1")
         put(ws, g("dn"), f'=COUNTIFS({crit}{inc},{AF.rng("spc")},"DIRTY"{sup})', "Calc", "d0")
@@ -148,6 +158,12 @@ def _ahu_table(ctx: Ctx, ws, L, after: bool) -> None:
         wsum = f"SUMPRODUCT(({AF.rng('ahu')}={key}){mask}*{AF.rng('supply')}*" + "{x})/" + g("sa_room")
         put(ws, g("rt"), f'=IF({g("sa_room")}>0,{wsum.format(x=AF.rng("troom"))},0)', "Calc", "d1")
         put(ws, g("rh"), f'=IF({g("sa_room")}>0,{wsum.format(x=AF.rng("hroom"))},0)', "Calc", "d1")
+        put(ws, g("oa_sens_s"), f"=AirSensibleFactor*{g('oa_sp')}/WperkW*(OutdoorDB-{g('rt')})", "Calc", "d2")
+        put(ws, g("oa_lat_s"), f"=AirDensity*{g('oa_sp')}/WperkW*(OutdoorH-{g('rh')})-{g('oa_sens_s')}", "Calc", "d2")
+        put(ws, g("coil_s1"), f"={g('sens')}+{g('lat')}+{g('fan')}+{g('oa_sens_s')}+{g('oa_lat_s')}", "Calc", "d2")
+        put(ws, g("oa_sens_n"), f"=AirSensibleFactor*{g('oa_norm')}/WperkW*(OutdoorDB-{g('rt')})", "Calc", "d2")
+        put(ws, g("oa_lat_n"), f"=AirDensity*{g('oa_norm')}/WperkW*(OutdoorH-{g('rh')})-{g('oa_sens_n')}", "Calc", "d2")
+        put(ws, g("coil_n"), f"={g('sens')}+{g('lat')}+{g('fan')}+{g('oa_sens_n')}+{g('oa_lat_n')}", "Calc", "d2")
         for suffix, oa in (("", g("oa_rule")), ("_ms", g("oa_ms"))):
             put(ws, g("oa_sens" + suffix), f"=AirSensibleFactor*{oa}/WperkW*(OutdoorDB-{g('rt')})", "Calc", "d2")
             put(ws, g("oa_lat" + suffix), f"=AirDensity*{oa}/WperkW*(OutdoorH-{g('rh')})-{g('oa_sens' + suffix)}", "Calc", "d2")
@@ -359,10 +375,22 @@ def write_ahu(ctx: Ctx) -> None:
              H("oa_nc", "Outdoor air of the SS 553 rooms, sum of Table 1 rate × area (D-111 rules N1 to N3)", "L/s", 13),
              H("ahucls", "Unit class (HFDS/170, SS 553 or MIXED)", "", 11),
              H("oa_min", "Minimum outdoor air of the rule (D-110)", "L/s", 12),
-             H("oa_how", "Basis of the minimum outdoor air (D-110)", "", 44)]
+             H("oa_how", "Basis of the minimum outdoor air (D-110)", "", 44),
+             H("sa_clin", "Supply of the HFDS / ASHRAE 170 rooms", "L/s", 11), H("sa_nc", "Supply of the SS 553 rooms", "L/s", 11),
+             H("gov", "Criteria the unit follows (mixed unit: the rooms with the larger supply, D-115)", "", 14),
+             H("n_sp", "Operating theatres on this unit (both modes)", "no.", 10),
+             H("oa_sp_sum", "Sum of room outdoor air, single-pass mode", "L/s", 12),
+             H("oa_sp", "AHU outdoor air, single-pass mode = larger of the sum and the balance basis (D-117)", "L/s", 13),
+             H("oa_sens_s", "Outdoor air sensible, single-pass mode", "kW", 10), H("oa_lat_s", "Outdoor air latent, single-pass mode", "kW", 10),
+             H("coil_s1", "Coil duty, single-pass mode", "kW", 10),
+             H("oa_norm_sum", "Sum of room outdoor air, normal (recirculation) mode", "L/s", 12),
+             H("oa_norm", "AHU outdoor air, normal mode = larger of the sum and the balance basis (D-117)", "L/s", 13),
+             H("oa_sens_n", "Outdoor air sensible, normal mode", "kW", 10), H("oa_lat_n", "Outdoor air latent, normal mode", "kW", 10),
+             H("coil_n", "Coil duty, normal mode", "kW", 10)]
     bands = {"ahu": "A. AS ZONED: AIRFLOW", "frac": "OUTDOOR AIR", "vou": "MULTIPLE SPACE (example)", "ret": "RETURN, EXHAUST, RELIEF",
              "sens": "COIL DUTY", "oa_sens_ms": "COIL DUTY ON THE EXAMPLE'S OUTDOOR-AIR BASIS", "req_t": "CHECKS", "sched": "TENDER AIRFLOW AND REDUCTION",
-             "zr": "ROOM LIST OF THE UNIT", "oa_clin": "MINIMUM OUTDOOR AIR (D-110)"}
+             "zr": "ROOM LIST OF THE UNIT", "oa_clin": "MINIMUM OUTDOOR AIR (D-110)",
+             "n_sp": "OPERATING THEATRES: SINGLE-PASS AND NORMAL (RECIRCULATION) MODES (D-117)"}
     write_headers(ws, L, heads, 4, bands)
     _ahu_table(ctx, ws, L, False)
     # second table
@@ -383,7 +411,9 @@ def write_ahu(ctx: Ctx) -> None:
         put(ws, f"A{tr}", "TOTAL", "ResultTag")
         for k in ("n", "noh", "area", "area_sup", "vol", "sa_room", "sa_ahu", "oa_sum", "oa_rule", "oa_ms", "ret", "exh", "relief", "sens", "lat",
                   "oa_sens", "oa_lat", "fan", "coil_s", "coil_l", "coil", "coil_ms", "coil_s_ms", "coil_l_ms",
-                  "oa_sens_ms", "oa_lat_ms", "oa_mb", "oa_frac", "oa_bal", "oa_clin", "oa_nc", "oa_min", "offnet", "oa_short", "dsup", "dexh", "dn", "dirsup", "dirn", "spillreq", "ucvadd"):
+                  "oa_sens_ms", "oa_lat_ms", "oa_mb", "oa_frac", "oa_bal", "oa_clin", "oa_nc", "oa_min",
+                  "sa_clin", "sa_nc", "n_sp", "oa_sp_sum", "oa_sp", "oa_sens_s", "oa_lat_s", "coil_s1",
+                  "oa_norm_sum", "oa_norm", "oa_sens_n", "oa_lat_n", "coil_n", "offnet", "oa_short", "dsup", "dexh", "dn", "dirsup", "dirn", "spillreq", "ucvadd"):
             put(ws, f"{LL.col(k)}{tr}", f"=SUM({LL.col(k)}{LL.first}:{LL.col(k)}{LL.last})", "Total",
                 "d0" if k in ("n", "noh", "dn", "dirn") else ("d1" if k in ("area", "area_sup", "vol", "sa_room", "sa_ahu", "oa_sum", "oa_rule", "oa_ms", "oa_mb", "ret", "exh", "relief") else "d2"))
     ctx.ahu_total_row = L.last + 1

@@ -38,6 +38,11 @@ BUILTIN_SOURCES.append(
      "text_as_read": "cooling coil LATDB 12.0 °C, LATWB 11.0 °C, EWT 8.0 °C, LWT 16.0 °C; re-heating coil EAT 12.0 °C, max LAT 24 °C, EWT 35 °C, LWT 25 °C",
      "method": "Read from the schedule register (most printed value of each column)", "confidence": "high"})
 BUILTIN_SOURCES.append(
+    {"id": "HFDS-OT", "document": "HFDS - Mechanical reverse-brief.pdf (MOHH Healthcare Facility Design Standards, Vol 2 Module 01)",
+     "issue": "uploaded 23 Nov 2026 (again 26 Nov 2026)", "page": "table T.1.1.1.1, page 39 (PDF page 8)", "location": "row 24 Operating Theatre",
+     "text_as_read": "Operating Theatre 18-25 °C, 40-60 %, Positive, 5 / 25 ACH, 24 Hrs, system mode of operation a) Single pass b) Recirc",
+     "method": "Read from the HFDS table", "confidence": "high"})
+BUILTIN_SOURCES.append(
     {"id": "GEN-COIL", "document": "Coil estimate method: water flow from duty and water temperature rise; coil rows from the number of transfer units of a counterflow coil",
      "issue": "method of the engineer", "page": "method", "location": "cooling coil: log-mean enthalpy difference between the air and saturated air at the water temperature; reheat coil: log-mean temperature difference",
      "text_as_read": "rows = transfer units ÷ transfer units per row (0.45 per row assumed, to confirm at coil selection)",
@@ -129,6 +134,8 @@ DEFAULTS: Dict[str, Tuple] = {
     "PsyPct": ("Per cent base (humidity printed in per cent)", 100, "%", "S", "GEN-PSY", "unit conversion"),
     "FcuFanPressure": ("Fan pressure of a fan coil unit or a CRAC unit (external static of the tender schedule)", 200, "Pa", "D", "EQS-COIL",
                        "Equipment Schedule: fan coil units 150 or 200 Pa, CRAC units 150 Pa minimum external static; the larger value is used; the internal resistance of the unit is not in it, to confirm"),
+    "OTNormalOAACH": ("Operating theatre, normal (recirculation) mode: outdoor air changes", 5, "ACH", "D", "HFDS-OT",
+                      "HFDS T.1.1.1.1 row 24 Operating Theatre: 5 / 25 ACH, system mode a) single pass, b) recirculation (D-117)"),
     "CoilLATDB": ("Cooling coil leaving air dry bulb (tender schedule)", 12, "°C", "D", "EQS-COIL", "Equipment Schedule, AHU Part A"),
     "CoilLATWB": ("Cooling coil leaving air wet bulb (tender schedule)", 11, "°C", "D", "EQS-COIL", "Equipment Schedule, AHU Part A"),
     "ChwEWT": ("Chilled water entering the coil", 8, "°C", "D", "EQS-COIL", "Equipment Schedule, AHU Part A"),
@@ -158,7 +165,7 @@ GROUPS = [
     ("Load method", ["SafetyFactor", "SupplyTemp", "InfiltrationACH", "RoofSolarGain", "OutdoorDB", "OutdoorWB", "OutdoorH",
                      "AirSensibleFactor", "AirDensity", "AirLatentFactor", "RoundTo", "AreaDecimals", "ConvM3hPerLps", "PercentBase",
                      "WperkW", "LperM3"]),
-    ("AHU totalisation", ["DuctLeakage", "FcuLeakageDucted", "FcuLeakageHiWall", "TenderLeakage", "FanPressure", "FcuFanPressure", "FanEfficiency", "OAShare", "OADrop", "PAHUOffT", "PAHUOffH"]),
+    ("AHU totalisation", ["DuctLeakage", "FcuLeakageDucted", "FcuLeakageHiWall", "TenderLeakage", "FanPressure", "FcuFanPressure", "FanEfficiency", "OAShare", "OADrop", "PAHUOffT", "PAHUOffH", "OTNormalOAACH"]),
     ("Pressure method", ["AirtightLimit", "TighterLimit", "FlowN", "FlowNLow", "FlowNHigh", "DoorCd", "RefPressure",
                          "RatioFail", "RatioVerify", "ApplyFromPa", "SecPerHour", "MMperM", "CM2perM2", "PerimFactor", "GapSides",
                          "GapBottom", "GapHinged", "GapSliding", "GapBedWidth", "GapShaft", "NewtonEps", "OffsetEps",

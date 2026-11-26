@@ -454,9 +454,15 @@ AF_F: Dict[str, str] = {
     "off_chk": '=IF(ISNUMBER({spec_off}),IF({spec_off}>={off}-BalTolLps,"OK","SHORT"),"")',
     "terminal": "={RI.terminal}", "exfan": "={RI.exfan}", "clin": '=IF({fix}=1,"YES",{CR.clin})', "systype": "={RI.systype}",
     "oascope": '=IF(AND({CR.oascope}="",OR({fix}=1,{spc}="CLEAN"),{oa}>0),"HFDS/170",{CR.oascope})',
+    # D-117 (Marcus, 26 Nov 2026): operating theatres (MOT-specified operating rooms and clean single-pass rooms) in both modes:
+    # single pass (outdoor air = supply) and normal (HFDS outdoor air changes, 5 ACH for an operating theatre, T.1.1.1.1 row 24, capped at the
+    # supply); the pressure targets hold at the AHU (balance basis). Other rooms keep their outdoor air in both modes.
+    "isot": '=IF(OR({spc}="CLEAN",AND({fix}=1,ISNUMBER(SEARCH("operating",{name})))),1,0)',
+    "oa_sp": '=IF({supply}>0,IF({isot}=1,{supply},{oa}),0)',
+    "oa_norm": '=IF({supply}>0,IF({isot}=1,MIN({supply},IF(N({CR.oa_ach})>0,{CR.oa_ach},OTNormalOAACH)*{vol}/ConvM3hPerLps),{oa}),0)',
 }
 AF_STYLE = {"no": "LinkTag", "name": "Link", "storey": "Link", "ahu": "LinkTag", "sys": "Link", "terminal": "LinkTag",
-            "exfan": "LinkTag", "clin": "Calc", "oascope": "Calc", "systype": "Link", "single": "Link", "ok": "Check", "gov": "Calc",
+            "exfan": "LinkTag", "clin": "Calc", "oascope": "Calc", "isot": "Calc", "oa_sp": "Calc", "oa_norm": "Calc", "systype": "Link", "single": "Link", "ok": "Check", "gov": "Calc",
             "supply": "Result", "oa": "Calc", "off_chk": "Check", "spc": "Link", "lo_chk": "Check", "env_chk": "Check"}
 AF_LINK = {"fix", "oa_spec", "area", "vol", "sens", "lat", "troom", "hroom", "ac", "th", "ex_min", "supply", "oa_air", "spc"}
 
@@ -510,7 +516,7 @@ def write_airflow(ctx: Ctx) -> None:
                 ctx, f"=SUMPRODUCT(MAX(([AF.ahu]={{ahu}})*([AF.in{rr}]=1)*(ROW([AF.frac])<>ROW())*[AF.frac]))", L, i), "Calc", "pct1")
             # D-113 (26 Nov 2026, Marcus): no FCU separation on an HFDS/170 unit (straight sum: separating a room does not lower the outdoor air)
             ah_ = ctx.lay.get("AH")
-            hf_ = (f'IFERROR(INDEX({ah_.rng("ahucls")},MATCH({g("ahu")},{ah_.rng("ahu")},0)),"")="HFDS/170"' if ah_ and ctx.ahus else "FALSE")
+            hf_ = "TRUE"   # D-116 (Marcus, 26 Nov 2026): the rule is withdrawn on every unit (outdoor air is a sum: separating a room lowers nothing)
             put(ws, g(f"trg{rr}"), f"=IF(AND({inn}=1,NOT({hf_})),IF(AND({g('frac')}>0,{g('frac')}={g(f'max{rr}')},"
                                    f"{g('supply')}/{g(f'tot{rr}')}<OAShare,{g(f'max{rr}')}-{g(f'nxt{rr}')}>OADrop),1,0),0)",
                 "Calc", "d0")

@@ -235,6 +235,15 @@ def main(argv=None) -> int:
     cap["unit_rows_made"] += ensure_unit_rows(datasets)
     from .iof_overrides import apply as iof_set                       # D-106: occupancy factors typed by the engineer
     print(f"intermittent occupancy factors (D-106): {len(iof_set(datasets))} room(s)", flush=True)
+    from .manual_wk_20261126 import apply as wk_set                   # D-114: manual changes of Winson Khoo (26 Nov 2026), retained
+    wk = wk_set(datasets)
+    print(f"manual changes retained (D-114): {len(wk)}", flush=True)
+    import csv as _csv
+    if wk:
+        with open("out/qa/manual_20261126/retained_D114.csv", "w", newline="", encoding="utf-8") as _fh:
+            _w = _csv.DictWriter(_fh, fieldnames=sorted({k for x in wk for k in x}))
+            _w.writeheader()
+            _w.writerows(wk)
     from .ss553_table1 import apply as t1_set                         # D-111: SS 553 Table 1 rates on the SS 553 rooms
     from collections import Counter as _C
     t1 = t1_set(datasets)
