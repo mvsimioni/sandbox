@@ -28,8 +28,8 @@ ASSUMPTIONS = [
     ("Geometry", "One thermal zone per storey and unit; outline = union of the zoning room outlines of the unit, simplified 0.25 m", "Zoning Rev H (D-108, D-112)"),
     ("Geometry", "Floor-to-floor heights from the FFL of the building sections: LB3 0.00, B3 3.80, B2 8.30, B1 12.80, L01 17.00, L02 23.00, "
                  "then 6.00 m per storey to L08 59.00 (L01 mezzanine at 20.00 not modelled as a storey)", "Sections AR-SW-20-ZZ-001 to 003"),
-    ("Geometry", "Structural slab 250 mm (floors, ceilings and roof), measured at 1:500 on Section EE (no thickness is written on the sections)",
-     "Section EE, measured; to confirm"),
+    ("Geometry", "Slab thickness not defined (the sections give none): floors, ceilings and the roof have no thickness and no thermal mass "
+                 "(no-mass layers); zone height = level to level", "PLACEHOLDER [slab thickness per the structural drawings]"),
     ("Geometry", "External wall = wall within 0.8 m of the storey footprint edge; this also catches walls at shafts, voids and light wells "
                  "(over-counts envelope on internal zones)", "ASSUMPTION"),
     ("Geometry", "Sliver surfaces below 0.05 m² removed (44); 133 zones not fully enclosed (volume only)", "Model cleaning"),

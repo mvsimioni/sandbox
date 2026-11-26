@@ -5,7 +5,7 @@ Rooms that are MV, NV, not conditioned or without information are not modelled; 
 
 Geometry: the zoning outlines of the rooms of a zone (zoning_building_mm_wkt, else polygon_building_mm_wkt; building frame X along the
 numbered grids, Y along the lettered grids = north, origin grid 2/A) joined, simplified (0.25 m) and split into hole-free pieces (spaces);
-each piece is extruded over the floor-to-floor height of its storey (FFL of the building sections AA to EE; slab 250 mm). A wall is exterior where it
+each piece is extruded over the floor-to-floor height of its storey (FFL of the building sections AA to EE; slab thickness not defined). A wall is exterior where it
 lies on the storey footprint boundary (all rooms of the storey joined, gaps under 1 m closed; courtyards included); other walls are
 adiabatic. A ceiling is a roof where more than half of it is not under the footprint of the storey above. Basement exterior walls and floors
 are adiabatic (assumption). Windows: window-to-wall ratio and shading coefficient (SC1 x SC2) of the facade orientation from the ETTV report;
@@ -53,7 +53,9 @@ BASEMENT = {"LB3", "B3", "B2", "B1"}
 UNIT_KINDS = ("AHU", "FCU", "CRAC")
 
 # labelled assumptions (no project value)
-SLAB_T = 0.25         # m, structural slab of the building sections (measured at 1:500 on Section EE, L01 to L07: 12-13 px at 600 dpi = 0.25-0.28 m)
+# Slab thickness: NOT DEFINED. The building sections give no slab thickness (Marcus 26 Nov 2026: do not invent a value). Slabs and the
+# roof are modelled with no thickness and no thermal mass (no-mass layers); placeholder [slab thickness per the structural drawings].
+SLAB_T = None
 ROOF_U = 0.5          # W/m2K, ASSUMPTION: no roof U in the project documents (ETTV covers walls); typical concrete roof with insulation
 SHGC_PER_SC = 0.87    # SHGC = 0.87 x SC (definition of the shading coefficient)
 GLAZING_U = 1.65      # W/m2K, ETTV F1 vision glazing (all orientations)
@@ -232,10 +234,10 @@ def build(issue: Path):
         wall_cons[o] = c
     roof = os_.model.Construction(m)
     roof.setName(f"Roof U{ROOF_U} (ASSUMPTION)")
-    roof.setLayers(os_.model.MaterialVector([mat_nomass("Roof insulation", 1 / ROOF_U - 0.04 - 0.10 - SLAB_T / 1.442), conc("Roof slab 250", SLAB_T)]))
+    roof.setLayers(os_.model.MaterialVector([mat_nomass("Roof (U 0.5 assumed; slab thickness not defined, no mass)", 1 / ROOF_U - 0.04 - 0.10)]))
     slab = os_.model.Construction(m)
-    slab.setName("Internal slab 250 (adiabatic)")
-    slab.setLayers(os_.model.MaterialVector([conc("Slab 250", SLAB_T)]))
+    slab.setName("Internal slab (adiabatic; thickness not defined, no mass)")
+    slab.setLayers(os_.model.MaterialVector([mat_nomass("Slab placeholder [thickness per the structural drawings]", 0.001)]))
     part = os_.model.Construction(m)
     part.setName("Partition (adiabatic)")
     part.setLayers(os_.model.MaterialVector([conc("Partition 100", 0.1)]))

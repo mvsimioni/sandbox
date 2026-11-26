@@ -250,8 +250,6 @@ def room_loads(room: Dict[str, Any], c: Dict[str, Any], tables: Dict[str, Any]) 
         people = (dens or 0.0) * area / 100.0
         if str(room.get("occupancy_basis") or "").upper() == "DENSITY DEFAULT":
             people = float(math.ceil(round(people, 9)))      # default density (D-017): rounded up to a whole person
-    iof = _num(room.get("iof"))
-    iof = 1.0 if iof is None else iof
     act_name = room.get("activity")
     act = tables["activities"].get(act_name) if act_name else None
     if people > 0 and act is None:
@@ -328,7 +326,7 @@ def room_loads(room: Dict[str, Any], c: Dict[str, Any], tables: Dict[str, Any]) 
 
     return {
         "area_m2": area, "area_basis": area_basis, "height_m": height, "volume_m3": vol,
-        "room_t_c": room_t, "room_h_kjkg": room_h, "people": people, "iof": iof, "oa_scope": oa_scope,
+        "room_t_c": room_t, "room_h_kjkg": room_h, "people": people, "oa_scope": oa_scope,
         "people_sensible_w": people_sens, "lighting_w": lighting, "power_w": power, "glazing_w": glass,
         "transmission_w": transmission, "infiltration_lps": infil_lps, "infiltration_sensible_w": infil_sens,
         "people_latent_w": people_lat, "equipment_latent_w": equip_lat, "infiltration_latent_w": infil_lat,

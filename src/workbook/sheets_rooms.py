@@ -123,7 +123,7 @@ def write_room_information(ctx: Ctx) -> None:
                   ("soa", "soa_area_m2", "soa_area", "num", "d1"), ("meas", "measured_area_m2", "measured_area", "num", "d1"),
                   ("sel", "area_selector", "area_selector", "text", None), ("h", "ceiling_height_m", "ceiling_height", "num", "d2"),
                   ("pfix", "occupancy_people", "occupancy_people", "num", "d0"),
-                  ("dens", "occupancy_per_100m2", "occupancy_density", "num", "d1"), ("iof", "iof", "iof", "num", "d2"),
+                  ("dens", "occupancy_per_100m2", "occupancy_density", "num", "d1"),
                   ("act", "activity", "activity", "text", None), ("hours", "operation_hours", "operation_hours", "num", "d1"),
                   ("light", "lighting_w_m2", "lighting", "num", "d1"), ("power", "small_power_w_m2", "small_power", "num", "d1"),
                   ("eqs", "equipment_sensible_w", "equipment_sensible", "num", "d0"),
@@ -326,7 +326,7 @@ ENG_F: Dict[str, str] = {
     "sys": "={RI.systype}", "sptype": "={RI.sptype}", "cond": "={RI.cond}", "h": "={RI.h}", "area": "={RI.area}",
     "vol": "={area}*{h}", "glz": "={RI.glz}", "wall": "={RI.wall}", "roof": "={RI.roof}",
     "nenv": "=COUNTIF([EN.room],{no})",
-    "occ": "={RI.people}", "iof": '=IF({RI.iof}="",1,{RI.iof})', "oa_ach": "={CR.oa_ach}", "oa_lpp": "={CR.oa_lpp}", "oa_lpm2": "={CR.oa_lpm2}", "oa_spec": "={CR.oa_spec}",
+    "occ": "={RI.people}", "oa_ach": "={CR.oa_ach}", "oa_lpp": "={CR.oa_lpp}", "oa_lpm2": "={CR.oa_lpm2}", "oa_spec": "={CR.oa_spec}",
     # D-110 (26 Nov 2026): the occupant diversity (IOF, D-106) no longer reduces outdoor air (HFDS/170 rule C4, C5; SS 553 per area)
     # D-111: SS 553 rooms: Table 1 rate x area, or 62.1 Rp x occupancy + Ra x area (meeting); cl 5.3.5 store or riser below 6 m2 and storage-only
     # cold room exempt (0); QP rate (cl 5.3.6) and a store of 6 m2 or more keep the booklet rate below
@@ -366,7 +366,7 @@ ENG_F: Dict[str, str] = {
     "voc": "={oa}", "vsc": "={fin}", "frac": "=IF({vsc}>0,{voc}/{vsc},0)",
 }
 ENG_FMT = {"lvl": None, "ahu": None, "zone": None, "no": None, "name": None, "sys": None, "sptype": None, "cond": None,
-           "act": None, "press": None, "iof": "d2", "nenv": "d0", "ppl": "d1", "oa_ach": "d1", "sa_ach": "d1", "ex_ach": "d1",
+           "act": None, "press": None, "nenv": "d0", "ppl": "d1", "oa_ach": "d1", "sa_ach": "d1", "ex_ach": "d1",
            "inf_ach": "d1", "ach": "d1", "frac": "pct1", "area": "d1", "vol": "d1", "h": "d1"}
 TEXT_KEYS = {"lvl", "ahu", "zone", "no", "name", "sys", "sptype", "cond", "act", "press"}
 TAG_KEYS = {"ahu", "zone", "no", "lvl"}

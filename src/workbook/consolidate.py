@@ -233,8 +233,7 @@ def main(argv=None) -> int:
     alog = arch_links(datasets)
     print(f"rooms placed by the part-plan tags (D-107): {len(alog)}; unit changed for {sum(1 for x in alog if x['changed'] == 'Y')}", flush=True)
     cap["unit_rows_made"] += ensure_unit_rows(datasets)
-    from .iof_overrides import apply as iof_set                       # D-106: occupancy factors typed by the engineer
-    print(f"intermittent occupancy factors (D-106): {len(iof_set(datasets))} room(s)", flush=True)
+    # D-106 (occupancy factors) withdrawn: Marcus 26 Nov 2026, all I.O.F. columns deleted (D-118)
     from .manual_wk_20261126 import apply as wk_set                   # D-114: manual changes of Winson Khoo (26 Nov 2026), retained
     wk = wk_set(datasets)
     print(f"manual changes retained (D-114): {len(wk)}", flush=True)

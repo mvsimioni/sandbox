@@ -42,7 +42,6 @@ def ri_spec() -> Spec:
     s += trip("pfix", "Occupancy, stated", "persons", 9)
     s += trip("dens", "Occupancy density", "persons / 100 m²", 10)
     s += [("obasis", "Occupancy source", "", 19), ("people", "Occupancy used", "persons", 9)]
-    s += trip("iof", "Intermittent occupancy factor", "–", 10)
     s += trip("act", "Activity", "", 16)
     s += trip("hours", "Operation time", "h / day", 10)
     s += trip("light", "Lighting", "W/m²", 9)
@@ -101,7 +100,7 @@ ENG: List[Tuple[str, str, str, float, str, str]] = [
     ("vol", "Volume", "m³", 9, "C", "ROOM DETAILS"),
     ("glz", "Glazing", "m²", 8, "L", "ROOM DETAILS"), ("wall", "External wall", "m²", 8, "L", "ROOM DETAILS"),
     ("roof", "Roof", "m²", 8, "L", "ROOM DETAILS"), ("nenv", "Envelope rows", "no.", 7, "C", "ROOM DETAILS"),
-    ("occ", "Occupancy", "persons", 9, "L", "MINIMUM AIR REQUIREMENTS"), ("iof", "I.O.F.", "–", 7, "L", "MINIMUM AIR REQUIREMENTS"),
+    ("occ", "Occupancy", "persons", 9, "L", "MINIMUM AIR REQUIREMENTS"),
     ("oa_ach", "Min outdoor air", "ACH", 8, "L", "MINIMUM AIR REQUIREMENTS"),
     ("oa_lpp", "Outdoor air per person", "L/s", 8, "L", "MINIMUM AIR REQUIREMENTS"),
     ("oa_lpm2", "Outdoor air per area", "L/s per m²", 8, "L", "MINIMUM AIR REQUIREMENTS"),
