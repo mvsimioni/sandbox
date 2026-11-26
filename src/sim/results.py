@@ -93,7 +93,7 @@ def workbook_duties(issue: Path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--issue", default="out/issue/DRAFT_2026-11-26_R17")
+    ap.add_argument("--issue", default="out/issue/DRAFT_2026-11-26_R18")
     ap.add_argument("--sql", default=str(SIM / "run_sizing/eplusout.sql"))
     ap.add_argument("--idf", default=str(SIM / "AIGH_IP.idf"))
     a = ap.parse_args()
