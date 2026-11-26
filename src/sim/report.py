@@ -1,0 +1,127 @@
+"""Design-day report workbook of the thermal model (D-109): out/sim/AIGH_IP_thermal_model_design_days.xlsx.
+
+Sheets: Summary (block peak per design day, matched-unit totals), Units (results_design_days.csv), Not matched (units in one source
+only), Assumptions (every assumed or placeholder input of the model). Values only; sources named per sheet.
+"""
+from __future__ import annotations
+
+import csv
+import sqlite3
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
+
+ROOT = Path(__file__).resolve().parent.parent.parent
+SIM = ROOT / "out/sim"
+SQL = SIM / "run_sizing_min/eplusout.sql"
+
+DAYS = [("SS553", "SS 553:2026 cl. 5.4.4 cooling day, 33 °C DB / 27 °C WB, 21 May (basis)"),
+        ("DP", "ASHRAE 2025 HoF Changi 0.4 % dehumidification, DP 27.2 °C / MCDB 29.4 °C (comparison)"),
+        ("WB", "ASHRAE 2025 HoF Changi 0.4 % evaporation, WB 28.0 °C / MCDB 30.8 °C (comparison)")]
+
+ASSUMPTIONS = [
+    ("Geometry", "One thermal zone per storey and unit; outline = union of the zoning room outlines of the unit, simplified 0.25 m", "Zoning R11 (D-108)"),
+    ("Geometry", "Floor-to-floor heights from the FFL printed on the zone plans; L08 from the elevation register", "IP_zone plans"),
+    ("Geometry", "External wall = wall within 0.8 m of the storey footprint edge; this also catches walls at shafts, voids and light wells "
+                 "(over-counts envelope on internal zones)", "ASSUMPTION"),
+    ("Geometry", "Sliver surfaces below 0.05 m² removed (44); 133 zones not fully enclosed (volume only)", "Model cleaning"),
+    ("Envelope", "Wall U, WWR and SC per orientation from the ETTV report; glazing U 1.65 W/m²K; SHGC = 0.87 × SC", "ETTV report"),
+    ("Envelope", "Roof U 0.5 W/m²K", "ASSUMPTION: no roof U in the project documents"),
+    ("Envelope", "Basement external walls and ground floors adiabatic", "ASSUMPTION"),
+    ("Envelope", "Walls to rooms not modelled (MV, NV, unconditioned) adiabatic", "ASSUMPTION"),
+    ("Solar", "No mutual shading of building wings (MinimalShadowing); conservative on solar gain", "ASSUMPTION"),
+    ("Loads", "People, lighting, small power, equipment sensible/latent and infiltration per room from the Room Zones sheets, summed per zone",
+     "Workbooks R11"),
+    ("Loads", "All internal loads at 100 % for 24 h (hospital), no diversity", "ASSUMPTION / placeholder for schedules"),
+    ("Outdoor air", "Unit outdoor air from the AHU tab section B, shared over the unit's zones by room supply", "Workbooks R11"),
+    ("HVAC", "Ideal loads air system per zone: no fan heat, no reheat, no coil leaving condition; minimum supply 12 °C", "Model method"),
+    ("HVAC", "Cooling setpoint = supply-weighted design room temperature; dehumidifying humidistat 60 % RH; no humidification",
+     "Workbooks R11 / ASSUMPTION for 60 %"),
+    ("Design days", "Date 21 May, wind and clear-sky tau (0.463 / 2.322) from the Changi TMYx DDY; SS 553 gives no date", "Confirm the date"),
+    ("Weather", "Changi TMYx EPW for the annual run; site from the EPW", "Weather set 26 Nov 2026"),
+    ("Scope", "8 units with no zoning outline not modelled; 117 zones with no room rows carry envelope load only", "See Not matched"),
+]
+
+
+def _sheet(ws, header, rows, widths=None):
+    ws.append(header)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="2F4F6F")
+        c.alignment = Alignment(wrap_text=True, vertical="top")
+    for r in rows:
+        ws.append(r)
+    ws.freeze_panes = "A2"
+    for i, w in enumerate(widths or [], 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+
+def block_peaks():
+    c = sqlite3.connect(SQL)
+    q = """select ep.EnvironmentName, t.Hour, d.Name, sum(r.Value)/1000 from ReportData r
+           join ReportDataDictionary d using(ReportDataDictionaryIndex) join Time t using(TimeIndex)
+           join EnvironmentPeriods ep using(EnvironmentPeriodIndex) where d.Name like 'Zone Ideal Loads%' group by 1,2,3"""
+    D = defaultdict(dict)
+    for env, h, n, v in c.execute(q):
+        D[(env, h)][n] = v
+    out = {}
+    for env in {k[0] for k in D}:
+        k = max((k for k in D if k[0] == env), key=lambda k: D[k]["Zone Ideal Loads Supply Air Total Cooling Rate"])
+        tag = "SS553" if "SS553" in env else ("DP" if "DP=>MDB" in env else "WB")
+        x = D[k]
+        out[tag] = (k[1], x["Zone Ideal Loads Supply Air Total Cooling Rate"], x["Zone Ideal Loads Outdoor Air Total Cooling Rate"],
+                    x["Zone Ideal Loads Supply Air Sensible Cooling Rate"], x["Zone Ideal Loads Supply Air Latent Cooling Rate"])
+    return out
+
+
+def main():
+    rows = list(csv.DictReader((SIM / "results_design_days.csv").open(encoding="utf-8")))
+    f = lambda x, k: float(x[k]) if x.get(k) not in (None, "") else None
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Summary"
+    bp = block_peaks()
+    m = [x for x in rows if f(x, "workbook coil kW (D)")]
+    srows = []
+    for tag, desc in DAYS:
+        h, tot, oa, sen, lat = bp[tag]
+        srows.append([desc, h, round(tot), round(oa), round(sen), round(lat),
+                      round(sum(f(x, f"{tag} coil kW") or 0 for x in m)), round(sum(f(x, f"{tag} room kW") or 0 for x in m))])
+    srows.append(["Workbooks R11, same units: COOLING COIL DUTY (AHU tab section D) / room sensible + latent (section B)", None, None, None,
+                  None, None, round(sum(f(x, "workbook coil kW (D)") for x in m)), round(sum(f(x, "workbook room kW") or 0 for x in m))])
+    _sheet(ws, ["Design day", "Block peak hour", "Block coil load, kW", "of which outdoor air, kW", "Block sensible, kW", "Block latent, kW",
+                f"Coil load, {len(m)} matched units (sum of unit peaks), kW", "Room load, matched units, kW"], srows,
+           [70, 10, 14, 14, 14, 14, 22, 18])
+    ws.append([])
+    ws.append(["Block peak = all 300 modelled units, coincident hour. Matched units = units with a section D duty in the workbooks."])
+    ws.append(["Model coil load has no fan heat and no coil leaving condition; the workbook duty has both."])
+    ws2 = wb.create_sheet("Units")
+    keys = list(rows[0].keys())
+    _sheet(ws2, keys, [[(float(x[k]) if k not in ("unit", "storeys", "workbooks") and x[k] not in ("",) else x[k]) for k in keys] for x in rows],
+           [44] + [12] * (len(keys) - 1))
+    ws3 = wb.create_sheet("Not matched")
+    sys.path.insert(0, str(ROOT))
+    from src.sim.results import workbook_duties
+    wbd = workbook_duties(ROOT / "out/issue/DRAFT_2026-11-26_R11")
+    mu = {x["unit"] for x in rows}
+    nm = [["In the model, no workbook AHU-tab row", x["unit"], x["storeys"], f(x, "rooms_m2"), f(x, "SS553 coil kW")]
+          for x in rows if not f(x, "workbook room kW")]
+    nm += [["In the workbooks, not in the model zoning", u, "", None, round(v["coil_d"] or v["coil_b"], 1)] for u, v in wbd.items() if u not in mu]
+    _sheet(ws3, ["Case", "Unit", "Storeys", "Room area in the workbooks, m²", "Coil load (model SS 553 or workbook), kW"], nm, [40, 60, 12, 16, 18])
+    ws4 = wb.create_sheet("Assumptions")
+    _sheet(ws4, ["Item", "Model input", "Source or status"], ASSUMPTIONS, [14, 110, 40])
+    for w in (ws, ws4):
+        for row in w.iter_rows():
+            for c in row:
+                c.alignment = Alignment(wrap_text=True, vertical="top")
+    out = SIM / "AIGH_IP_thermal_model_design_days.xlsx"
+    wb.save(out)
+    print(out, len(rows), len(nm))
+
+
+if __name__ == "__main__":
+    main()
