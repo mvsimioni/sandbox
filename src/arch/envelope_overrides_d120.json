@@ -581,6 +581,71 @@
    "sector": "E",
    "area_m2": 6.0,
    "evidence": "Part of the set-back shopfront under the canopy fascia in front of retail L02-R177 (about 6 m2 of 25-29 m2 visible; the rest fronts Food Court and BOH, MV; round 2)."
+  },
+  {
+   "id": "OV-C6-R086",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    100000,
+    120000
+   ],
+   "action": "cap_room",
+   "room_id": "L02-R086",
+   "total_m2": 14.5,
+   "evidence": "Council C6 (26 Nov 2026, unanimous after cross-review): the NE curtain wall of the lecture block is drawn as glass (ticked panes, no inner wall; the grey band is the curtain-wall symbol, also in front of the Pre-Function foyer; D-122 covers the stage only, which carries the blackout curtain note). Glass of each room = ticked panes of the L02 row (+23 to +29) over its true plan frontage; the +29 to +32 row and the excess go to an unassigned line (no VOID shown over these rooms on AR-IP-02-03-008). Hold 02.IP.TRED.004: 2.4-2.8 m of chamfer."
+  },
+  {
+   "id": "OV-C6-R087",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    100000,
+    120000
+   ],
+   "action": "cap_room",
+   "room_id": "L02-R087",
+   "total_m2": 38.0,
+   "evidence": "Council C6 (26 Nov 2026, unanimous after cross-review): the NE curtain wall of the lecture block is drawn as glass (ticked panes, no inner wall; the grey band is the curtain-wall symbol, also in front of the Pre-Function foyer; D-122 covers the stage only, which carries the blackout curtain note). Glass of each room = ticked panes of the L02 row (+23 to +29) over its true plan frontage; the +29 to +32 row and the excess go to an unassigned line (no VOID shown over these rooms on AR-IP-02-03-008). Hold 02.IP.TRED.003: about 5.2 m of chamfer + 1.57 m east return, less the unticked fire-access leaf (about 2.5 m2, glazing unknown)."
+  },
+  {
+   "id": "OV-C6-R095",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    100000,
+    120000
+   ],
+   "action": "cap_room",
+   "room_id": "L02-R095",
+   "total_m2": 0.0,
+   "evidence": "Council C6 (26 Nov 2026, unanimous after cross-review): the NE curtain wall of the lecture block is drawn as glass (ticked panes, no inner wall; the grey band is the curtain-wall symbol, also in front of the Pre-Function foyer; D-122 covers the stage only, which carries the blackout curtain note). Glass of each room = ticked panes of the L02 row (+23 to +29) over its true plan frontage; the +29 to +32 row and the excess go to an unassigned line (no VOID shown over these rooms on AR-IP-02-03-008). Sound Lock 02.IP.TRED.010: internal room behind PC200K walls, no facade."
+  },
+  {
+   "id": "OV-C6-R070",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    100000,
+    120000
+   ],
+   "action": "cap_room",
+   "room_id": "L02-R070",
+   "total_m2": 0.0,
+   "evidence": "Council C6 (26 Nov 2026, unanimous after cross-review): the NE curtain wall of the lecture block is drawn as glass (ticked panes, no inner wall; the grey band is the curtain-wall symbol, also in front of the Pre-Function foyer; D-122 covers the stage only, which carries the blackout curtain note). Glass of each room = ticked panes of the L02 row (+23 to +29) over its true plan frontage; the +29 to +32 row and the excess go to an unassigned line (no VOID shown over these rooms on AR-IP-02-03-008). Nursing Room 02.IP.TRED.007: only an unticked fire-access leaf fronts the room (about 2.3 m2, glazing unknown)."
+  },
+  {
+   "id": "OV-C6-R085",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    100000,
+    120000
+   ],
+   "action": "cap_room",
+   "room_id": "L02-R085",
+   "total_m2": 27.4,
+   "evidence": "Council C6 (26 Nov 2026, unanimous after cross-review): the NE curtain wall of the lecture block is drawn as glass (ticked panes, no inner wall; the grey band is the curtain-wall symbol, also in front of the Pre-Function foyer; D-122 covers the stage only, which carries the blackout curtain note). Glass of each room = ticked panes of the L02 row (+23 to +29) over its true plan frontage; the +29 to +32 row and the excess go to an unassigned line (no VOID shown over these rooms on AR-IP-02-03-008). Toilet 02.IP.MAEN.007 (MV): two rows over about 5 m as read."
   }
  ],
  "open": [
@@ -602,6 +667,7 @@
   "Glass outside the courts drawn on the internal sheets with no matching facade step (W-int L06-L07 at 140-164 m, W-int L01 139-164 m, E-int L05-L07 140-147 m, E-int L02 126-147 m): other blocks or facades beyond, not counted.",
   "South L02-L03 154.6-158.6 m: upper row (about 11.5 m2) of the halftone Pre-Function window in the L03 band: Pre-Function or the void above; not counted.",
   "East L02 38.7-51.5 m: set-back shopfront in front of Food Court and BOH (MV), about 20 m2: no cooling load, not counted.",
-  "Slatted window-type modules with an opening-light triangle but no glass ticks in front of occupied rooms on North L04 20-62 m (Chg, Trg, MRI, Lounge; 94 m2 slatted) and South L06 30-62 m (Oper, Sterile Prep; 38 m2): counted as no glass, as on the West elevation."
+  "Slatted window-type modules with an opening-light triangle but no glass ticks in front of occupied rooms on North L04 20-62 m (Chg, Trg, MRI, Lounge; 94 m2 slatted) and South L06 30-62 m (Oper, Sterile Prep; 38 m2): counted as no glass, as on the West elevation.",
+  "NE corner of the lecture block, L02-L03: the +29 to +32 row of the curtain wall (about 45 m2) and the excess taken off the L02 rooms by Council C6 sit on an unassigned line: whether the Holds are double height or the row fronts a ceiling or roof zone needs a section or reflected ceiling plan. Fire-access leaves at R087 (about 2.5 m2) and R070 (about 2.3 m2): glazing not stated."
  ]
 }

@@ -113,6 +113,21 @@ def _overrides(by_st):
                 spread(tgt, g, it["id"])
             else:
                 unplaced.append(it["id"])
+        elif it["action"] == "cap_room":
+            # a ruled glass total for one plan room (all its elevations): its steps are scaled to it; the glass taken off is kept on a
+            # visible line with no room, so the measured total is conserved (Council C6)
+            rid = it["room_id"]
+            mine = [s for s in by_st.get(st, []) if s["room"] == rid]
+            g = sum(s["glass_m2"] for s in mine)
+            if g > 0:
+                f = it["total_m2"] / g if it["total_m2"] < g else 1.0
+                for s in mine:
+                    s["glass_m2"] *= f
+                    s["override"] = (s.get("override", "") + " " + it["id"]).strip()
+                if f < 1.0:
+                    by_st[st].append(dict(storey=st, kind="external", elevation=el, room="", room_name="unassigned (" + it["id"] + ")", sector="",
+                                          x=0, y=0, axis_mm=a[0], depth=0.0, len_m=0.0, proj_m=0.0, cosf=1.0, behind_open="", nx=0.0, ny=0.0,
+                                          hidden=False, glass_m2=g * (1 - f), slat_m2=0.0, on_elevation=True, override=it["id"]))
         elif it["action"] == "add_room":
             # glass of a wall that is behind another part of the building on the elevation but seen on it (e.g. across an open forecourt)
             rid = it["room_id"]
