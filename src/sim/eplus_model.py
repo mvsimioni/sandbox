@@ -457,6 +457,7 @@ def build(issue: Path):
     dw.setDailyDryBulbTemperatureRange(5.8)
     dw.setHumidityConditionType("Wetbulb")
     dw.setWetBulbOrDewPointAtMaximumDryBulb(28.0)
+    dw.setDailyWetBulbTemperatureRange(2.7)
     dw.setBarometricPressure(101245)
     dw.setWindSpeed(3.6)
     dw.setWindDirection(40)
