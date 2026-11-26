@@ -88,7 +88,7 @@ def _overrides(by_st):
                 s["glass_m2"], s["slat_m2"], s["ground"] = 0.0, 0.0, True
                 s["override"] = (s.get("override", "") + " " + it["id"]).strip()
         elif it["action"] == "exclude":
-            for s in rng(st, el, a, vis=False):
+            for s in rng(st, el, a, vis=False, only=set(it["only_rooms"]) if "only_rooms" in it else None):
                 s["glass_m2"] = 0.0
                 s["override"] = (s.get("override", "") + " " + it["id"]).strip()
         elif it["action"] == "add":

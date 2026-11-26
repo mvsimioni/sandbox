@@ -19,6 +19,10 @@ REG = Path("out/registers")
 STOREYS = ["B1", "L01", "L02", "L03", "L04", "L05", "L06", "L07"]
 SECTORS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
 SRC = "ARCH-ELEV"
+# workbook rooms with no plan room that take the facade of a plan room: number -> (storey, plan room, glass factor, facade height m, reason)
+ROOM_MAP = {"TRED 09.03.05": ("L02", "L02-R108", 0.0, 12.0,
+                              "Lecture theatre stage (outline L02-R108, tag S.33): AC; the curtain wall in front of it is not a window, so the facade is wall only "
+                              "(Marcus, 26 Nov 2026, D-122). Height: double-height volume, L02 FFL to L04 FFL (the curtain wall runs about 8.9 m above L02 FFL).")}
 
 
 def _area(r: Dict[str, Any]) -> float:
@@ -53,6 +57,12 @@ def apply(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> List[D
             pid = r.get("plan_room_id")
             if pid and r.get("storey") in STOREYS:
                 groups[(r["storey"], pid)].append(r)
+    for n, d in datasets.items():
+        for r in d["rooms"]:
+            if r.get("number") in ROOM_MAP:
+                st, pid, gf, hh, why = ROOM_MAP[r["number"]]
+                r["_d120_map"] = (gf, hh, why)
+                groups[(st, pid)].append(r)
     log = []
     for (st, pid), rooms in groups.items():
         m = meas.get((st, pid), {})
@@ -69,6 +79,9 @@ def apply(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> List[D
                 f = env.fac.get(sector)
                 L, h = v["facade_m"] * share, v["h"]
                 glass = v["glass"] * share
+                mp = r.get("_d120_map")
+                if mp:
+                    glass, h = glass * mp[0], mp[1]
                 area = L * h
                 wall = max(0.0, area - glass)
                 note = []
@@ -84,8 +97,9 @@ def apply(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> List[D
                     remark=(f"Facade {L:.1f} m on the {sector} facade of plan room {pid}" + (f" ({share:.0%} of it, split by area among {len(rooms)} rooms)" if len(rooms) > 1 else "")
                             + f", storey height {h:g} m; glass {glass:.1f} m² measured on {v['elevations']}" + ("; " + "; ".join(note) if note else "")
                             + (f". U-value and shading coefficient: ETTV report, {sector} facade." if f else ". No ETTV record for this facade.")
-                            + " Forensic envelope review D-120.")))
+                            + " Forensic envelope review D-120." + (" " + r["_d120_map"][2] if r.get("_d120_map") else ""))))
             r["envelope"] = keep + rows
+            r.pop("_d120_map", None)
             if old or rows:
                 log.append(dict(storey=st, plan_room_id=pid, number=r["number"], name=r.get("name", ""),
                                 glass_before=round(sum(float(e["glazing_m2"]) for e in old), 1), glass_after=round(sum(e["glazing_m2"] for e in rows), 1),

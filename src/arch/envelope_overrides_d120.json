@@ -462,10 +462,37 @@
     "L01-R099"
    ],
    "evidence": "Tower 1 entrance glazing read on the NV plaza outline itself; it is the wall of the reception / lobby behind (round 2)."
+  },
+  {
+   "id": "OV-STAGE-E",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    -20000,
+    220000
+   ],
+   "action": "exclude",
+   "only_rooms": [
+    "L02-R108"
+   ],
+   "evidence": "Lecture theatre stage (outline L02-R108): the curtain wall in front of it is not a window (Marcus, 26 Nov 2026, D-122); wall only."
+  },
+  {
+   "id": "OV-STAGE-S",
+   "elevation": "SOUTH ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    -20000,
+    220000
+   ],
+   "action": "exclude",
+   "only_rooms": [
+    "L02-R108"
+   ],
+   "evidence": "Lecture theatre stage (outline L02-R108): the curtain wall in front of it is not a window (Marcus, 26 Nov 2026, D-122); wall only."
   }
  ],
  "open": [
-  "East L02 86.5-105.5 m: about 126 m2 (true area) of curtain wall in front of the lecture theatre stage. The zoning outline in front of it is labelled S.33 (stair, MV) but is the stage; no workbook room carries the stage. Room and mode to be confirmed.",
   "Staff-block bays at grids 14-15 (L04, L05, N and S court walls, about 19.4 m2 each): the internal sections are cut through the staff block, so these ward windows are not drawn. Not added.",
   "South L02-L03 grid 20-20.6: grey curtain wall above the MEP enclosure (about 21.6 + 14 m2); whether it is the Pre-Function wall or a building beyond is not clear.",
   "North L01 Pharmacy: about 66 m2 of hatched (obscured) glazing at grids 10-13; counted opaque.",
