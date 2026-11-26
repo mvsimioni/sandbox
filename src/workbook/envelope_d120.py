@@ -6,7 +6,7 @@ corrections of the review) and the wall is the rest of the facade (facade length
 stay those of the ETTV report for the sector. Where several workbook rooms share one plan room, the facade is split by room area. A room whose
 plan room has no facade carries no facade rows. Roof rows and rows of other building parts are kept.
 
-Applied after consolidation and the zone facade share (D-090); the manual L07 facade rows of D47 (D-114) are applied after this step and govern.
+Applied after consolidation, before the zone facade share (D-090). It also replaces the L07 facade rows of D47 typed by Winson Khoo (D-121).
 """
 from __future__ import annotations
 

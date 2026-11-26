@@ -134,7 +134,8 @@ def apply(datasets: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     used = set()
     # D47
     if "47" in datasets:
-        d47_facade(datasets, log)
+        # D-121 (Marcus, 26 Nov 2026): the L07 facade measured on the elevations (D-120) replaces the facade rows typed by Winson Khoo;
+        # d47_facade() is kept for reference only and is no longer applied
         _sf(datasets["47"], 0.20, SRC["D47"]["id"])
         used.add("D47")
     # D43

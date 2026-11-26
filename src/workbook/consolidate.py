@@ -261,8 +261,8 @@ def main(argv=None) -> int:
     rep["envelope_d120"] = elev_envelope(datasets)
     print(f"envelope from the elevations (D-120): {len(rep['envelope_d120'])} room(s)", flush=True)
     rep["zone_facade"] = share_zone_facade(datasets)
-    from .manual_wk_20261126 import d47_facade, d43_rooms              # D-114: Winson's L07 facade of D47 governs over the zone share;
-    d47_facade(datasets, [])                                           # his D43 room inputs on rooms placed after apply()
+    from .manual_wk_20261126 import d43_rooms                          # D-114: his D43 room inputs on rooms placed after apply();
+                                                                       # his L07 facade of D47 is replaced by the elevations (D-121)
     _l43 = []
     d43_rooms(datasets, _l43)
     print(f"manual changes re-applied after consolidation (D-114): D43 {len(_l43)}", flush=True)
