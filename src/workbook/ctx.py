@@ -55,6 +55,13 @@ BUILTIN_SOURCES.append(
                      "takes recirculated supply from the unit and a dedicated exhaust with no return.",
      "method": "Rule set by the engineer. The class of each room is an assumption, to confirm", "confidence": "medium"})
 
+BUILTIN_SOURCES.append(
+    {"id": "ARCH-ELEV", "document": "Building elevations AR-IP-31-ZZ-001 to -008 (north, south, east, west and the four internal elevations, IP), Rev --, 1:250",
+     "issue": "uploaded 26 Nov 2026", "page": "one sheet per elevation", "location": "glazed panels (filled panes and halftone panes with glass ticks), storey bands between the drawn FFL level lines",
+     "text_as_read": "glass m² per room and facade sector: glass per metre of each elevation at each storey x the length of the room's facade, checked against the AHU zoning plans "
+                     "(forensic envelope review D-120, register src/arch/envelope_overrides_d120.json)",
+     "method": "Measured from the elevation vectors; corrections of the review applied", "confidence": "medium"})
+
 # name: (label, value, unit, code, source, remark)
 DEFAULTS: Dict[str, Tuple] = {
     "SafetyFactor": ("Safety factor on room loads", 0.10, "fraction", "S", "GEN-METHOD", "template convention"),

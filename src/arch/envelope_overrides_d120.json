@@ -1,5 +1,5 @@
 {
- "_about": "Forensic envelope review D-120, round 1 (26 Nov 2026): corrections to the elevation glass read by src.arch.elev_glazing that the drawing conventions do not let a rule detect. Axis = building mm along the elevation (X from grid 2, Y from grid A). Areas are measured on the elevation PDFs (1:250 vectors). 'add' spreads the area over the visible facade steps in the range (rooms found by the inward probe); 'exclude' sets the glass of the range to 0; 'to_storey' moves the glass of a double-height space read in the upper band to the storey of the room.",
+ "_about": "Forensic envelope review D-120, round 1 (26 Nov 2026): corrections to the elevation glass read by src.arch.elev_glazing that the drawing conventions do not let a rule detect. Axis = building mm along the elevation (X from grid 2, Y from grid A). Areas are measured on the elevation PDFs (1:250 vectors). 'add' spreads the area over the visible facade steps in the range (rooms found by the inward probe); 'exclude' sets the glass of the range to 0; 'to_storey' moves the glass of a double-height space read in the upper band to the storey of the room. 'below_ground' marks facade the elevation shows below the ground line: no glass and no exposed wall.",
  "items": [
   {
    "id": "OV-N01-1",
@@ -285,6 +285,72 @@
    "action": "assign",
    "room_id": "L03-R162-T09",
    "evidence": "Facade rooms here are the Urinalysis Bench, corridor and equipment bay of the SPECHEM open lab; Blood Bank L03-R130 is interior (north of an AC corridor)."
+  },
+  {
+   "id": "OV-G-B1-N",
+   "elevation": "NORTH ELEVATION (IP)",
+   "storey": "B1",
+   "axis_mm": [
+    -20000,
+    220000
+   ],
+   "action": "below_ground",
+   "evidence": "B1 is below the ground line on this elevation (earth hatch below FFL 17.00); no exposed facade."
+  },
+  {
+   "id": "OV-G-B1-S",
+   "elevation": "SOUTH ELEVATION (IP)",
+   "storey": "B1",
+   "axis_mm": [
+    -20000,
+    220000
+   ],
+   "action": "below_ground",
+   "evidence": "B1 is below the ground line on this elevation (earth hatch below FFL 17.00); no exposed facade."
+  },
+  {
+   "id": "OV-G-B1-E",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "B1",
+   "axis_mm": [
+    -20000,
+    220000
+   ],
+   "action": "below_ground",
+   "evidence": "B1 is below the ground line on this elevation (earth hatch below FFL 17.00); no exposed facade."
+  },
+  {
+   "id": "OV-G-B1-W",
+   "elevation": "WEST ELEVATION (IP)",
+   "storey": "B1",
+   "axis_mm": [
+    -20000,
+    220000
+   ],
+   "action": "below_ground",
+   "evidence": "B1 is below the ground line on this elevation (earth hatch below FFL 17.00); no exposed facade."
+  },
+  {
+   "id": "OV-G-S01",
+   "elevation": "SOUTH ELEVATION (IP)",
+   "storey": "L01",
+   "axis_mm": [
+    25200,
+    146400
+   ],
+   "action": "below_ground",
+   "evidence": "Grids 5-19 of the L01 band are below the ground line (ground hatch) on the south elevation."
+  },
+  {
+   "id": "OV-G-E01",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L01",
+   "axis_mm": [
+    0,
+    53700
+   ],
+   "action": "below_ground",
+   "evidence": "Ground is at the L02 level for grids A-G on the east elevation; the L01 face there is not exposed."
   }
  ],
  "open": [

@@ -82,7 +82,11 @@ def _overrides(by_st):
     for it in json.loads(OVERRIDES.read_text(encoding="utf-8"))["items"]:
         el, st, a = it["elevation"], it["storey"], it["axis_mm"]
         ss = rng(st, el, a)
-        if it["action"] == "exclude":
+        if it["action"] == "below_ground":
+            for s in rng(st, el, a, vis=False):
+                s["glass_m2"], s["slat_m2"], s["ground"] = 0.0, 0.0, True
+                s["override"] = (s.get("override", "") + " " + it["id"]).strip()
+        elif it["action"] == "exclude":
             for s in rng(st, el, a, vis=False):
                 s["glass_m2"] = 0.0
                 s["override"] = (s.get("override", "") + " " + it["id"]).strip()
@@ -228,11 +232,14 @@ def run():
     unplaced = _overrides(by_st)
     for st, steps in by_st.items():
         steps_all += steps
-        agg = defaultdict(lambda: dict(facade_m=0.0, glass_m2=0.0, slat_m2=0.0, hidden_m=0.0, court_m=0.0, elevations=set()))
+        agg = defaultdict(lambda: dict(facade_m=0.0, glass_m2=0.0, slat_m2=0.0, hidden_m=0.0, court_m=0.0, ground_m=0.0, elevations=set()))
         for s in steps:
             if not s["room"]:
                 continue
             a_ = agg[(s["room"], s["room_name"], s["sector"])]
+            if s.get("ground"):
+                a_["ground_m"] += s["len_m"]
+                continue
             a_["facade_m"] += s["len_m"]
             a_["glass_m2"] += s["glass_m2"]
             a_["slat_m2"] += s["slat_m2"]
@@ -243,14 +250,14 @@ def run():
         with (REG / f"room_glazing_{st}.csv").open("w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
             w.writerow(["storey", "room_id", "room_name", "sector", "facade_m", "storey_h_m", "facade_area_m2", "glass_m2", "slatted_m2", "glass_ratio",
-                        "hidden_m", "court_m", "elevations"])
+                        "hidden_m", "court_m", "below_ground_m", "elevations"])
             for (rid, nm, sec), v in sorted(agg.items()):
                 fa = v["facade_m"] * h
                 w.writerow([st, rid, nm, sec, round(v["facade_m"], 2), h, round(fa, 1), round(v["glass_m2"], 2), round(v["slat_m2"], 2),
-                            round(v["glass_m2"] / fa, 3) if fa else 0, round(v["hidden_m"], 2), round(v["court_m"], 2),
+                            round(v["glass_m2"] / fa, 3) if fa else 0, round(v["hidden_m"], 2), round(v["court_m"], 2), round(v["ground_m"], 2),
                             "; ".join(sorted(v["elevations"]))])
     with (REG / "room_glazing_steps.csv").open("w", newline="", encoding="utf-8") as fh:
-        keys = ["storey", "kind", "elevation", "room", "room_name", "sector", "x", "y", "axis_mm", "len_m", "proj_m", "glass_m2", "slat_m2", "hidden", "behind_open", "override"]
+        keys = ["storey", "kind", "elevation", "room", "room_name", "sector", "x", "y", "axis_mm", "len_m", "proj_m", "glass_m2", "slat_m2", "hidden", "behind_open", "override", "ground"]
         w = csv.DictWriter(fh, fieldnames=keys, extrasaction="ignore")
         w.writeheader()
         w.writerows(steps_all)

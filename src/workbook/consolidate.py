@@ -257,6 +257,9 @@ def main(argv=None) -> int:
     rep["room_ids"] = ids
     rep["services"] = svc
     rep["mot_tags"] = tagfix
+    from .envelope_d120 import apply as elev_envelope                 # D-120: facade glass measured on the elevations
+    rep["envelope_d120"] = elev_envelope(datasets)
+    print(f"envelope from the elevations (D-120): {len(rep['envelope_d120'])} room(s)", flush=True)
     rep["zone_facade"] = share_zone_facade(datasets)
     from .manual_wk_20261126 import d47_facade, d43_rooms              # D-114: Winson's L07 facade of D47 governs over the zone share;
     d47_facade(datasets, [])                                           # his D43 room inputs on rooms placed after apply()
