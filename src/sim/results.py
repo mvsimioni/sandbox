@@ -26,7 +26,24 @@ VARS = {"Zone Ideal Loads Supply Air Total Cooling Rate": "tot", "Zone Ideal Loa
         "Zone Ideal Loads Supply Air Latent Cooling Rate": "lat", "Zone Ideal Loads Outdoor Air Total Cooling Rate": "oa"}
 
 
-def sim_hourly(sql: Path):
+def ideal_to_zone(idf: Path):
+    """ideal loads system name -> zone name, from ZoneHVAC:EquipmentConnections and ZoneHVAC:EquipmentList."""
+    import re
+    t = idf.read_text(encoding="utf-8")
+    field = lambda body: [x.split("!")[0].strip().rstrip(",;") for x in body.splitlines()]
+    lst2zone, eq2lst = {}, {}
+    for m in re.finditer(r"(?m)^ZoneHVAC:EquipmentConnections,\n(.*?;)", t, re.S):
+        f = field(m.group(1))
+        lst2zone[f[1].upper()] = f[0].upper()
+    for m in re.finditer(r"(?m)^ZoneHVAC:EquipmentList,\n(.*?;)", t, re.S):
+        f = field(m.group(1))
+        for i in range(2, len(f) - 1, 6):
+            if f[i] == "ZoneHVAC:IdealLoadsAirSystem":
+                eq2lst[f[i + 1].upper()] = f[0].upper()
+    return {eq: lst2zone[l] for eq, l in eq2lst.items() if l in lst2zone}
+
+
+def sim_hourly(sql: Path, emap: dict):
     con = sqlite3.connect(sql)
     q = """select ep.EnvironmentName, d.KeyValue, d.Name, t.TimeIndex, r.Value
            from ReportData r join ReportDataDictionary d on r.ReportDataDictionaryIndex = d.ReportDataDictionaryIndex
@@ -34,7 +51,7 @@ def sim_hourly(sql: Path):
            where d.ReportingFrequency = 'Hourly' and d.Name in ({})""".format(",".join("?" * len(VARS)))
     data = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))   # env -> key(zone, var) -> t -> W
     for env, key, name, t, v in con.execute(q, list(VARS)):
-        zone = key.upper().removesuffix(" IDEAL LOADS AIR SYSTEM")
+        zone = emap.get(key.upper(), key.upper())
         data[env][(zone, VARS[name])][t] += v
     return data
 
@@ -78,8 +95,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--issue", default="out/issue/DRAFT_2026-11-26_R11")
     ap.add_argument("--sql", default=str(SIM / "run_sizing/eplusout.sql"))
+    ap.add_argument("--idf", default=str(SIM / "AIGH_IP.idf"))
     a = ap.parse_args()
-    data = sim_hourly(Path(a.sql))
+    data = sim_hourly(Path(a.sql), ideal_to_zone(Path(a.idf)))
     zu = zone_units()
     wb = workbook_duties(ROOT / a.issue)
     envs = sorted(data)
@@ -121,7 +139,7 @@ def main():
     tot = defaultdict(float)
     for r in rows:
         for k, v in r.items():
-            if isinstance(v, float) and k.endswith("kW"):
+            if isinstance(v, float) and " kW" in k:
                 tot[k] += v
     print("envs", envs)
     print({k: round(v) for k, v in tot.items()})

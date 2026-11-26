@@ -473,14 +473,17 @@ def build(issue: Path):
     for v in ("Zone Ideal Loads Supply Air Total Cooling Rate", "Zone Ideal Loads Supply Air Sensible Cooling Rate",
               "Zone Ideal Loads Supply Air Latent Cooling Rate", "Zone Ideal Loads Outdoor Air Total Cooling Rate", "Zone Air Temperature",
               "Zone Air Relative Humidity"):
-        ov = os_.model.OutputVariable(v, m)
-        ov.setReportingFrequency("Hourly")
+        pass  # written as IDF text below (the 3.9 translator dropped the OutputVariable objects)
     m.getOutputControlReportingTolerances()
     os_.model.OutputTableSummaryReports  # noqa
     m.save(os_.path(str(OUT / "AIGH_IP.osm")), True)
     ft = os_.energyplus.ForwardTranslator()
     ws = ft.translateModel(m)
     idf = str(ws)
+    idf += "".join(f"\nOutput:Variable,\n  *,\n  {v},\n  Hourly;\n" for v in (
+        "Zone Ideal Loads Supply Air Total Cooling Rate", "Zone Ideal Loads Supply Air Sensible Cooling Rate",
+        "Zone Ideal Loads Supply Air Latent Cooling Rate", "Zone Ideal Loads Outdoor Air Total Cooling Rate", "Zone Air Temperature",
+        "Zone Air Relative Humidity"))
     idf += "\nOutput:Table:SummaryReports,\n  AllSummary,\n  ZoneComponentLoadSummary;\n\nOutputControl:Table:Style,\n  CommaAndHTML;\n\nOutput:SQLite,\n  SimpleAndTabular;\n"
     (OUT / "AIGH_IP.idf").write_text(idf, encoding="utf-8")
     errs = [str(e.logMessage()) for e in ft.errors()]
