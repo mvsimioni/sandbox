@@ -229,6 +229,9 @@ def main(argv=None) -> int:
     cap["unit_rows_made"] += ensure_unit_rows(datasets)
     from .link_rooms import link as link_free                         # D-103: rooms with no unit linked to the latest zoning
     links = link_free(datasets)
+    from ..arch.apply import workbooks as arch_links                  # D-107: room tags of the part plans place each room on its plan room
+    alog = arch_links(datasets)
+    print(f"rooms placed by the part-plan tags (D-107): {len(alog)}; unit changed for {sum(1 for x in alog if x['changed'] == 'Y')}", flush=True)
     cap["unit_rows_made"] += ensure_unit_rows(datasets)
     from .iof_overrides import apply as iof_set                       # D-106: occupancy factors typed by the engineer
     print(f"intermittent occupancy factors (D-106): {len(iof_set(datasets))} room(s)", flush=True)
