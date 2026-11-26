@@ -9,10 +9,12 @@ storey pipeline and before gap_fill (gap fills are taken off first; gap_fill add
 3. Loading dock: the lorry bays (north and south rows) are open floor of the loading / unloading area (B2-R109, MV) and join it; the outdoor
    corner by the landscape feature (north-east of the dock) is not floor.
 After gap_fill (``post``), from the mark-ups and answers of 26 Nov 2026:
-4. Service corridor with the 1:25 ramp, the In-house Laundry (HOSP 01.B2.01, no room outline) and the open floor east of the toilets:
-   one area on AHU-B-B1-B2COR-01 (drawn on B2-R063 SVC), no holes.
+4. Service corridor with the 1:25 ramp (from the toilet wall to the stair) and the In-house Laundry (HOSP 01.B2.01, no room outline):
+   one area on AHU-B-B1-B2COR-01 (drawn on B2-R063 SVC), no holes. The right-hand toilet B2-R048 runs down to its wall (its outline
+   stopped at a dashed overhead line). The stair and the outdoor area east of the toilets are not zoned.
 5. Ramp B2-R049: not zoned (vehicle ramp), not drawn.
-6. Lobes over the walls removed: pharmacy hall (opening of 1.2 m); B2-R065 SVC and B2-R097 Pantry back to their wall-face regions.
+6. Lobes over the walls removed: pharmacy hall (opening of 1.2 m); B2-R065 SVC, B2-R076 Off (porter office) and B2-R097 Pantry back to their wall-face
+   regions.
 7. The open strip between the FLL / IT closet and the pharmacy hall is the MV service corridor (B2-R111).
 Order: run() -> python3 -m src.zoning.gap_fill -> post().
 """
@@ -35,7 +37,9 @@ BAY_ROW_S = (1762.0, 1074.0, 2190.0, 1172.0)       # pv box of the south lorry-b
 DOCK_BOX = (1730.0, 785.0, 2405.0, 1176.0)         # pv box of the loading / unloading area with both bay rows
 DOCK_OUT = (2200.0, 760.0, 2420.0, 843.0)          # outdoor corner by the landscape feature, north-east of the dock (not floor)
 STRIP_BOX = (722.0, 515.0, 770.0, 790.0)           # open strip between the FLL / IT closet and the pharmacy hall: MV service corridor (B2-R111)
-SVC_BOX = (1612.0, 488.0, 2062.0, 706.0)           # service corridor with the 1:25 ramp, In-house Laundry, open floor east of the toilets
+SVC_BOXES = [(1612.0, 488.0, 1760.0, 706.0),       # In-house Laundry and the west end of the service corridor
+             (1760.0, 533.0, 2015.0, 706.0)]       # service corridor with the 1:25 ramp, from the toilet wall (pv y 532) to the stair
+TOILET_R048 = (1891.0, 500.0, 1981.0, 532.0)       # right-hand toilet: its outline stopped at a dashed overhead line (y 507); wall at y 532
 
 
 def _g(s):
@@ -124,9 +128,9 @@ def post(dry: bool = False) -> dict:
     wk = {r["room_id"]: r for r in csv.DictReader((REG / "room_polygons_B2_wkt.csv").open(encoding="utf-8"))}
     log = {}
     # 6 lobes over the walls
-    for rid in ("B2-R065", "B2-R051-T08"):
+    for rid in ("B2-R065", "B2-R076", "B2-R051-T08"):
         g = _g(by[rid]["polygon_pv_wkt"])
-        if rid == "B2-R065":                       # narrow room: back to its wall-face region
+        if rid in ("B2-R065", "B2-R076"):          # back to its wall-face region (B2-R076 porter office: fill spilled onto the stair landing)
             g1 = _poly(g.intersection(_g(wk[rid]["wall_face_wkt_pv"]).buffer(0.3 * m, join_style="mitre")))
         else:
             g1 = _poly(g.buffer(-1.2 * m, join_style="mitre").buffer(1.2 * m, join_style="mitre"))
@@ -151,7 +155,17 @@ def post(dry: bool = False) -> dict:
     r63 = by["B2-R063"]
     g63 = _g(r63["polygon_pv_wkt"])
     # the plate inside the corridor box: what the rooms around it do not cover (walls under 0.8 m stay out)
-    opn = box(*SVC_BOX).difference(rest.buffer(0.3)).difference(shaft)
+    # the right-hand toilet B2-R048 runs down to its wall (the dashed overhead line at y 507 is not a space boundary)
+    r48 = by["B2-R048"]
+    g48 = _g(r48["polygon_pv_wkt"])
+    oth = shapely.union_all([_g(r["polygon_pv_wkt"]) for r in rows if r.get("polygon_pv_wkt") and r["room_id"] not in ("B2-R048", "B2-R063")])
+    g48b = _poly(shapely.union_all([g48, box(*TOILET_R048).difference(oth.buffer(0.3))]))
+    r48["polygon_pv_wkt"] = shapely.to_wkt(g48b, rounding_precision=2)
+    r48["flags"] = ((r48.get("flags") or "") + f" | {FLAG}: outline down to the toilet wall (dashed overhead line is not a space boundary)").strip(" |")
+    log["B2-R048_added_m2"] = round((g48b.area - g48.area) * k2, 1)
+    rest = shapely.union_all([rest, g48b])
+    g63 = _poly(g63.difference(g48b.buffer(0.3)))
+    opn = shapely.union_all([box(*b_) for b_ in SVC_BOXES]).difference(rest.buffer(0.3)).difference(shaft)
     opn = opn.buffer(-0.4 * m).buffer(0.4 * m)
     pcs = [q for q in getattr(opn, "geoms", [opn]) if q.geom_type == "Polygon" and q.area * k2 >= 2.0]
     g63b = _poly(shapely.union_all([g63] + [q.buffer(0.35, join_style="mitre") for q in pcs]))
@@ -173,7 +187,7 @@ def post(dry: bool = False) -> dict:
     from .open_region import _affine
     M_ = _affine(rows)
     import shapely.affinity as _af
-    for rid in ("B2-R065", "B2-R051-T08", "B2-R097", "B2-R049", "B2-R063", "B2-R111"):
+    for rid in ("B2-R065", "B2-R076", "B2-R051-T08", "B2-R097", "B2-R049", "B2-R063", "B2-R111", "B2-R048"):
         r = by[rid]
         r["zoning_building_mm_wkt"] = (shapely.to_wkt(_af.affine_transform(_g(r["polygon_pv_wkt"]), [M_[0, 0], M_[1, 0], M_[0, 1], M_[1, 1], M_[2, 0], M_[2, 1]]),
                                                      rounding_precision=0) if r["polygon_pv_wkt"] else "")
