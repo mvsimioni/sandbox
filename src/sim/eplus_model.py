@@ -522,7 +522,16 @@ def build(issue: Path):
     ws = ft.translateModel(m)
     idf = str(ws)
     # the translator may already write these single-instance objects: keep only the ones written below
-    idf = re.sub(r"(?ms)^\s*(Output:Table:SummaryReports|OutputControl:Table:Style|Output:SQLite),.*?;\s*$", "", idf)
+    keep, skip = [], False
+    for ln in idf.splitlines():
+        if not skip and ln.strip().split(",")[0] in ("Output:Table:SummaryReports", "OutputControl:Table:Style", "Output:SQLite"):
+            skip = True
+        if skip:
+            if ";" in ln.split("!")[0]:
+                skip = False
+            continue
+        keep.append(ln)
+    idf = "\n".join(keep) + "\n"
     idf += "".join(f"\nOutput:Variable,\n  *,\n  {v},\n  Hourly;\n" for v in (
         "Zone Ideal Loads Supply Air Total Cooling Rate", "Zone Ideal Loads Supply Air Sensible Cooling Rate",
         "Zone Ideal Loads Supply Air Latent Cooling Rate", "Zone Ideal Loads Outdoor Air Total Cooling Rate", "Zone Air Temperature",
