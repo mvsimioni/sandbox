@@ -60,7 +60,10 @@ P1 = ("REPLY REV 1 (27 Nov 2026). This reply supersedes the reply of 25 Nov 2026
       "Design basis: page 3. Room airflows: page 4. Equipment schedule with the corrected values of this AHU: pages 5 and 6 (these replace the values of the "
       "tender Equipment Schedule for this AHU).\n"
       "Contractor to produce the air-side schematic shop drawing from these airflows for the Engineer's review, and to submit the external static pressure (ESP) "
-      "calculation to confirm the ESP.")
+      "calculation to confirm the ESP.\n"
+      f"4. Cost impact: there will be a cost omission from the Tender Basis. Against the tender Equipment Schedule for this AHU (supply air 9,000 L/s, cooling "
+      f"600 kW, reheat 600 kW), the AHU reduces to {S_SUP:,} L/s supply air, {S_COIL} kW cooling and {S_RH} kW reheat (outdoor air {S_OA:,} L/s against 307 L/s "
+      "in the tender). Contractor to submit the cost omission for the Engineer's review.")
 
 BASIS = f"""Reply Rev 1 (27 Nov 2026) to AH-C2-RCC-RFI-ME-0274. Unit: AHU-B-06-06STAFF-01 (L6 ASW - Staff Area).
 Supersedes the values of the reply of 25 Nov 2026.
@@ -155,9 +158,25 @@ def text_page(d, title, text, size):
 
 
 def schedule_page(d, src, pno, changes, title):
-    d.insert_pdf(src, from_page=pno, to_page=pno)
-    p = d[-1]
+    """Only the column headings and the row of this AHU: the other rows and the sheet notes are removed (redacted) from a working copy,
+    and the two bands are placed on a new page; the corrected values are text boxes over the printed cells."""
+    tmp = pymupdf.open()
+    tmp.insert_pdf(src, from_page=pno, to_page=pno)
+    p = tmp[0]
+    W, H = p.rect.width, p.rect.height
     hit = p.search_for(TAG)[0]
+    ys = sorted({round(w[1], 1) for w in p.get_text("words") if w[4].startswith(("AHU-", "PAHU-", "FCU-"))})
+    first = ys[0]
+    hdr_b = first - 1.5
+    row = pymupdf.Rect(0, hit.y0 - 2.2, W, hit.y1 + 2.2)
+    for r in (pymupdf.Rect(0, hdr_b, W, row.y0), pymupdf.Rect(0, row.y1, W, H)):
+        p.add_redact_annot(r, fill=(1, 1, 1))
+    p.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_REMOVE, graphics=pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED)
+    top = 40
+    q = d.new_page(width=W, height=top + hdr_b + row.height + 30)
+    q.show_pdf_page(pymupdf.Rect(0, top, W, top + hdr_b), tmp, 0, clip=pymupdf.Rect(0, 0, W, hdr_b))
+    q.show_pdf_page(pymupdf.Rect(0, top + hdr_b, W, top + hdr_b + row.height), tmp, 0, clip=row)
+    dy = top + hdr_b - row.y0
     yc = (hit.y0 + hit.y1) / 2
     words = sorted((w for w in p.get_text("words") if abs((w[1] + w[3]) / 2 - yc) < 3), key=lambda w: w[0])
     i = 0
@@ -166,15 +185,41 @@ def schedule_page(d, src, pno, changes, title):
             i += 1
         w = words[i]
         i += 1
-        r = pymupdf.Rect(w[0] - 2.5, w[1], w[2] + 2.5, w[3] + 2)
-        box(p, r, new, max(4, (w[3] - w[1]) * 0.82), fill=(1, 1, 1), align=1)
-    sq = p.add_rect_annot(pymupdf.Rect(words[0][0] - 3, hit.y0 - 2, words[-1][2] + 3, hit.y1 + 2))
+        r = pymupdf.Rect(w[0] - 2.5, w[1] + dy, w[2] + 2.5, w[3] + 2 + dy)
+        box(q, r, new, max(4, (w[3] - w[1]) * 0.82), fill=(1, 1, 1), align=1)
+    sq = q.add_rect_annot(pymupdf.Rect(words[0][0] - 3, hit.y0 - 2 + dy, words[-1][2] + 3, hit.y1 + 2 + dy))
     sq.set_colors(stroke=RED); sq.set_border(width=0.6); sq.set_info(title="Beca"); sq.update()
-    box(p, pymupdf.Rect(40, 14, p.rect.width - 40, 34), title, 9, "hebo")
+    box(q, pymupdf.Rect(40, 10, W - 40, 32), title, 9, "hebo")
+
+
+def zoning_page(d, pno):
+    """AHU zoning: only the area served by this AHU (zone of AHU-B-06-06STAFF-01, GL 13~18 / K~S). The labels of the other units, the rest of the
+    storey sheet, its legend and its notes are removed (redacted); the served area is placed on a new page with a caption."""
+    tmp = pymupdf.open()
+    tmp.insert_pdf(d, from_page=pno, to_page=pno)
+    pg = tmp[0]
+    keep = pymupdf.Rect(1276, 504, 2252, 1678)          # display coordinates (pt) of the blue zone with a margin
+    for t in ("AHU-B-07-06ADMIT-02", "AHU-B-07-06SLEEP-01", "FCU-B-06-06COR-01A/B", "FCU duty/standby", "(tag to confirm)"):
+        for r in pg.search_for(t):
+            pg.add_redact_annot(r, fill=(1, 1, 1))
+    R, M = pg.rect, pg.derotation_matrix                # the sheet is rotated: these areas go in unrotated coordinates
+    for r in (pymupdf.Rect(0, 0, R.width, keep.y0), pymupdf.Rect(0, keep.y1, R.width, R.height),
+              pymupdf.Rect(0, keep.y0, keep.x0, keep.y1), pymupdf.Rect(keep.x1, keep.y0, R.width, keep.y1)):
+        pg.add_redact_annot((r * M).normalize(), fill=(1, 1, 1))
+    pg.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_REMOVE, graphics=pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED)
+    top = 50
+    q = d.new_page(pno=pno + 1, width=keep.width, height=keep.height + top)
+    pg.set_cropbox((keep * M).normalize())
+    pix = pg.get_pixmap(dpi=200)                      # image of the cleaned area only: nothing of the other areas stays in the file
+    q.insert_image(pymupdf.Rect(0, top, keep.width, keep.height + top), pixmap=pix)
+    box(q, pymupdf.Rect(20, 12, keep.width - 20, 44),
+        "AHU zoning, 6th storey: area served by AHU-B-06-06STAFF-01 (shaded blue): Surgery Admin Area and rooms adjacent to the AGV Lift Lobbies", 11, "hebo")
+    d.delete_page(pno)
 
 
 d = pymupdf.open(BASE)
 d.delete_pages(list(range(2, len(d))))
+zoning_page(d, 1)
 pg = d[0]
 # the base is flattened: the reply text is page text; it is removed (text only, the form lines stay) and the new reply is a text box
 blk = [b for b in pg.get_text("blocks") if "Serving AHU" in b[4]]
