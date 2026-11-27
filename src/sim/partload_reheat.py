@@ -122,7 +122,9 @@ def read_workbook(path):
     return [u for u in units.values() if u["rooms"] and u["t_coil"] and u["oa"]], sup_t
 
 
-def evaluate(u, t_room_supply):
+def evaluate(u, t_room_supply, coil_leaving=None, oa_hourly=None, ret_locals=False):
+    """coil_leaving: dew-point coil leaving temperature when it is below the supply temperature less fan rise (central reheat between);
+    oa_hourly: outdoor-air intake by hour (reset); ret_locals: return the local arrays."""
     wx, I, fac, weekday, work = _G["wx"], _G["I"], _G["fac"], _G["weekday"], _G["work"]
     rooms = u["rooms"]
     n, H = len(rooms), len(wx["db"])
@@ -166,7 +168,7 @@ def evaluate(u, t_room_supply):
     tmax = np.array([r["tmax"] if r.get("tmax") is not None else 30 for r in rooms], float)[:, None]
     rhmax = np.array([(r["rhmax"] or 100) / 100 for r in rooms], float)[:, None]
     vdes = vmax.sum() * (1 + LEAK)
-    oa = min(oa, vdes)
+    oa = np.minimum(oa_hourly, vdes) if oa_hourly is not None else min(oa, vdes)
     crit = np.array([r.get("tmin") is not None or r.get("rhmax") is not None for r in rooms])
     hours_eval = np.where(h24[:, None], True, work[None, :]) & crit[:, None]
 
@@ -182,7 +184,7 @@ def evaluate(u, t_room_supply):
         for _ in range(4):
             w_ret = (V * w_room).sum(0) / V.sum(0)
             w_mix = (oa * w_oa + (vahu - oa) * w_ret) / vahu
-            w_sup = np.minimum(w_mix, w_of(t_coil, RH_COIL))
+            w_sup = np.minimum(w_mix, w_of(t_coil if coil_leaving is None else coil_leaving, RH_COIL))
             w_room = w_sup + Ql / (3010 * V)
         return V, vahu, T, rh_of(T, w_room)
 
@@ -217,7 +219,7 @@ def evaluate(u, t_room_supply):
     vav_any = bool(vav.any())
     # schedule-free installed terminal reheat (C7): zero internal load at the VAV minimum
     ts_min = t_coil + fan * (min(vmin.sum() * (1 + LEAK), vdes) / vdes) ** 2
-    w_s = w_of(t_coil, RH_COIL)
+    w_s = w_of(t_coil if coil_leaving is None else coil_leaving, RH_COIL)
     pv0 = w_s * 101.325 / (0.622 + w_s)
     a0 = np.log(np.maximum(pv0 / rhmax[:, 0], 1e-6) / 0.61094)
     t_rh0 = 243.04 * a0 / (17.625 - a0)
@@ -252,6 +254,8 @@ def evaluate(u, t_room_supply):
                      central_humid=round(float(((RHr[i] > rhmax[i] + 0.005))[hours_eval[i]].mean()), 4) if hours_eval[i].any() else None,
                      criteria=bool(crit[i]), target_degC=round(float(tgt0[i]), 1) if crit[i] else None,
                      terminal_reheat_kW=round(float(qB[i].max()), 2), installed_kW=round(float(q_inst[i]), 2)) for i in range(n)]
+    if ret_locals:
+        return res, per_room, locals()
     return res, per_room, vav_any
 
 
