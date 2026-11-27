@@ -557,6 +557,6 @@ def build(issue: Path):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--issue", default="out/issue/DRAFT_2026-11-26_R19")
+    ap.add_argument("--issue", default="out/issue/DRAFT_2026-11-27_R20")
     a = ap.parse_args()
     print(json.dumps(build(ROOT / a.issue), indent=1))

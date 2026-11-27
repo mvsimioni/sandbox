@@ -18,7 +18,7 @@ from openpyxl.utils import get_column_letter
 ROOT = Path(__file__).resolve().parent.parent.parent
 SIM = ROOT / "out/sim"
 SQL = SIM / "run_sizing_min/eplusout.sql"
-ISSUE = "out/issue/DRAFT_2026-11-26_R19"
+ISSUE = "out/issue/DRAFT_2026-11-27_R20"
 
 DAYS = [("SS553", "SS 553:2026 cl. 5.4.4 cooling day, 33 °C DB / 27 °C WB, 21 May (basis)"),
         ("DP", "ASHRAE 2025 HoF Changi 0.4 % dehumidification, DP 27.2 °C / MCDB 29.4 °C (comparison)"),
@@ -42,12 +42,12 @@ ASSUMPTIONS = [
     ("Envelope", "Walls to rooms not modelled (MV, NV, unconditioned) adiabatic", "ASSUMPTION"),
     ("Solar", "No mutual shading of building wings (MinimalShadowing); conservative on solar gain", "ASSUMPTION"),
     ("Loads", "People, lighting, small power, equipment sensible/latent and infiltration per room from the Room Zones sheets, summed per zone",
-     "Workbooks R19"),
+     "Workbooks R20"),
     ("Loads", "All internal loads at 100 % for 24 h (hospital), no diversity", "ASSUMPTION / placeholder for schedules"),
-    ("Outdoor air", "Unit outdoor air from the AHU tab section B, shared over the unit's zones by room supply", "Workbooks R19"),
+    ("Outdoor air", "Unit outdoor air from the AHU tab section B, shared over the unit's zones by room supply", "Workbooks R20"),
     ("HVAC", "Ideal loads air system per zone: no fan heat, no reheat, no coil leaving condition; minimum supply 12 °C", "Model method"),
     ("HVAC", "Cooling setpoint = supply-weighted design room temperature; dehumidifying humidistat 60 % RH; no humidification",
-     "Workbooks R19 / ASSUMPTION for 60 %"),
+     "Workbooks R20 / ASSUMPTION for 60 %"),
     ("Design days", "Date 21 May, wind and clear-sky tau (0.463 / 2.322) from the Changi TMYx DDY; SS 553 gives no date", "Confirm the date"),
     ("Weather", "Changi TMYx EPW for the annual run; site from the EPW", "Weather set 26 Nov 2026"),
     ("Scope", "8 units with no zoning outline not modelled; 117 zones with no room rows carry envelope load only", "See Not matched"),
@@ -130,7 +130,7 @@ def main():
         h, tot, oa, sen, lat = bp[tag]
         srows.append([desc, h, round(tot), round(oa), round(sen), round(lat),
                       round(sum(f(x, f"{tag} coil kW") or 0 for x in m)), round(sum(f(x, f"{tag} room kW") or 0 for x in m))])
-    srows.append(["Workbooks R19, same units: COOLING COIL DUTY (AHU tab section D) / room sensible + latent (section B)", None, None, None,
+    srows.append(["Workbooks R20, same units: COOLING COIL DUTY (AHU tab section D) / room sensible + latent (section B)", None, None, None,
                   None, None, round(sum(f(x, "workbook coil kW (D)") for x in m)), round(sum(f(x, "workbook room kW") or 0 for x in m))])
     _sheet(ws, ["Design day", "Block peak hour", "Block coil load, kW", "of which outdoor air, kW", "Block sensible, kW", "Block latent, kW",
                 f"Coil load, {len(m)} matched units (sum of unit peaks), kW", "Room load, matched units, kW"], srows,
