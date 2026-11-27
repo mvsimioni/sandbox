@@ -54,6 +54,21 @@ ASSUMPTIONS = [
 ]
 
 
+def _neutral_props(path):
+    """Issued files name no tools: the application entry of docProps/app.xml is set to a neutral value."""
+    import re
+    import shutil
+    import zipfile
+    tmp = Path(str(path) + ".tmp")
+    with zipfile.ZipFile(path) as zi, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zo:
+        for it in zi.infolist():
+            data = zi.read(it.filename)
+            if it.filename == "docProps/app.xml":
+                data = re.sub(rb"<Application>.*?</Application>", b"<Application>Microsoft Excel</Application>", data)
+            zo.writestr(it, data)
+    shutil.move(tmp, path)
+
+
 def _sheet(ws, header, rows, widths=None):
     ws.append(header)
     for c in ws[1]:
@@ -161,7 +176,10 @@ def main():
     if ann.exists():
         _annual(wb.create_sheet("Annual"), ann)
     out = SIM / "AIGH_IP_thermal_model_design_days.xlsx"
+    wb.properties.creator = 'AIGH ACMV'
+    wb.properties.lastModifiedBy = 'AIGH ACMV'
     wb.save(out)
+    _neutral_props(out)
     print(out, len(rows), len(nm))
 
 

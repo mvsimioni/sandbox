@@ -15,12 +15,12 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 SIM = ROOT / "out/sim"
 VIEW = SIM / "view3d"
 
-HTML = """<!doctype html><html><head><meta charset="utf-8"><title>AIGH IP OpenStudio 3D</title>
+HTML = """<!doctype html><html><head><meta charset="utf-8"><title>AIGH IP thermal model 3D</title>
 <style>html,body{margin:0;height:100%;background:#f4f5f7;font:13px sans-serif}#info{position:absolute;left:12px;top:10px;background:#fffc;
 padding:6px 10px;border-radius:4px}</style>
 <script src="three.min.js"></script>
 <script src="OrbitControls.js"></script></head>
-<body><div id="info">AIGH Inpatient LB3–L07 — OpenStudio model (OpenStudio 3.9 ThreeJS scene). Drag to orbit, scroll to zoom.</div><script>
+<body><div id="info">AIGH Inpatient LB3–L07 — thermal model geometry (zones, exterior walls, glazing). Drag to orbit, scroll to zoom.</div><script>
 const r=new THREE.WebGLRenderer({antialias:true,preserveDrawingBuffer:true});r.setPixelRatio(window.devicePixelRatio);
 r.setSize(innerWidth,innerHeight);document.body.appendChild(r.domElement);r.setClearColor(0xf4f5f7);
 const cam=new THREE.PerspectiveCamera(30,innerWidth/innerHeight,1,5000);const ctl=new THREE.OrbitControls(cam,r.domElement);
