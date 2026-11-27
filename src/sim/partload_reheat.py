@@ -11,6 +11,11 @@ For each AHU / PAHU (fan coil units are not covered: no reheat coil) and each ho
   it operates (working hours, or all hours for 24 h rooms). Below 0.4 %: reheat omitted. Else the reheat is sized:
   A central reheat on the AHU (best single supply temperature each hour), B reheat at each VAV terminal to the higher of the DD Booklet
   minimum and the temperature that keeps the room RH within its limit.
+Council C7 corrections (D-126): the room temperature is not taken below the supply temperature; rooms with no DD Booklet temperature or RH
+criteria are left out of the test; the installed terminal reheat of each room is sized schedule-free: VAV minimum airflow at zero internal
+load, from the supply temperature at the boxes at minimum flow to the higher of the DD Booklet minimum and the temperature that keeps the
+supply moisture within the RH limit (the hourly room peak where that is higher). The coincident hourly peak is the heating-water diversity.
+The RH-only fraction (no temperature test) is reported as a variant.
 Each AHU is run on two supply bases: the coil leaving + fan rise of the AHU tab, and the supply temperature on which the room airflows are
 sized (Basis of Design SupplyTemp).
 
@@ -162,7 +167,8 @@ def evaluate(u, t_room_supply):
     rhmax = np.array([(r["rhmax"] or 100) / 100 for r in rooms], float)[:, None]
     vdes = vmax.sum() * (1 + LEAK)
     oa = min(oa, vdes)
-    hours_eval = np.where(h24[:, None], True, work[None, :])
+    crit = np.array([r.get("tmin") is not None or r.get("rhmax") is not None for r in rooms])
+    hours_eval = np.where(h24[:, None], True, work[None, :]) & crit[:, None]
 
     def air_side(extra):
         ts = np.full(H, t_coil + fan) + extra
@@ -170,7 +176,7 @@ def evaluate(u, t_room_supply):
             V = np.clip(Qs / (1.21 * np.maximum(24 - ts, 0.5)), vmin, vmax)
             vahu = V.sum(0) * (1 + LEAK)
             ts = t_coil + fan * (vahu / vdes) ** 2 + extra
-        T = ts + Qs / (1.21 * V)
+        T = np.maximum(ts + Qs / (1.21 * V), ts)
         T = np.where((V > vmin + 1e-6) & (V < vmax - 1e-6), np.minimum(T, 24.0), T)
         w_room = np.full((n, H), w_of(24.0, 0.6))
         for _ in range(4):
@@ -186,6 +192,7 @@ def evaluate(u, t_room_supply):
     hot = (T > tmax + 0.05) & hours_eval
     op_hours = hours_eval.any(0)
     frac0 = float((cold | wet).any(0)[op_hours].mean()) if op_hours.any() else 0.0
+    frac_rh = float(wet.any(0)[op_hours].mean()) if op_hours.any() else 0.0
     # A central
     best = np.zeros(H); nbest = np.full(H, 10 ** 6)
     for e in np.arange(0, 10.01, 1.0):
@@ -207,10 +214,21 @@ def evaluate(u, t_room_supply):
     coldwetB = ((Tz < tmin - 0.05) | (RHz > rhmax + 0.005)) & hours_eval
     hotB = (Tz > tmax + 0.05) & hours_eval
     vav_any = bool(vav.any())
+    # schedule-free installed terminal reheat (C7): zero internal load at the VAV minimum
+    ts_min = t_coil + fan * (min(vmin.sum() * (1 + LEAK), vdes) / vdes) ** 2
+    w_s = w_of(t_coil, RH_COIL)
+    pv0 = w_s * 101.325 / (0.622 + w_s)
+    a0 = np.log(np.maximum(pv0 / rhmax[:, 0], 1e-6) / 0.61094)
+    t_rh0 = 243.04 * a0 / (17.625 - a0)
+    tgt0 = np.maximum(np.array([r["tmin"] if r.get("tmin") is not None else -99 for r in rooms], float), t_rh0)
+    q_free = np.where(crit, 1.21 * vmin[:, 0] * np.maximum(tgt0 - ts_min, 0) / 1000, 0)
+    q_inst = np.maximum(q_free, qB.max(1))
     res = dict(
         supply_basis_degC=round(t_room_supply, 1), t_coil_degC=round(t_coil, 2), rooms=n, rooms_24h=int(h24.sum()), vav_rooms=int(vav.sum()),
         vmin_sum=round(float(vmin.sum())), vmax_sum=round(float(vmax.sum())),
-        frac_out_of_range_no_reheat=round(frac0, 4), hours_cold=int(cold.any(0).sum()), hours_humid=int(wet.any(0).sum()), hours_hot=int(hot.any(0).sum()),
+        rooms_no_criteria=int((~crit).sum()), frac_out_of_range_no_reheat=round(frac0, 4), frac_rh_only=round(frac_rh, 4),
+        ts_boxes_at_min_flow_degC=round(ts_min, 2), B_installed_schedule_free_kW=round(float(q_free.sum()), 1),
+        B_installed_kW=round(float(q_inst.sum()), 1), hours_cold=int(cold.any(0).sum()), hours_humid=int(wet.any(0).sum()), hours_hot=int(hot.any(0).sum()),
         reheat_needed=bool(frac0 >= THRESHOLD),
         A_central_peak_kW=round(float(qA[op_hours].max()) if op_hours.any() else 0, 1),
         A_frac_out_of_range=round(float(badA.any(0)[op_hours].mean()) if op_hours.any() else 0, 4),
@@ -219,10 +237,15 @@ def evaluate(u, t_room_supply):
         B_frac_cold_or_humid=round(float(coldwetB.any(0)[op_hours].mean()) if op_hours.any() else 0, 4),
         B_frac_overheating=round(float(hotB.any(0)[op_hours].mean()) if op_hours.any() else 0, 4),
         full_flow_to_tmin_kW=round(1.21 * vdes * max(float(tmin.min()) - t_coil, 0) / 1000, 1))
-    per_room = [dict(room=r["no"], name=r["name"], h24=bool(h24[i]), vav=bool(vav[i, 0]), vmin=float(vmin[i, 0]), vmax=float(vmax[i, 0]),
+    per_room = [dict(room=rooms[i]["no"], name=rooms[i]["name"], h24=bool(h24[i]), vav=bool(vav[i, 0]), vmin=float(vmin[i, 0]), vmax=float(vmax[i, 0]),
                      tmin=float(tmin[i, 0]), tmax=float(tmax[i, 0]), rhmax=float(rhmax[i, 0]),
-                     frac_out_no_reheat=round(float(((cold[i] | wet[i])[hours_eval[i]]).mean()), 4), min_T=round(float(T[i][hours_eval[i]].min()), 2),
-                     max_RH=round(float(RH[i][hours_eval[i]].max()), 3), terminal_reheat_kW=round(float(qB[i].max()), 2)) for i in range(n)]
+                     frac_out_no_reheat=round(float(((cold[i] | wet[i])[hours_eval[i]]).mean()), 4) if hours_eval[i].any() else None,
+                     min_T=round(float(T[i][hours_eval[i]].min()), 2) if hours_eval[i].any() else None,
+                     max_RH=round(float(RH[i][hours_eval[i]].max()), 3) if hours_eval[i].any() else None,
+                     frac_rh_no_reheat=round(float(wet[i][hours_eval[i]].mean()), 4) if hours_eval[i].any() else None,
+                     frac_hot_with_terminal=round(float(hotB[i][hours_eval[i]].mean()), 4) if hours_eval[i].any() else None,
+                     criteria=bool(crit[i]), target_degC=round(float(tgt0[i]), 1) if crit[i] else None,
+                     terminal_reheat_kW=round(float(qB[i].max()), 2), installed_kW=round(float(q_inst[i]), 2)) for i in range(n)]
     return res, per_room, vav_any
 
 
@@ -255,9 +278,9 @@ def write_xlsx(results, path):
     ws = wb.active
     ws.title = "Summary"
     hdr = ["Workbook", "AHU", "Type", "Rooms", "24 h rooms", "VAV rooms", "Design supply L/s", "Sum VAV min L/s", "Outdoor air L/s",
-           "Basis", "Supply at rooms degC", "Coil leaving degC", "Out of range, no reheat (fraction of operating hours)", "Reheat needed (>= 0.4 %)",
+           "Basis", "Supply at rooms degC", "Coil leaving degC", "Out of range, no reheat (fraction of operating hours)", "RH only, no reheat", "Reheat needed (>= 0.4 %)",
            "A central reheat peak kW", "A out of range", "B terminal reheat peak kW", "B sum of room peaks kW", "B rooms with reheat",
-           "B cold or humid", "B overheating", "Verdict"]
+           "B cold or humid", "B overheating", "Supply at boxes, min flow degC", "B installed terminal reheat kW (schedule-free)", "Workbook reheat kW", "Verdict"]
     ws.append(hdr)
     for c in ws[1]:
         c.font = Font(bold=True, color="FFFFFF"); c.fill = PatternFill("solid", fgColor="2F4F6F"); c.alignment = Alignment(wrap_text=True, vertical="top")
@@ -266,28 +289,32 @@ def write_xlsx(results, path):
             x = r["cases"][basis]; s = x["res"]
             ws.append([r["workbook"].replace("AIGH_C2_", "").replace("_Thermal_Load_Calc_RevA.xlsx", ""), r["unit"], r["type"], s["rooms"], s["rooms_24h"],
                        s["vav_rooms"], s["vmax_sum"], s["vmin_sum"], round(float(r["oa"])), "room sizing basis" if basis == "sizing" else "coil leaving + fan",
-                       s["supply_basis_degC"], s["t_coil_degC"], s["frac_out_of_range_no_reheat"], "YES" if s["reheat_needed"] else "NO",
+                       s["supply_basis_degC"], s["t_coil_degC"], s["frac_out_of_range_no_reheat"], s["frac_rh_only"], "YES" if s["reheat_needed"] else "NO",
                        s["A_central_peak_kW"], s["A_frac_out_of_range"], s["B_terminal_peak_kW"], s["B_terminal_sum_room_peaks_kW"], s["B_rooms_with_reheat"],
-                       s["B_frac_cold_or_humid"], s["B_frac_overheating"], x["verdict"]])
-    for col, w in zip("ABCDEFGHIJKLMNOPQRSTUV", (22, 28, 6, 7, 7, 7, 9, 9, 9, 16, 9, 9, 13, 9, 9, 9, 9, 9, 8, 9, 9, 60)):
+                       s["B_frac_cold_or_humid"], s["B_frac_overheating"], s["ts_boxes_at_min_flow_degC"], s["B_installed_kW"], r["reheat_wb"], x["verdict"]])
+    for col, w in zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ", (22, 28, 6, 7, 7, 7, 9, 9, 9, 16, 9, 9, 13, 9, 9, 9, 9, 9, 9, 8, 9, 9, 9, 11, 9, 60)):
         ws.column_dimensions[col].width = w
     for row in ws.iter_rows(min_row=2):
-        for c in row[12:21]:
-            if isinstance(c.value, float) and c.value < 1 and c.column in (13, 16, 20, 21):
+        for c in row[12:22]:
+            if isinstance(c.value, float) and c.value <= 1 and c.column in (13, 14, 17, 21, 22):
                 c.number_format = "0.0%"
     ws.freeze_panes = "C2"
     wr = wb.create_sheet("Rooms")
     wr.append(["AHU", "Basis", "Room", "Name", "24 h", "VAV", "VAV min L/s", "Design L/s", "T min", "T max", "RH max", "Out of range, no reheat",
-               "Min T no reheat", "Max RH no reheat", "Terminal reheat kW"])
+               "Min T no reheat", "Max RH no reheat", "Criteria", "Reheat target degC", "Hourly peak reheat kW", "Installed terminal reheat kW"])
     for c in wr[1]:
         c.font = Font(bold=True)
     for r in results:
         for basis in ("sizing", "coil"):
             for p in r["cases"][basis]["rooms"]:
                 wr.append([r["unit"], basis, p["room"], p["name"], p["h24"], p["vav"], p["vmin"], p["vmax"], p["tmin"], p["tmax"], p["rhmax"],
-                           p["frac_out_no_reheat"], p["min_T"], p["max_RH"], p["terminal_reheat_kW"]])
+                           p["frac_out_no_reheat"], p["min_T"], p["max_RH"], p["criteria"], p["target_degC"], p["terminal_reheat_kW"], p["installed_kW"]])
     wm = wb.create_sheet("Method")
+    import re
     for line in (__doc__ or "").strip().splitlines():
+        if "python3" in line or "writes <issue>" in line or line.startswith("<issue>"):
+            continue
+        line = re.sub(r"\(Marcus, 27 Nov 2026; method of the ME-0274 review, [^)]*\)", "(method of the ME-0274 review, 27 Nov 2026)", line)
         wm.append([line])
     wm.append([])
     wm.append(["Office schedules by hour (occupancy / lighting / equipment), ASSUMPTION:"])
@@ -295,7 +322,10 @@ def write_xlsx(results, path):
     wm.append(["occupancy"] + OCC); wm.append(["lighting"] + LGT); wm.append(["equipment"] + EQP)
     wm.column_dimensions["A"].width = 160
     wb.properties.creator = "AIGH ACMV"
+    wb.properties.lastModifiedBy = "AIGH ACMV"
     wb.save(path)
+    from src.sim.report import _neutral_props
+    _neutral_props(path)
 
 
 def main():
@@ -313,6 +343,9 @@ def main():
     write_xlsx(results, issue / "AIGH_IP_Part_Load_Reheat_Check.xlsx")
     from collections import Counter
     print(len(results), "units;", Counter(r["cases"]["sizing"]["verdict"].split(":")[0].split(",")[0] for r in results))
+    for b in ("sizing", "coil"):
+        print(b, "installed", round(sum(r["cases"][b]["res"]["B_installed_kW"] for r in results)), "coincident",
+              round(sum(r["cases"][b]["res"]["B_terminal_peak_kW"] for r in results)), "central", round(sum(r["cases"][b]["res"]["A_central_peak_kW"] for r in results)))
 
 
 if __name__ == "__main__":
