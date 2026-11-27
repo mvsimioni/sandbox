@@ -195,14 +195,15 @@ def evaluate(u, t_room_supply):
     frac_rh = float(wet.any(0)[op_hours].mean()) if op_hours.any() else 0.0
     # A central
     best = np.zeros(H); nbest = np.full(H, 10 ** 6)
-    for e in np.arange(0, 10.01, 1.0):
+    for e in np.arange(0, 15.01, 0.5):
         _, _, Te, RHe = air_side(np.full(H, e))
-        nout = (((Te < tmin - 0.05) | (Te > tmax + 0.05) | (RHe > rhmax + 0.005)) & hours_eval).sum(0)
+        nout = (((Te < tmin - 0.05) | (RHe > rhmax + 0.005)) & hours_eval).sum(0) * 1000 + ((Te > tmax + 0.05) & hours_eval).sum(0)
         better = nout < nbest
         best = np.where(better, e, best); nbest = np.where(better, nout, nbest)
     _, vr, Tr, RHr = air_side(best)
     badA = ((Tr < tmin - 0.05) | (Tr > tmax + 0.05) | (RHr > rhmax + 0.005)) & hours_eval
     qA = 1.21 * vr * best / 1000
+    cwA = ((Tr < tmin - 0.05) | (RHr > rhmax + 0.005)) & hours_eval
     # B terminal
     pv = RH * psat(T)
     a_ = np.log(np.maximum(pv / rhmax, 1e-6) / 0.61094)
@@ -232,6 +233,7 @@ def evaluate(u, t_room_supply):
         reheat_needed=bool(frac0 >= THRESHOLD),
         A_central_peak_kW=round(float(qA[op_hours].max()) if op_hours.any() else 0, 1),
         A_frac_out_of_range=round(float(badA.any(0)[op_hours].mean()) if op_hours.any() else 0, 4),
+        A_frac_cold_or_humid=round(float(cwA.any(0)[op_hours].mean()) if op_hours.any() else 0, 4),
         B_terminal_peak_kW=round(float(qB.sum(0).max()), 1), B_terminal_sum_room_peaks_kW=round(float(qB.max(1).sum()), 1),
         B_rooms_with_reheat=int((qB.max(1) > 0.05).sum()),
         B_frac_cold_or_humid=round(float(coldwetB.any(0)[op_hours].mean()) if op_hours.any() else 0, 4),
@@ -244,6 +246,10 @@ def evaluate(u, t_room_supply):
                      max_RH=round(float(RH[i][hours_eval[i]].max()), 3) if hours_eval[i].any() else None,
                      frac_rh_no_reheat=round(float(wet[i][hours_eval[i]].mean()), 4) if hours_eval[i].any() else None,
                      frac_hot_with_terminal=round(float(hotB[i][hours_eval[i]].mean()), 4) if hours_eval[i].any() else None,
+                     frac_out_central=round(float(badA[i][hours_eval[i]].mean()), 4) if hours_eval[i].any() else None,
+                     central_cold=round(float(((Tr[i] < tmin[i] - 0.05))[hours_eval[i]].mean()), 4) if hours_eval[i].any() else None,
+                     central_hot=round(float(((Tr[i] > tmax[i] + 0.05))[hours_eval[i]].mean()), 4) if hours_eval[i].any() else None,
+                     central_humid=round(float(((RHr[i] > rhmax[i] + 0.005))[hours_eval[i]].mean()), 4) if hours_eval[i].any() else None,
                      criteria=bool(crit[i]), target_degC=round(float(tgt0[i]), 1) if crit[i] else None,
                      terminal_reheat_kW=round(float(qB[i].max()), 2), installed_kW=round(float(q_inst[i]), 2)) for i in range(n)]
     return res, per_room, vav_any
