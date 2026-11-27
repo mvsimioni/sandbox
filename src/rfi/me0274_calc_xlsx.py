@@ -94,7 +94,8 @@ rows = [
     ("Sheets", "Inputs - design inputs and schedule values. Rooms - room airflows (formulas). AHU - airflow and outdoor air (formulas). "
                "Psychrometrics - state points and coils (formulas). Part load - summary of the hourly check (formulas over Hourly, and the "
                "reference cases). Room results - hourly check by room (model values). Hourly - 8,760 h of the hourly check (model values). "
-               "Schedule - Equipment Schedule values. Findings - notes and assumptions."),
+               "Profiles / Schedule of Operation / Unit Operation / Unit Airflow by Hour - operating, reduced and shut-down hours of each room and of the unit "
+               "(Mon-Fri, Saturday, Sunday / public holiday; the same profiles drive the hourly model). Schedule - Equipment Schedule values. Findings - notes and assumptions."),
     ("Colour key", "Blue text: input. Black text: formula. Green cell: result of the hourly model (value)."),
     ("Sources", "R22 thermal-load workbook D47 (room loads, air-change airflow, outdoor air, criteria of the DD Booklet); tender air-side schematic "
                 "IP-BH-06068; Equipment Schedule (Corrigendum 5); Changi typical meteorological year (hourly weather); Engineer's rulings D-126, D-127."),
@@ -401,7 +402,17 @@ for w_ in wb.worksheets:
 wb.properties.creator = "AIGH ACMV"
 wb.properties.lastModifiedBy = "AIGH ACMV"
 wb.properties.title = f"ME-0274 {TAG} calculation"
-order = ["Cover", "Inputs", "Rooms", "AHU", "Psychrometrics", "Part load", "Room results", "Hourly", "Schedule", "Findings"]
+# schedule of operation of the rooms of this unit (same profiles as the hourly model)
+import src.sim.partload_reheat as PR  # noqa: E402
+from src.sim.operation_schedule import write_sheets  # noqa: E402
+PR._init()
+_, _, allr = PR.read_workbook(WB_SRC, all_rooms=True)
+prof = {x["no"]: (x["profile"], x["basis"]) for x in allr}
+sched = [dict(workbook="D47", no=x["room"], name=x["name"], storey="L06", unit=TAG, design=x["design"], vmin=x["vmin"],
+              profile=prof[x["room"]][0], basis=prof[x["room"]][1]) for x in R]
+write_sheets(wb, sched, "Airflows: design at 17.6 degC and the VAV minimum of sheet Rooms.")
+order = ["Cover", "Inputs", "Rooms", "AHU", "Psychrometrics", "Part load", "Room results", "Hourly", "Profiles", "Schedule of Operation",
+         "Unit Operation", "Unit Airflow by Hour", "Schedule", "Findings"]
 wb._sheets = [wb[n] for n in order]
 wb.active = 0
 wb.save(OUT)

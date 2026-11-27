@@ -16,6 +16,8 @@ criteria are left out of the test; the installed terminal reheat of each room is
 load, from the supply temperature at the boxes at minimum flow to the higher of the DD Booklet minimum and the temperature that keeps the
 supply moisture within the RH limit (the hourly room peak where that is higher). The coincident hourly peak is the heating-water diversity.
 The RH-only fraction (no temperature test) is reported as a variant.
+Operating hours of each room from its operation profile (src.sim.operation_schedule; sheet Schedule of Operation): rooms are tested in the
+hours their profile is O or R; office gains follow the office schedules on the days the profile operates.
 Each AHU is run on two supply bases: the coil leaving + fan rise of the AHU tab, and the supply temperature on which the room airflows are
 sized (Basis of Design SupplyTemp).
 
@@ -66,6 +68,12 @@ def _init():
             if r.get("plan_room_id"):
                 plan[r["number"]] = r["plan_room_id"]
     _G["h24_plan"] = {n for n, pid in plan.items() if pid in m24}
+    # schedule of operation: profile codes by hour of the year (day type Mon-Fri / Sat / Sun-PH; public holidays not listed: as Mon-Fri)
+    from src.sim.operation_schedule import PROFILES, overrides
+    _G["dtype"] = np.where(dow < 5, 0, np.where(dow == 5, 1, 2))
+    _G["codes"] = {k: np.array([v[1][d][h] for d, h in zip(_G["dtype"], wx["hour"])]) for k, v in PROFILES.items()}
+    _G["dayon"] = {k: np.array([any(c == "O" for c in v[1][d]) for d in _G["dtype"]]) for k, v in PROFILES.items()}
+    _G["ov"] = overrides()
 
 
 def _section_rows(ws, title):
@@ -82,7 +90,7 @@ def _section_rows(ws, title):
     return {}
 
 
-def read_workbook(path):
+def read_workbook(path, all_rooms=False):
     wb = openpyxl.load_workbook(path, data_only=True)
     af, ri, cr, en, ah = wb["Airflow"], wb["Room Information"], wb["Criteria"], wb["Envelope"], wb["AHU"]
     sup_t = wb["Basis of Design"]["C17"].value or 14
@@ -92,7 +100,7 @@ def read_workbook(path):
         n = af.cell(r, 1).value
         if n:
             g = lambda c: af.cell(r, c).value or 0
-            rooms[n] = dict(no=n, name=af.cell(r, 2).value, unit=af.cell(r, 4).value, vol=g(7), vmax=g(20), vmin=g(28), env=[],
+            rooms[n] = dict(no=n, name=af.cell(r, 2).value, unit=af.cell(r, 4).value, storey=af.cell(r, 3).value, vol=g(7), vmax=g(20), vmin=g(28), env=[],
                             fixed=bool(af.cell(r, 34).value), single_pass=str(af.cell(r, 22).value or "").upper().startswith("Y"))
     for r in range(7, ri.max_row + 1):
         n = ri.cell(r, 1).value
@@ -105,6 +113,9 @@ def read_workbook(path):
         if n in rooms:
             rooms[n].update(tmin=cr.cell(r, 17).value, tmax=cr.cell(r, 18).value, rhmax=cr.cell(r, 19).value, after=cr.cell(r, 38).value,
                             pressure=str(cr.cell(r, 20).value or ""))
+    from src.sim.operation_schedule import assign
+    for v in rooms.values():
+        v["profile"], v["basis"] = assign(v, _G["h24_plan"], _G["ov"])
     for row in en.iter_rows(min_row=7, values_only=True):
         if row[0] in rooms and row[2] == "Facade" and (row[6] or row[7]):
             rooms[row[0]]["env"].append((row[5], float(row[6] or 0), float(row[7] or 0)))
@@ -119,7 +130,10 @@ def read_workbook(path):
     for v in rooms.values():
         if v["unit"] in units and (v.get("vmax") or 0) > 0:
             units[v["unit"]]["rooms"].append(v)
-    return [u for u in units.values() if u["rooms"] and u["t_coil"] and u["oa"]], sup_t
+    out = [u for u in units.values() if u["rooms"] and u["t_coil"] and u["oa"]]
+    if all_rooms:
+        return out, sup_t, list(rooms.values())
+    return out, sup_t
 
 
 def evaluate(u, t_room_supply, coil_leaving=None, oa_hourly=None, ret_locals=False):
@@ -135,14 +149,17 @@ def evaluate(u, t_room_supply, coil_leaving=None, oa_hourly=None, ret_locals=Fal
     hour = wx["hour"]
     Qs = np.zeros((n, H)); Ql = np.zeros((n, H))
     h24 = np.zeros(n, bool)
+    oper = np.zeros((n, H), bool)
     for i, r in enumerate(rooms):
-        is24 = (str(r.get("after") or "").upper().startswith("Y") or (isinstance(r.get("hours"), (int, float)) and r["hours"] >= 24)
-                or r["no"] in _G["h24_plan"])
+        prof = r.get("profile") if r.get("profile") in _G["codes"] else "OFFICE"
+        code = _G["codes"][prof]
+        is24 = bool((code == "O").all())
         h24[i] = is24
+        oper[i] = code != "S"                       # operating or reduced capacity: tested
         if is24:
             occ, lgt, eqp = np.full(H, 0.5), np.ones(H), np.ones(H)
         else:
-            on = weekday.astype(float)
+            on = _G["dayon"][prof].astype(float)
             occ = np.array([OCC[h] for h in hour]) * on
             lgt = np.array([LGT[h] for h in hour]) * on + (1 - on) * 0.05
             eqp = np.array([EQP[h] for h in hour]) * on + (1 - on) * 0.4
@@ -170,7 +187,7 @@ def evaluate(u, t_room_supply, coil_leaving=None, oa_hourly=None, ret_locals=Fal
     vdes = vmax.sum() * (1 + LEAK)
     oa = np.minimum(oa_hourly, vdes) if oa_hourly is not None else min(oa, vdes)
     crit = np.array([r.get("tmin") is not None or r.get("rhmax") is not None for r in rooms])
-    hours_eval = np.where(h24[:, None], True, work[None, :]) & crit[:, None]
+    hours_eval = oper & crit[:, None]
 
     def air_side(extra):
         ts = np.full(H, t_coil + fan) + extra
@@ -270,7 +287,9 @@ def verdict(res, vav_any):
 
 
 def one_workbook(path):
-    units, sup_t = read_workbook(path)
+    units, sup_t, all_rooms = read_workbook(path, all_rooms=True)
+    sched = [dict(workbook=Path(path).name.split("_")[2], no=r["no"], name=r["name"], storey=r.get("storey"), unit=r.get("unit") or "none",
+                  design=r.get("vmax") or 0, vmin=r.get("vmin") or 0, profile=r["profile"], basis=r["basis"]) for r in all_rooms]
     out = []
     for u in units:
         cases = {}
@@ -279,10 +298,10 @@ def one_workbook(path):
             cases[label] = (res, per_room, vav_any)
         out.append(dict(workbook=Path(path).name, unit=u["unit"], type=u["type"], supply=u["supply"], oa=u["oa"], reheat_wb=u["reheat_wb"],
                         sizing_supply=sup_t, cases={k: dict(res=v[0], rooms=v[1], verdict=verdict(v[0], v[2])) for k, v in cases.items()}))
-    return out
+    return out, sched
 
 
-def write_xlsx(results, path):
+def write_xlsx(results, path, sched=None):
     from openpyxl.styles import Alignment, Font, PatternFill
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -331,6 +350,9 @@ def write_xlsx(results, path):
     wm.append(["hour"] + list(range(24)))
     wm.append(["occupancy"] + OCC); wm.append(["lighting"] + LGT); wm.append(["equipment"] + EQP)
     wm.column_dimensions["A"].width = 160
+    if sched:
+        from src.sim.operation_schedule import write_sheets
+        write_sheets(wb, sched)
     wb.properties.creator = "AIGH ACMV"
     wb.properties.lastModifiedBy = "AIGH ACMV"
     wb.save(path)
@@ -340,17 +362,20 @@ def write_xlsx(results, path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--issue", default="out/issue/DRAFT_2026-11-27_R21")
+    ap.add_argument("--issue", default="out/issue/DRAFT_2026-11-27_R22")
     a = ap.parse_args()
     issue = ROOT / a.issue
     files = sorted((issue / "workbooks").glob("AIGH_C2_D*.xlsx"))
     with Pool(4, initializer=_init) as pool:
         parts = pool.map(one_workbook, files)
-    results = [x for p in parts for x in p]
+    results = [x for p in parts for x in p[0]]
+    sched = [x for p in parts for x in p[1]]
     out = issue / "partload"
     out.mkdir(parents=True, exist_ok=True)
     (out / "partload_results.json").write_text(json.dumps(results, indent=1, default=str), encoding="utf-8")
-    write_xlsx(results, issue / "AIGH_IP_Part_Load_Reheat_Check.xlsx")
+    write_xlsx(results, issue / "AIGH_IP_Part_Load_and_Schedule_of_Operation.xlsx", sched)
+    from collections import Counter as _C
+    print("profiles:", _C(x["profile"] for x in sched).most_common(), "basis:", _C(x["basis"].split(" (")[0].split(":")[0] for x in sched).most_common())
     from collections import Counter
     print(len(results), "units;", Counter(r["cases"]["sizing"]["verdict"].split(":")[0].split(",")[0] for r in results))
     for b in ("sizing", "coil"):
