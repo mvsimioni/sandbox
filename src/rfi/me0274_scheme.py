@@ -111,6 +111,7 @@ def main():
     for n in R13:
         v["rooms"][idx[n]]["vmin"] = max(A[n]["oa"], BOX_MIN)
     oa_h = None
+    need = {}
     for it in range(4):
         res, rooms, L = P.evaluate(accepted_off(v), TS, coil_leaving=COIL, oa_hourly=oa_h, ret_locals=True)
         he, Qs, tmin = L["hours_eval"], L["Qs"], L["tmin"]
@@ -119,6 +120,7 @@ def main():
             for n in R13:
                 i = idx[n]; h = he[i]
                 vreq = Qs[i][h] / (1.21 * np.maximum(tmin[i, 0] - ts[h], 0.3))
+                need[n] = dict(q04=float(np.quantile(vreq, 0.004)), vmin_hours_min=float(vreq.min()), ts_mean=float(ts[h].mean()))
                 v["rooms"][i]["vmin"] = min(v["rooms"][i]["vmax"], max(A[n]["oa"], BOX_MIN, math.floor(float(np.quantile(vreq, 0.004)) / 5) * 5))
         # outdoor-air intake: the room that needs the most, each hour it operates
         oa_room = np.array([A[r["no"]]["oa"] for r in v["rooms"]], float)[:, None]
@@ -211,6 +213,36 @@ def main():
         vmin_pct_14=ref14["vmin_pct"], vmin_pct_17=round(100 * res176["vmin_sum"] / res176["vmax_sum"]),
         hours_work=int(work.sum()))
     OUT.parent.mkdir(parents=True, exist_ok=True)
+    # per-room statistics and the hourly series (supporting calculation workbook)
+    stats = []
+    for i, r in enumerate(v["rooms"]):
+        h = L["hours_eval"][i]
+        if not h.any():
+            h = np.ones_like(h)
+        m = lambda a: round(100 * float(a[i][h].mean()), 1)
+        tmn, tmx, rhm = L["tmin"][i, 0], L["tmax"][i, 0], L["rhmax"][i, 0]
+        stats.append(dict(room=r["no"], hours=int(h.sum()), h24=bool(L["h24"][i]), accepted=r["no"] in ACC,
+                          cold=m(L["T"] < tmn - .05), humid=m(L["RH"] > rhm + .005), hot=m(L["T"] > tmx + .05),
+                          cold_r=m(L["Tr"] < tmn - .05), humid_r=m(L["RHr"] > rhm + .005), hot_r=m(L["Tr"] > tmx + .05),
+                          T_mean=round(float(L["Tr"][i][h].mean()), 1), T_min=round(float(L["Tr"][i][h].min()), 1), T_max=round(float(L["Tr"][i][h].max()), 1),
+                          RH_max=round(100 * float(L["RHr"][i][h].max()), 1), V_mean=round(float(L["V"][i][h].mean()), 1),
+                          need_q04=round(need[r["no"]]["q04"], 1) if r["no"] in need else None,
+                          ts_mean=round(need[r["no"]]["ts_mean"], 2) if r["no"] in need else None))
+    out["room_stats"] = stats
+    out["box_min"] = BOX_MIN
+    import csv as _csv
+    he_k = L["hours_eval"] & keep[:, None]
+    cA = ((L["Tr"] < L["tmin"] - .05) | (L["RHr"] > L["rhmax"] + .005)) & he_k; hA = (L["Tr"] > L["tmax"] + .05) & he_k
+    c0 = ((L["T"] < L["tmin"] - .05) | (L["RH"] > L["rhmax"] + .005)) & he_k
+    with (OUT.parent / "hourly.csv").open("w", newline="", encoding="utf-8") as fh:
+        w = _csv.writer(fh)
+        w.writerow(["month", "day", "hour", "working", "db", "dp", "ahu_flow", "oa_intake", "supply_at_rooms", "reset_K", "central_reheat_kW", "cooling_coil_kW",
+                    "rooms_cold_or_humid_no_reset", "rooms_cold_or_humid", "rooms_hot"])
+        ts_h = L["t_coil"] + fan * (vahu / L["vdes"]) ** 2 + best
+        for k in range(len(vahu)):
+            w.writerow([int(wx["month"][k]), int(wx["day"][k]), int(wx["hour"][k]), int(work[k]), round(float(wx["db"][k]), 1), round(float(wx["dp"][k]), 1),
+                        round(float(vahu[k])), round(float(oa_h[k])), round(float(ts_h[k]), 2), float(best[k]), round(float(q_central[k]), 2),
+                        round(float(coil_h[k]), 1), int(c0[:, k].sum()), int(cA[:, k].sum()), int(hA[:, k].sum())])
     OUT.write_text(json.dumps(out, indent=1, default=float), encoding="utf-8")
     print(json.dumps({k: v for k, v in out.items() if k not in ("rooms",)}, indent=1, default=float))
 
