@@ -205,8 +205,12 @@ def zoning_page(d, pno):
     on = [x for x, v in ocg.items() if v["name"] == TAG]
     z.set_layer(-1, on=on, off=[x for x in ocg if x not in on])
     pg = z[1]
+    # the zones and their labels are annotations on the unit layers: keep only those of this AHU (the room notes go too)
+    for a in list(pg.annots()):
+        if a.get_oc() not in on:
+            pg.delete_annot(a)
     keep = pymupdf.Rect(1276, 504, 2252, 1678)          # display coordinates (pt) of the served area with a margin
-    pix = pg.get_pixmap(dpi=200, clip=keep, annots=False)
+    pix = pg.get_pixmap(dpi=200, clip=keep, annots=True)       # the zones are annotations on the unit layers
     top = 50
     q = d.new_page(pno=pno + 1, width=keep.width, height=keep.height + top)
     q.insert_image(pymupdf.Rect(0, top, keep.width, keep.height + top), pixmap=pix)

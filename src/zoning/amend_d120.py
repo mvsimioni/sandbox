@@ -44,7 +44,7 @@ def relabel():
 
 # D-125 (Marcus, 27 Nov 2026): the lift shafts are not part of the AGV lift lobbies. The shaft stacks (AL.04-06 in L06-R086, AL.07-09 in
 # L06-R188; shafts 2.11 x 1.76 m on a 2.94 m pitch, read on the 6th storey GA) are cut out of the lobby outlines, with the walls between them.
-SHAFT_CUT = {"L06": {"L06-R086": (92030, 112810, 94530, 121560), "L06-R188": (91710, 78110, 94220, 86930)}}
+SHAFT_CUT = {"L06": {"L06-R086": (87000, 112810, 94530, 121560), "L06-R188": (87000, 78110, 94220, 86930)}}
 
 
 def cut_shafts():
