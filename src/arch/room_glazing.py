@@ -62,6 +62,10 @@ def _classes(st):
 OVERRIDES = Path(__file__).with_name("envelope_overrides_d120.json")
 
 
+CHECK_IDS = set()
+POOL = {}
+
+
 def _overrides(by_st):
     """Corrections of the forensic review (D-120) that no drawing rule can find: outline-only glazing, link-bridge glass, double-height
     spaces read in the upper band, panes mis-read as hatched. Each is applied to the facade steps of its elevation, storey and axis range."""
@@ -74,13 +78,17 @@ def _overrides(by_st):
         return [s for s in by_st.get(st, []) if s["elevation"] == el and a[0] <= s["axis_mm"] <= a[1] and (not vis or not s["hidden"])
                 and (only is None or s["room"] in only)]
 
-    def spread(ss, area, tag):
+    def spread(ss, area, tag, chk=False):
         L = sum(s["len_m"] for s in ss)
         for s in ss:
             s["glass_m2"] += area * s["len_m"] / L
+            if chk:
+                s["check_m2"] = s.get("check_m2", 0.0) + area * s["len_m"] / L
             s["override"] = (s.get("override", "") + " " + tag).strip()
 
-    for it in json.loads(OVERRIDES.read_text(encoding="utf-8"))["items"]:
+    items = json.loads(OVERRIDES.read_text(encoding="utf-8"))["items"]
+    CHECK_IDS.update(i["id"] for i in items if i.get("check"))
+    for it in items:
         el, st, a = it["elevation"], it["storey"], it["axis_mm"]
         ss = rng(st, el, a, only=set(it["only_rooms"]) if "only_rooms" in it else None)
         if it["action"] == "below_ground":
@@ -93,7 +101,7 @@ def _overrides(by_st):
                 s["override"] = (s.get("override", "") + " " + it["id"]).strip()
         elif it["action"] == "add":
             if ss:
-                spread(ss, it["area_m2"], it["id"])
+                spread(ss, it["area_m2"], it["id"], it.get("check", False))
             else:
                 unplaced.append(it["id"])
         elif it["action"] == "assign":
@@ -101,6 +109,8 @@ def _overrides(by_st):
             nm = next((n for r_, n, _ in _rooms(st) if r_ == rid), "")
             for s in ss:
                 s["room"], s["room_name"] = rid, nm or s["room_name"]
+                if it.get("check"):
+                    s["check_m2"] = s["glass_m2"]
                 s["override"] = (s.get("override", "") + " " + it["id"]).strip()
         elif it["action"] == "to_storey":
             g = sum(s["glass_m2"] for s in ss)
@@ -124,17 +134,34 @@ def _overrides(by_st):
                 for s in mine:
                     s["glass_m2"] *= f
                     s["override"] = (s.get("override", "") + " " + it["id"]).strip()
-                if f < 1.0:
+                if f < 1.0 and it.get("pool"):
+                    POOL[it["pool"]] = POOL.get(it["pool"], 0.0) + g * (1 - f)
+                elif f < 1.0:
                     by_st[st].append(dict(storey=st, kind="external", elevation=el, room="", room_name="unassigned (" + it["id"] + ")", sector="",
                                           x=0, y=0, axis_mm=a[0], depth=0.0, len_m=0.0, proj_m=0.0, cosf=1.0, behind_open="", nx=0.0, ny=0.0,
                                           hidden=False, glass_m2=g * (1 - f), slat_m2=0.0, on_elevation=True, override=it["id"]))
+        elif it["action"] == "distribute_pool":
+            tot = POOL.pop(it["pool"], 0.0)
+            wsum = sum(it["shares"].values())
+            for rid, w_ in it["shares"].items():
+                nm = next((n for r_, n, _ in _rooms(st) if r_ == rid), "")
+                by_st.setdefault(st, []).append(dict(storey=st, kind="external", elevation=el, room=rid, room_name=nm, sector=it["sector"], x=0, y=0,
+                                                     axis_mm=a[0], depth=0.0, len_m=0.0, proj_m=0.0, cosf=1.0, behind_open="", nx=0.0, ny=0.0,
+                                                     hidden=False, glass_m2=tot * w_ / wsum, slat_m2=0.0, on_elevation=True, override=it["id"],
+                                                     check_m2=tot * w_ / wsum if it.get("check") else 0.0))
+        elif it["action"] == "flag_room":
+            for s in by_st.get(st, []):
+                if s["room"] in it["room_ids"] and s["glass_m2"] > 0:
+                    s["check_m2"] = s["glass_m2"]
+                    s["override"] = (s.get("override", "") + " " + it["id"]).strip()
         elif it["action"] == "add_room":
             # glass of a wall that is behind another part of the building on the elevation but seen on it (e.g. across an open forecourt)
             rid = it["room_id"]
             nm = next((n for r_, n, _ in _rooms(st) if r_ == rid), "")
             by_st.setdefault(st, []).append(dict(storey=st, kind="external", elevation=el, room=rid, room_name=nm, sector=it["sector"], x=0, y=0,
                                                  axis_mm=a[0], depth=0.0, len_m=0.0, proj_m=0.0, cosf=1.0, behind_open="", nx=0.0, ny=0.0,
-                                                 hidden=False, glass_m2=it["area_m2"], slat_m2=0.0, on_elevation=True, override=it["id"]))
+                                                 hidden=False, glass_m2=it["area_m2"], slat_m2=0.0, on_elevation=True, override=it["id"],
+                                                 check_m2=it["area_m2"] if it.get("check") else 0.0))
     return unplaced
 
 
@@ -265,7 +292,7 @@ def run():
     unplaced = _overrides(by_st)
     for st, steps in by_st.items():
         steps_all += steps
-        agg = defaultdict(lambda: dict(facade_m=0.0, glass_m2=0.0, slat_m2=0.0, hidden_m=0.0, court_m=0.0, ground_m=0.0, elevations=set()))
+        agg = defaultdict(lambda: dict(facade_m=0.0, glass_m2=0.0, slat_m2=0.0, hidden_m=0.0, court_m=0.0, ground_m=0.0, check_m2=0.0, checks=set(), elevations=set()))
         for s in steps:
             if not s["room"]:
                 continue
@@ -274,6 +301,9 @@ def run():
                 a_["ground_m"] += s["len_m"]
                 continue
             a_["facade_m"] += s["len_m"]
+            if s.get("check_m2"):
+                a_["check_m2"] += s["check_m2"]
+                a_["checks"].update(x for x in (s.get("override") or "").split() if x in CHECK_IDS)
             a_["glass_m2"] += s["glass_m2"]
             a_["slat_m2"] += s["slat_m2"]
             a_["hidden_m"] += s["len_m"] if s["hidden"] else 0.0
@@ -283,14 +313,14 @@ def run():
         with (REG / f"room_glazing_{st}.csv").open("w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
             w.writerow(["storey", "room_id", "room_name", "sector", "facade_m", "storey_h_m", "facade_area_m2", "glass_m2", "slatted_m2", "glass_ratio",
-                        "hidden_m", "court_m", "below_ground_m", "elevations"])
+                        "hidden_m", "court_m", "below_ground_m", "elevations", "check_m2", "check_items"])
             for (rid, nm, sec), v in sorted(agg.items()):
                 fa = v["facade_m"] * h
                 w.writerow([st, rid, nm, sec, round(v["facade_m"], 2), h, round(fa, 1), round(v["glass_m2"], 2), round(v["slat_m2"], 2),
                             round(v["glass_m2"] / fa, 3) if fa else 0, round(v["hidden_m"], 2), round(v["court_m"], 2), round(v["ground_m"], 2),
-                            "; ".join(sorted(v["elevations"]))])
+                            "; ".join(sorted(v["elevations"])), round(v["check_m2"], 2), " ".join(sorted(v["checks"]))])
     with (REG / "room_glazing_steps.csv").open("w", newline="", encoding="utf-8") as fh:
-        keys = ["storey", "kind", "elevation", "room", "room_name", "sector", "x", "y", "axis_mm", "len_m", "proj_m", "glass_m2", "slat_m2", "hidden", "behind_open", "override", "ground"]
+        keys = ["storey", "kind", "elevation", "room", "room_name", "sector", "x", "y", "axis_mm", "len_m", "proj_m", "glass_m2", "slat_m2", "hidden", "behind_open", "override", "ground", "check_m2"]
         w = csv.DictWriter(fh, fieldnames=keys, extrasaction="ignore")
         w.writeheader()
         w.writerows(steps_all)

@@ -170,6 +170,8 @@ def write_room_information(ctx: Ctx) -> None:
                                        f'&IF(COUNTIF([EN.room],{g("no")})>1," (+"&(COUNTIF([EN.room],{g("no")})-1)&" more)",""))',
                                "Link", None)):
             f = expand(ctx, f, L, i)
+            if k == "glz" and any(e.get("check") for e in r.get("envelope") or []):
+                st = LOAD_NAME                       # D-120: includes glass accepted to be checked (red)
             c = put(ws, g(k), f, st, fmt)
             if k in ("agree", "face"):
                 c.alignment = Alignment(horizontal="left" if k == "face" else "center", vertical="center")
@@ -305,7 +307,7 @@ def write_envelope(ctx: Ctx) -> None:
                                 ("glz", "glazing_m2", "num", "d1"), ("wall", "wall_m2", "num", "d1"), ("roof", "roof_m2", "num", "d1"),
                                 ("shade", "shading", "text", None), ("method", "method", "text", None)):
             _val(ctx, ws, g(k), e.get(f), code, fmt=fmt, kind=kind, cref=g("code"), sref=g("src"), src=src,
-                 label=f, room=e.get("segment") or e["room"])
+                 label=f, room=e.get("segment") or e["room"], style=LOAD_NAME if (k == "glz" and e.get("check")) else None)
         _prov_cells(ctx, ws, g("code"), g("src"), code, src, True)
         calc = {"win_wm2": ("=INDEX(OriWindow,MATCH({ori},OriName,0))", "Link", "d1"),
                 "wall_wm2": ("=INDEX(OriWall,MATCH({ori},OriName,0))", "Link", "d1"),

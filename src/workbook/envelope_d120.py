@@ -41,6 +41,7 @@ def measured(root: Path = Path(".")) -> Dict[tuple, Dict[str, Dict[str, Any]]]:
             continue
         for r in csv.DictReader(p.open(encoding="utf-8")):
             out[(st, r["room_id"])][r["sector"]] = dict(facade_m=float(r["facade_m"]), h=float(r["storey_h_m"]), glass=float(r["glass_m2"]),
+                                                         check=float(r.get("check_m2") or 0), check_items=r.get("check_items", ""),
                                                          hidden_m=float(r["hidden_m"]), court_m=float(r["court_m"]), elevations=r["elevations"])
     return out
 
@@ -74,11 +75,12 @@ def apply(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> List[D
             rows = []
             for sector in SECTORS:
                 v = m.get(sector)
-                if not v or v["facade_m"] * share < 0.5:
+                if not v or (v["facade_m"] * share < 0.5 and v["check"] * share < 0.05):
                     continue
                 f = env.fac.get(sector)
                 L, h = v["facade_m"] * share, v["h"]
                 glass = v["glass"] * share
+                chk = min(v["check"] * share, glass)
                 mp = r.get("_d120_map")
                 if mp:
                     glass, h = glass * mp[0], mp[1]
@@ -89,9 +91,22 @@ def apply(datasets: Dict[str, Dict[str, Any]], root: Path = Path(".")) -> List[D
                     note.append(f"{v['hidden_m'] * share:.1f} m of it is behind another part of the building on the elevation (no glass read there)")
                 if v["court_m"] * share >= 0.5:
                     note.append(f"{v['court_m'] * share:.1f} m faces a court")
+                if mp:
+                    chk = 0.0
+                if chk >= 0.05:
+                    rows.append(dict(
+                        segment=f"{r['number']}-{sector}-CHK", building_part="Facade", face=sector, azimuth_deg=SECTORS.index(sector) * 45,
+                        orientation=sector, glazing_m2=round(chk, 1), wall_m2=0.0, roof_m2=0, check=True,
+                        shading="shading coefficient of the ETTV report, area weighted", method="Glass accepted to be checked (forensic envelope review D-120)",
+                        source=SRC, code="A",
+                        remark=(f"TO BE CHECKED: {chk:.1f} m² of glass on the {sector} facade of plan room {pid}, accepted by Marcus on 27 Nov 2026 "
+                                f"(register items {v['check_items']}); not confirmed on the drawings (see the review register). The wall of the "
+                                f"{sector} facade is on the row {r['number']}-{sector}.")))
+                if L < 0.5 and glass - chk < 0.05:
+                    continue
                 rows.append(dict(
                     segment=f"{r['number']}-{sector}", building_part="Facade", face=sector, azimuth_deg=SECTORS.index(sector) * 45, orientation=sector,
-                    glazing_m2=round(glass, 1), wall_m2=round(wall, 1), roof_m2=0,
+                    glazing_m2=round(glass - chk, 1), wall_m2=round(wall, 1), roof_m2=0,
                     shading="shading coefficient of the ETTV report, area weighted", method="Glass measured on the elevations; wall = facade length x storey height - glass",
                     source=SRC, code="A",
                     remark=(f"Facade {L:.1f} m on the {sector} facade of plan room {pid}" + (f" ({share:.0%} of it, split by area among {len(rooms)} rooms)" if len(rooms) > 1 else "")

@@ -1,5 +1,5 @@
 {
- "_about": "Forensic envelope review D-120, round 1 (26 Nov 2026): corrections to the elevation glass read by src.arch.elev_glazing that the drawing conventions do not let a rule detect. Axis = building mm along the elevation (X from grid 2, Y from grid A). Areas are measured on the elevation PDFs (1:250 vectors). 'add' spreads the area over the visible facade steps in the range (rooms found by the inward probe); 'exclude' sets the glass of the range to 0; 'to_storey' moves the glass of a double-height space read in the upper band to the storey of the room. 'below_ground' marks facade the elevation shows below the ground line: no glass and no exposed wall.",
+ "_about": "Forensic envelope review D-120, round 1 (26 Nov 2026): corrections to the elevation glass read by src.arch.elev_glazing that the drawing conventions do not let a rule detect. Axis = building mm along the elevation (X from grid 2, Y from grid A). Areas are measured on the elevation PDFs (1:250 vectors). 'add' spreads the area over the visible facade steps in the range (rooms found by the inward probe); 'exclude' sets the glass of the range to 0; 'to_storey' moves the glass of a double-height space read in the upper band to the storey of the room. 'below_ground' marks facade the elevation shows below the ground line: no glass and no exposed wall. Items with check=true were accepted by Marcus on 27 Nov 2026 as glass to be checked; the workbooks show their glass in red. 'accepted_open' keeps the former open list for the record; glass outside the courts on the internal sheets is the second view of external facades already counted and is not added again.",
  "items": [
   {
    "id": "OV-N01-1",
@@ -593,7 +593,8 @@
    "action": "cap_room",
    "room_id": "L02-R086",
    "total_m2": 14.5,
-   "evidence": "Council C6 (26 Nov 2026, unanimous after cross-review): the NE curtain wall of the lecture block is drawn as glass (ticked panes, no inner wall; the grey band is the curtain-wall symbol, also in front of the Pre-Function foyer; D-122 covers the stage only, which carries the blackout curtain note). Glass of each room = ticked panes of the L02 row (+23 to +29) over its true plan frontage; the +29 to +32 row and the excess go to an unassigned line (no VOID shown over these rooms on AR-IP-02-03-008). Hold 02.IP.TRED.004: 2.4-2.8 m of chamfer."
+   "evidence": "Council C6 (26 Nov 2026, unanimous after cross-review): the NE curtain wall of the lecture block is drawn as glass (ticked panes, no inner wall; the grey band is the curtain-wall symbol, also in front of the Pre-Function foyer; D-122 covers the stage only, which carries the blackout curtain note). Glass of each room = ticked panes of the L02 row (+23 to +29) over its true plan frontage; the +29 to +32 row and the excess go to an unassigned line (no VOID shown over these rooms on AR-IP-02-03-008). Hold 02.IP.TRED.004: 2.4-2.8 m of chamfer.",
+   "pool": "C6-NE"
   },
   {
    "id": "OV-C6-R087",
@@ -606,7 +607,8 @@
    "action": "cap_room",
    "room_id": "L02-R087",
    "total_m2": 38.0,
-   "evidence": "Council C6 (26 Nov 2026, unanimous after cross-review): the NE curtain wall of the lecture block is drawn as glass (ticked panes, no inner wall; the grey band is the curtain-wall symbol, also in front of the Pre-Function foyer; D-122 covers the stage only, which carries the blackout curtain note). Glass of each room = ticked panes of the L02 row (+23 to +29) over its true plan frontage; the +29 to +32 row and the excess go to an unassigned line (no VOID shown over these rooms on AR-IP-02-03-008). Hold 02.IP.TRED.003: about 5.2 m of chamfer + 1.57 m east return, less the unticked fire-access leaf (about 2.5 m2, glazing unknown)."
+   "evidence": "Council C6 (26 Nov 2026, unanimous after cross-review): the NE curtain wall of the lecture block is drawn as glass (ticked panes, no inner wall; the grey band is the curtain-wall symbol, also in front of the Pre-Function foyer; D-122 covers the stage only, which carries the blackout curtain note). Glass of each room = ticked panes of the L02 row (+23 to +29) over its true plan frontage; the +29 to +32 row and the excess go to an unassigned line (no VOID shown over these rooms on AR-IP-02-03-008). Hold 02.IP.TRED.003: about 5.2 m of chamfer + 1.57 m east return, less the unticked fire-access leaf (about 2.5 m2, glazing unknown).",
+   "pool": "C6-NE"
   },
   {
    "id": "OV-C6-R095",
@@ -619,7 +621,8 @@
    "action": "cap_room",
    "room_id": "L02-R095",
    "total_m2": 0.0,
-   "evidence": "Council C6 (26 Nov 2026, unanimous after cross-review): the NE curtain wall of the lecture block is drawn as glass (ticked panes, no inner wall; the grey band is the curtain-wall symbol, also in front of the Pre-Function foyer; D-122 covers the stage only, which carries the blackout curtain note). Glass of each room = ticked panes of the L02 row (+23 to +29) over its true plan frontage; the +29 to +32 row and the excess go to an unassigned line (no VOID shown over these rooms on AR-IP-02-03-008). Sound Lock 02.IP.TRED.010: internal room behind PC200K walls, no facade."
+   "evidence": "Council C6 (26 Nov 2026, unanimous after cross-review): the NE curtain wall of the lecture block is drawn as glass (ticked panes, no inner wall; the grey band is the curtain-wall symbol, also in front of the Pre-Function foyer; D-122 covers the stage only, which carries the blackout curtain note). Glass of each room = ticked panes of the L02 row (+23 to +29) over its true plan frontage; the +29 to +32 row and the excess go to an unassigned line (no VOID shown over these rooms on AR-IP-02-03-008). Sound Lock 02.IP.TRED.010: internal room behind PC200K walls, no facade.",
+   "pool": "C6-NE"
   },
   {
    "id": "OV-C6-R070",
@@ -632,7 +635,8 @@
    "action": "cap_room",
    "room_id": "L02-R070",
    "total_m2": 0.0,
-   "evidence": "Council C6 (26 Nov 2026, unanimous after cross-review): the NE curtain wall of the lecture block is drawn as glass (ticked panes, no inner wall; the grey band is the curtain-wall symbol, also in front of the Pre-Function foyer; D-122 covers the stage only, which carries the blackout curtain note). Glass of each room = ticked panes of the L02 row (+23 to +29) over its true plan frontage; the +29 to +32 row and the excess go to an unassigned line (no VOID shown over these rooms on AR-IP-02-03-008). Nursing Room 02.IP.TRED.007: only an unticked fire-access leaf fronts the room (about 2.3 m2, glazing unknown)."
+   "evidence": "Council C6 (26 Nov 2026, unanimous after cross-review): the NE curtain wall of the lecture block is drawn as glass (ticked panes, no inner wall; the grey band is the curtain-wall symbol, also in front of the Pre-Function foyer; D-122 covers the stage only, which carries the blackout curtain note). Glass of each room = ticked panes of the L02 row (+23 to +29) over its true plan frontage; the +29 to +32 row and the excess go to an unassigned line (no VOID shown over these rooms on AR-IP-02-03-008). Nursing Room 02.IP.TRED.007: only an unticked fire-access leaf fronts the room (about 2.3 m2, glazing unknown).",
+   "pool": "C6-NE"
   },
   {
    "id": "OV-C6-R085",
@@ -645,10 +649,641 @@
    "action": "cap_room",
    "room_id": "L02-R085",
    "total_m2": 27.4,
-   "evidence": "Council C6 (26 Nov 2026, unanimous after cross-review): the NE curtain wall of the lecture block is drawn as glass (ticked panes, no inner wall; the grey band is the curtain-wall symbol, also in front of the Pre-Function foyer; D-122 covers the stage only, which carries the blackout curtain note). Glass of each room = ticked panes of the L02 row (+23 to +29) over its true plan frontage; the +29 to +32 row and the excess go to an unassigned line (no VOID shown over these rooms on AR-IP-02-03-008). Toilet 02.IP.MAEN.007 (MV): two rows over about 5 m as read."
+   "evidence": "Council C6 (26 Nov 2026, unanimous after cross-review): the NE curtain wall of the lecture block is drawn as glass (ticked panes, no inner wall; the grey band is the curtain-wall symbol, also in front of the Pre-Function foyer; D-122 covers the stage only, which carries the blackout curtain note). Glass of each room = ticked panes of the L02 row (+23 to +29) over its true plan frontage; the +29 to +32 row and the excess go to an unassigned line (no VOID shown over these rooms on AR-IP-02-03-008). Toilet 02.IP.MAEN.007 (MV): two rows over about 5 m as read.",
+   "pool": "C6-NE"
+  },
+  {
+   "id": "OV-CHK-NE",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    100000,
+    120000
+   ],
+   "action": "distribute_pool",
+   "pool": "C6-NE",
+   "sector": "NE",
+   "check": true,
+   "shares": {
+    "L02-R086": 2.6,
+    "L02-R087": 6.8,
+    "L02-R085": 5.0,
+    "L02-R070": 1.2
+   },
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). NE curtain wall glass taken off the rooms by Council C6 (+29 to +32 row and excess, about 60 m2), spread over the rooms behind the NE corner by true frontage (R086 2.6 m, R087 6.8 m, R085 5.0 m, R070 / lobby 1.2 m)."
+  },
+  {
+   "id": "OV-CHK-01",
+   "elevation": "NORTH INTERNAL ELEVATION (IP)",
+   "storey": "L04",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L04-R202",
+   "sector": "N",
+   "area_m2": 9.7,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Court bay at grids 14-15 not drawn (section cut through the staff block); by analogy with grids 15-18."
+  },
+  {
+   "id": "OV-CHK-02",
+   "elevation": "NORTH INTERNAL ELEVATION (IP)",
+   "storey": "L04",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L04-R203",
+   "sector": "N",
+   "area_m2": 9.7,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). As OV-CHK-01."
+  },
+  {
+   "id": "OV-CHK-03",
+   "elevation": "NORTH INTERNAL ELEVATION (IP)",
+   "storey": "L05",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L05-R225",
+   "sector": "N",
+   "area_m2": 19.4,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Court bay at grids 14-15 not drawn; by analogy."
+  },
+  {
+   "id": "OV-CHK-04",
+   "elevation": "SOUTH INTERNAL ELEVATION (IP)",
+   "storey": "L04",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L04-R078",
+   "sector": "S",
+   "area_m2": 9.7,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Court bay at grids 14-15 not drawn; by analogy."
+  },
+  {
+   "id": "OV-CHK-05",
+   "elevation": "SOUTH INTERNAL ELEVATION (IP)",
+   "storey": "L04",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L04-R079",
+   "sector": "S",
+   "area_m2": 9.7,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). As OV-CHK-04."
+  },
+  {
+   "id": "OV-CHK-06",
+   "elevation": "SOUTH INTERNAL ELEVATION (IP)",
+   "storey": "L05",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L05-R083",
+   "sector": "S",
+   "area_m2": 9.7,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Court bay at grids 14-15 not drawn; by analogy."
+  },
+  {
+   "id": "OV-CHK-07",
+   "elevation": "SOUTH INTERNAL ELEVATION (IP)",
+   "storey": "L05",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L05-R084",
+   "sector": "S",
+   "area_m2": 9.7,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). As OV-CHK-06."
+  },
+  {
+   "id": "OV-CHK-08",
+   "elevation": "SOUTH ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L02-R122",
+   "sector": "S",
+   "area_m2": 35.6,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Grey curtain wall above the MEP enclosure at grid 20-20.6 (21.6 m2 in the L02 band + 14 m2 in the L03 band), taken as Pre-Function."
+  },
+  {
+   "id": "OV-CHK-09",
+   "elevation": "SOUTH ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L02-R122",
+   "sector": "S",
+   "area_m2": 11.5,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Upper row of the halftone Pre-Function window at 154.6-158.6 m in the L03 band."
+  },
+  {
+   "id": "OV-CHK-10",
+   "elevation": "NORTH ELEVATION (IP)",
+   "storey": "L01",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L01-R008",
+   "sector": "N",
+   "area_m2": 66.0,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Hatched (obscured) glazing of the Outpatient Pharmacy shopfront at grids 10-13."
+  },
+  {
+   "id": "OV-CHK-11",
+   "elevation": "NORTH ELEVATION (IP)",
+   "storey": "L01",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L01-R168",
+   "sector": "N",
+   "area_m2": 60.0,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Halftone glazing across the NV drop-off plaza at 105.5-129 m, taken as the north wall of ED Wait (lower bound 20 m x 3 m)."
+  },
+  {
+   "id": "OV-CHK-12",
+   "elevation": "NORTH ELEVATION (IP)",
+   "storey": "L01",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L01-R099",
+   "sector": "N",
+   "area_m2": 23.0,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Shopfront in front of the NV lift lobby at grids 20-22 (NV: no cooling load)."
+  },
+  {
+   "id": "OV-CHK-13",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L05",
+   "axis_mm": [
+    70400,
+    73300
+   ],
+   "action": "add_room",
+   "area_m2": 4.4,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Corner panel at grid J with fins and an opening light: glass behind assumed. No visible facade step at grid J; given to the room at that corner on the plan (ELEC).",
+   "room_id": "L05-R232",
+   "sector": "E"
+  },
+  {
+   "id": "OV-CHK-14",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L05",
+   "axis_mm": [
+    118200,
+    121200
+   ],
+   "action": "add",
+   "area_m2": 4.4,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Corner panel at grid R with fins and an opening light: glass behind assumed."
+  },
+  {
+   "id": "OV-CHK-15",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L06",
+   "axis_mm": [
+    70400,
+    73300
+   ],
+   "action": "add_room",
+   "area_m2": 4.4,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). As OV-CHK-13 on L06. No visible facade step at grid J; given to the room at that corner on the plan (ELEC).",
+   "room_id": "L06-R222",
+   "sector": "E"
+  },
+  {
+   "id": "OV-CHK-16",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L06",
+   "axis_mm": [
+    118200,
+    121200
+   ],
+   "action": "add",
+   "area_m2": 4.4,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). As OV-CHK-14 on L06."
+  },
+  {
+   "id": "OV-CHK-17",
+   "elevation": "WEST ELEVATION (IP)",
+   "storey": "L03",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L03-R103",
+   "sector": "W",
+   "area_m2": 15.0,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Louvre block K-J in front of the CSSD meeting room: glass behind assumed (upper bound)."
+  },
+  {
+   "id": "OV-CHK-18",
+   "elevation": "WEST ELEVATION (IP)",
+   "storey": "L04",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L04-R184",
+   "sector": "W",
+   "area_m2": 15.0,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Louvre block K-J in front of the store (AC): glass behind assumed (upper bound)."
+  },
+  {
+   "id": "OV-CHK-19",
+   "elevation": "WEST ELEVATION (IP)",
+   "storey": "L04",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L04-R239",
+   "sector": "W",
+   "area_m2": 11.0,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Bar band H-E at 54-60.3 m in front of the AC corridor: glass behind assumed (visible part)."
+  },
+  {
+   "id": "OV-CHK-20",
+   "elevation": "WEST ELEVATION (IP)",
+   "storey": "L05",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L05-R054",
+   "sector": "W",
+   "area_m2": 6.5,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Louvre strip S-R in front of the meeting room: glass behind assumed (upper bound)."
+  },
+  {
+   "id": "OV-CHK-21",
+   "elevation": "WEST ELEVATION (IP)",
+   "storey": "L05",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L05-R202",
+   "sector": "W",
+   "area_m2": 15.0,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Louvre block K-J in front of Workstation-OT: glass behind assumed (upper bound)."
+  },
+  {
+   "id": "OV-CHK-22",
+   "elevation": "WEST ELEVATION (IP)",
+   "storey": "L06",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L06-R044",
+   "sector": "W",
+   "area_m2": 6.5,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Louvre strip S-R in front of the meeting room: glass behind assumed (upper bound)."
+  },
+  {
+   "id": "OV-CHK-23",
+   "elevation": "WEST ELEVATION (IP)",
+   "storey": "L06",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L06-R235",
+   "sector": "W",
+   "area_m2": 15.0,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Louvre block K-J in front of the office (DSOTSUPP-02): glass behind assumed (upper bound)."
+  },
+  {
+   "id": "OV-CHK-24",
+   "elevation": "WEST ELEVATION (IP)",
+   "storey": "L07",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L07-R103",
+   "sector": "W",
+   "area_m2": 5.5,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Window module with vertical fins at 44.7-60.3 m in front of the STAFF-01 offices (22 m2 upper bound, split over four offices)."
+  },
+  {
+   "id": "OV-CHK-25",
+   "elevation": "WEST ELEVATION (IP)",
+   "storey": "L07",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L07-R102",
+   "sector": "W",
+   "area_m2": 5.5,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). As OV-CHK-24."
+  },
+  {
+   "id": "OV-CHK-26",
+   "elevation": "WEST ELEVATION (IP)",
+   "storey": "L07",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L07-R092",
+   "sector": "W",
+   "area_m2": 5.5,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). As OV-CHK-24."
+  },
+  {
+   "id": "OV-CHK-27",
+   "elevation": "WEST ELEVATION (IP)",
+   "storey": "L07",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L07-R094",
+   "sector": "W",
+   "area_m2": 5.5,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). As OV-CHK-24."
+  },
+  {
+   "id": "OV-CHK-28",
+   "elevation": "WEST INTERNAL ELEVATION (IP)",
+   "storey": "L03",
+   "axis_mm": [
+    88800,
+    104300
+   ],
+   "action": "add",
+   "area_m2": 40.0,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Atrium shopfront row behind the 1.5 m batten screen in front of the training rooms (only the top 0.95 m visible)."
+  },
+  {
+   "id": "OV-CHK-29",
+   "elevation": "WEST INTERNAL ELEVATION (IP)",
+   "storey": "L03",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L03-R114",
+   "sector": "W",
+   "area_m2": 23.0,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Ticked panes and a double door at 80-88 m south of the L03 court; room taken as corridor L03-R114 (CORE-01)."
+  },
+  {
+   "id": "OV-CHK-30",
+   "elevation": "WEST INTERNAL ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L02-R166",
+   "sector": "W",
+   "area_m2": 22.0,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Ticked panes and doors on the atrium at 75-88 m (20-25 m2); room taken as Trg L02-R166."
+  },
+  {
+   "id": "OV-CHK-31",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L02-R193",
+   "sector": "E",
+   "area_m2": 20.0,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Set-back shopfront under the canopy in front of Food Court and BOH (MV: no cooling load)."
+  },
+  {
+   "id": "OV-CHK-32",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L03",
+   "axis_mm": [
+    114100,
+    116100
+   ],
+   "action": "assign",
+   "room_id": "L03-R039",
+   "only_rooms": [
+    ""
+   ],
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). NE chamfer glass on steps with no room, given to the neighbouring Nursing Room (MV)."
+  },
+  {
+   "id": "OV-CHK-33",
+   "elevation": "NORTH ELEVATION (IP)",
+   "storey": "L07",
+   "axis_mm": [
+    59400,
+    63800
+   ],
+   "action": "assign",
+   "room_id": "L07-R002",
+   "only_rooms": [
+    ""
+   ],
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Glass in front of an unzoned space west of Off L07-R002; given to the office (STAFF-02)."
+  },
+  {
+   "id": "OV-CHK-34",
+   "elevation": "WEST ELEVATION (IP)",
+   "storey": "L03",
+   "axis_mm": [
+    108300,
+    116700
+   ],
+   "action": "add",
+   "area_m2": 2.6,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Bottom 0.38 m of the two windows either side of grid P that starts below L03 FFL."
+  },
+  {
+   "id": "OV-CHK-35",
+   "elevation": "NORTH ELEVATION (IP)",
+   "storey": "L04",
+   "axis_mm": [
+    20000,
+    62000
+   ],
+   "action": "add",
+   "area_m2": 94.0,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Slatted window-type modules with opening lights in front of Chg, Trg, MRI and Lounge: glass behind assumed (slatted area as upper bound)."
+  },
+  {
+   "id": "OV-CHK-36",
+   "elevation": "SOUTH ELEVATION (IP)",
+   "storey": "L06",
+   "axis_mm": [
+    30000,
+    62000
+   ],
+   "action": "add",
+   "area_m2": 38.0,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Slatted window-type modules with opening lights in front of the theatres and Sterile Prep: glass behind assumed (slatted area as upper bound)."
+  },
+  {
+   "id": "OV-CHK-37",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L02-R087",
+   "sector": "E",
+   "area_m2": 2.5,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Fire-access leaf in the east return of the VIP Hold: glazing assumed."
+  },
+  {
+   "id": "OV-CHK-38",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "add_room",
+   "room_id": "L02-R070",
+   "sector": "NE",
+   "area_m2": 2.3,
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Fire-access leaf in front of the Nursing Room: glazing assumed (MV)."
+  },
+  {
+   "id": "OV-CHK-39",
+   "elevation": "NORTH ELEVATION (IP)",
+   "storey": "L02",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "flag_room",
+   "room_ids": [
+    "L02-R085"
+   ],
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Vision glass drawn in front of the toilet; obscured glass or spandrel not shown."
+  },
+  {
+   "id": "OV-CHK-40",
+   "elevation": "EAST ELEVATION (IP)",
+   "storey": "L06",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "flag_room",
+   "room_ids": [
+    "L06-R172",
+    "L06-R148",
+    "L06-R129",
+    "L06-R190",
+    "L06-R173"
+   ],
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Vision glass drawn in front of the court toilets."
+  },
+  {
+   "id": "OV-CHK-41",
+   "elevation": "SOUTH ELEVATION (IP)",
+   "storey": "L05",
+   "axis_mm": [
+    0,
+    0
+   ],
+   "action": "flag_room",
+   "room_ids": [
+    "L05-R251",
+    "L05-R266"
+   ],
+   "check": true,
+   "evidence": "Marcus, 27 Nov 2026: accepted as glass, TO BE CHECKED (red). Glazing in front of the MG vacuum plant and AHU at 85.9-91.9 m; shadow box not shown."
   }
  ],
- "open": [
+ "accepted_open": [
   "Staff-block bays at grids 14-15 (L04, L05, N and S court walls, about 19.4 m2 each): the internal sections are cut through the staff block, so these ward windows are not drawn. Not added.",
   "North L01 Pharmacy: about 66 m2 of hatched (obscured) glazing at grids 10-13; counted opaque.",
   "North and east L01 lift-lobby shopfronts in front of NV lift lobbies: no cooling load, not counted.",
