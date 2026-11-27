@@ -21,11 +21,11 @@ sys.path.insert(0, str(ROOT))
 import src.sim.partload_reheat as P  # noqa: E402
 from src.rfi.me0274_partload import w_of  # noqa: E402
 
-WB = ROOT / "out/issue/DRAFT_2026-11-27_R21/workbooks/AIGH_C2_D47_Admin_Workspace_Thermal_Load_Calc_RevA.xlsx"
+WB = ROOT / "out/issue/DRAFT_2026-11-27_R22/workbooks/AIGH_C2_D47_Admin_Workspace_Thermal_Load_Calc_RevA.xlsx"
 OUT = ROOT / "out/issue/RFI_ME-0274_reply/scheme.json"
 TAG = "AHU-B-06-06STAFF-01"
 TS, COIL = 17.6, 12.0
-ACC = {"LL ALLIP.06.01", "LL ALLIP.06.02", "AMSC 12.01.02", "AMSC 12.01.05", "AMSC 07.06.03"}
+ACC = {"LL ALLIP.06.01", "LL ALLIP.06.02", "AMSC 12.01.02", "AMSC 12.01.05", "AMSC 07.06.03", "AMSC 10.19.03"}   # 24 h, negligible load (D-126, D-127)
 R13 = ["ANWSIP6 Cl.06.01", "ANWSIP6 WS.06.07", "ANWSIP6 WS.06.11", "ANWSIP6 WS.06.12", "ANWSIP6 WS.06.13", "ANWSIP6 WS.06.14",
        "ANWSIP6 WS.06.15", "ANWSIP6 WS.06.16", "ANWSIP6 WS.06.24", "ANWSIP6 MR.06.01", "ANWSIP6 MR.06.02", "ANWSIP6 MR.06.03", "ANWSIP6 AM.06.01"]
 BOX_MIN = 10      # smallest VAV box setting, L/s (ASSUMPTION)

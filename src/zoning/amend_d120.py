@@ -23,23 +23,29 @@ csv.field_size_limit(1 << 30)
 
 RELABEL = {"L02-R108": dict(room_name="Stage (Lecture Theatre TRED 09.03.05)", mode_label="AC", **{"class": "AHU-B-03-02AUDIT-08"}, class_kind="AHU",
                             notes="D-122 (Marcus, 26 Nov 2026): the outline tagged S.33 is the lecture theatre stage, AC, on the lecture theatre unit; "
-                                  "the stair S.33 is a small internal stair. The curtain wall in front of the stage is not a window.")}
+                                  "the stair S.33 is a small internal stair. The curtain wall in front of the stage is not a window."),
+           # D-127 (Marcus, 27 Nov 2026): the Equipment Store AMSC 10.19.03 (plan tag 'Str / AC (24HR)') is on AHU-B-06-06STAFF-01, as the tender
+           # air-side schematic IP-BH-06068 shows; it replaces the MV mode of the part plans (D-107, D-108) for this room
+           "L06-R205": dict(room_name="Store - Equipment (AMSC 10.19.03)", mode_label="AC (24HR)", **{"class": "AHU-B-06-06STAFF-01"}, class_kind="AHU",
+                            ruling="D-127", notes="D-127 (Marcus, 27 Nov 2026): Store - Equipment AMSC 10.19.03 (Str, AC (24HR)) included in "
+                                  "AHU-B-06-06STAFF-01, as on the tender air-side schematic IP-BH-06068 (STORE EQ 10.19.03).")}
 
 
 def relabel():
-    p = REG / "zone_assignment_L02.csv"
-    with p.open(encoding="utf-8", newline="") as fh:
-        rows = list(csv.DictReader(fh))
-    head = list(rows[0].keys())
-    for r in rows:
-        if r["room_id"] in RELABEL:
-            for k, v in RELABEL[r["room_id"]].items():
-                if k in r:
-                    r[k] = v
-    with p.open("w", encoding="utf-8", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=head)
-        w.writeheader()
-        w.writerows(rows)
+    for st in sorted({k.split("-")[0] for k in RELABEL}):
+        p = REG / f"zone_assignment_{st}.csv"
+        with p.open(encoding="utf-8", newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        head = list(rows[0].keys())
+        for r in rows:
+            if r["room_id"] in RELABEL:
+                for k, v in RELABEL[r["room_id"]].items():
+                    if k in r:
+                        r[k] = v
+        with p.open("w", encoding="utf-8", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=head)
+            w.writeheader()
+            w.writerows(rows)
 
 
 # D-125 (Marcus, 27 Nov 2026): the lift shafts are not part of the AGV lift lobbies. The shaft stacks (AL.04-06 in L06-R086, AL.07-09 in

@@ -27,3 +27,28 @@ def apply(datasets: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
         if hit and not any(s_["id"] == SRC for s_ in d.get("sources", [])):
             d.setdefault("sources", []).extend(s_ for s_ in BUILTIN_SOURCES if s_["id"] == SRC)
     return log
+
+
+# D-127 (Marcus, 27 Nov 2026): Store - Equipment AMSC 10.19.03 is served by AHU-B-06-06STAFF-01 (tender air-side schematic IP-BH-06068,
+# STORE EQ 10.19.03; plan tag 'Str / AC (24HR)'). Applied before consolidation, which moves the room to the workbook of the unit (D-089).
+UNIT_SET = {"AMSC 10.19.03": "AHU-B-06-06STAFF-01"}
+
+
+def assign_units(datasets: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    from .ctx import BUILTIN_SOURCES
+    log = []
+    for n, d in datasets.items():
+        for r in d["rooms"]:
+            u = UNIT_SET.get(r.get("number"))
+            if u and r.get("ahu") != u:
+                log.append(dict(workbook=f"D{n}", room=r["number"], before=r.get("ahu"), system_before=r.get("system_type"), unit=u))
+                r["ahu"] = u
+                r["system_type"] = None
+                r.setdefault("prov", {})
+                if isinstance(r["prov"], dict):
+                    r["prov"]["ahu"] = ["S", SRC]
+                r["remark"] = (r.get("remark") or "").rstrip() + f" Served by {u} (Marcus 27 Nov 2026, D-127; tender air-side schematic IP-BH-06068)."
+                if not any(s_["id"] == SRC for s_ in d.get("sources", [])):
+                    d.setdefault("sources", []).extend(s_ for s_ in BUILTIN_SOURCES if s_["id"] == SRC)
+    return log
+

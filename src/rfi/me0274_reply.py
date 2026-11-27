@@ -1,6 +1,6 @@
 """Reply to AH-C2-RCC-RFI-ME-0274 (27 Nov 2026), AHU-B-06-06STAFF-01, on the part-load scheme ruled by Marcus (D-126).
 
-Values from src/rfi/me0274_scheme.py (scheme.json) and the R21 D47 workbook. Pages: 1 RFI form with the reply; 2 AHU zoning; 3 design basis,
+Values from src/rfi/me0274_scheme.py (scheme.json) and the R22 D47 workbook. Pages: 1 RFI form with the reply; 2 AHU zoning; 3 design basis,
 AHU airflow and coils; 4 room airflow schedule; 5 part-load condition; 6 supply temperature and findings; 7-8 Equipment Schedule Part A / B.
 ``python3 -I src/rfi/me0274_reply.py``
 """
@@ -12,7 +12,7 @@ import pymupdf
 
 BASE = ("data/uploads/rfi_me0274_20261127/unz/ME-0274 - Clarification on the AHU serving on L6 Surgery Admin Area/Reply/"
         "AH-C2-RCC-RFI-ME-0274_Beca Reply.pdf")
-WB = "out/issue/DRAFT_2026-11-27_R21/workbooks/AIGH_C2_D47_Admin_Workspace_Thermal_Load_Calc_RevA.xlsx"
+WB = "out/issue/DRAFT_2026-11-27_R22/workbooks/AIGH_C2_D47_Admin_Workspace_Thermal_Load_Calc_RevA.xlsx"
 EQS = "data/source/Basis/5. Equipment Schedules (Corr 5).pdf"
 SCHEME = "out/issue/RFI_ME-0274_reply/scheme.json"
 OUT = "out/issue/RFI_ME-0274_reply/AH-C2-RCC-RFI-ME-0274_Beca Reply.pdf"
@@ -38,14 +38,14 @@ assert len(R) == A("Rooms on this unit")
 
 area = sum(x["area"] for x in R)
 SUP, ROOMS = S["ahu_supply"], S["room_supply"]
-S_SUP, S_COIL, S_RH, S_OAMIN, S_OAMAX = 7700, 240, 60, 950, 2600       # schedule values (rounded up)
+S_SUP, S_COIL, S_RH, S_OAMIN, S_OAMAX = 7700, 240, 65, 950, 2600       # schedule values (rounded up)
 CHW, HW = S_COIL / (4.186 * 8), S_RH / (4.19 * 10)
 assert S_SUP >= SUP and S_COIL >= S["coil_design"] and S_RH >= S["central_peak"] and S_OAMAX >= S["oa_work_max"] and S_OAMIN >= S["oa_sum_rooms"]
 FAN_KW = 1.21 * SUP * S["fan_rise"] / 1000
 R13 = [x for x in R if x["vmin_basis"].startswith("28")]
 F = S["final"]; R14 = S["ref14"]; R17 = S["ref176"]
 pct = lambda a, b: f"{100 * a / b:.0f} %"
-acc_names = "AGV Lift Lobbies (2), AGV Bays (2) and Clean Utility"
+acc_names = "AGV Lift Lobbies (2), AGV Bays (2), Clean Utility and Store - Equipment AMSC 10.19.03"
 
 P1 = ("1. Serving AHU: AHU-B-06-06STAFF-01 (located at L6) serves the Surgery Admin Area at L6 and the rooms adjacent to the AGV Lift Lobbies (GL 13~14 / K~R). "
       "The tags AHU-B-07-06ADMIN-06 and AHU-B-07-06ADMIN-07 on the L6 and L7 ACMV layouts are superseded by AHU-B-06-06STAFF-01. Refer to the attached AHU Zoning.\n"
@@ -162,8 +162,9 @@ B. METHOD
 Hourly over one year (Changi typical meteorological year, 8,760 h; {S['hours_work']:,} working hours). Room loads without the safety
 factor: glazing and wall by facade orientation with the hourly solar radiation, infiltration of facade rooms 0.5 ACH, people,
 lighting and small power on office schedules. Offices operate Mon-Fri 08:00-18:00 and are off after hours; rooms noted 24 h
-(AGV Lift Lobbies, AGV Bays, Clean Utility, DSOT 11.06.04 and 11.27.01) operate all hours. Supply fan rise {S['fan_rise']:.1f} K x (flow / design flow)^2.
-Rooms with no DD Booklet criteria (Cleaners Room, two Toilets) are not tested.
+(AGV Lift Lobbies, AGV Bays, Clean Utility, Store - Equipment, DSOT 11.06.04 and 11.27.01) operate all hours. Supply fan rise {S['fan_rise']:.1f} K x (flow / design flow)^2.
+Rooms with no DD Booklet criteria (Cleaners Room, two Toilets) are not tested. Store - Equipment AMSC 10.19.03 (AC 24 h) is served by
+this AHU as on the tender air-side schematic IP-BH-06068.
 
 C. RESULTS (working hours with at least one room out of range; average number of rooms below the minimum temperature)
                                                           Cold or humid    Rooms cold    RH alone
@@ -284,11 +285,11 @@ def schedule_page(d, src, pno, changes, title):
 
 
 
-ZONING = "out/issue/DRAFT_2026-11-27_R21/zoning/AIGH_IP_AHU_Zoning_L06.pdf"
+ZONING = "out/issue/DRAFT_2026-11-27_R22/zoning/AIGH_IP_AHU_Zoning_L06.pdf"
 
 
 def zoning_page(d, pno):
-    """AHU zoning page: the 6th storey AHU zoning sheet (R21) with only the layer of AHU-B-06-06STAFF-01 on (the zones, labels and legend of the
+    """AHU zoning page: the 6th storey AHU zoning sheet (R22) with only the layer of AHU-B-06-06STAFF-01 on (the zones, labels and legend of the
     other units off), without the room notes, cropped to the served area (GL 13~18 / K~S) and placed as an image: nothing of the other areas
     is in the file. Replaces page pno."""
     z = pymupdf.open(ZONING)
@@ -400,7 +401,7 @@ The Contractor shall produce the air-side schematic shop drawing from these airf
 - 17.6 degC: with 14 degC supply the VAV minimum is 90 % of the design airflow and the rooms cannot turn down. At 17.6 degC the minimum is {S['vmin_pct_17']} % of the design airflow and the rooms follow their load. 17.6 degC is the supply temperature that the room sensible load requires at the room airflows of the 14 degC sizing; the room airflows are re-sized on it.
 - Dehumidification: with the coil leaving at 15.4 degC the rooms exceed their RH limit in {R17['hours_humid']:.0f} % of the working hours. The coil leaves at {S['coil_leaving']:.0f} degC and the central reheat restores the supply temperature.
 - Outdoor air: each room receives outdoor air in proportion to its supply airflow. With the intake equal to the sum of the room outdoor air, rooms with a high outdoor-air share are short, already at design flow ({short_acc}). The intake is reset to the room that needs the most outdoor air; an outdoor-airflow measuring station, modulating outdoor-air damper and BMS reset are required.
-- 24 h rooms with negligible load (AGV Lift Lobbies, AGV Bays, Clean Utility): on central reheat only; they take the supply temperature and are below their DD Booklet minimum temperature in most hours (about 17-18 degC).
+- 24 h rooms with negligible load (AGV Lift Lobbies, AGV Bays, Clean Utility, Store - Equipment AMSC 10.19.03): on central reheat only; they take the supply temperature and are below their DD Booklet minimum temperature in most hours (about 17-18 degC).
 - Rooms above 25 degC at peak solar load also without reheat: {', '.join(h['room'] for h in S['hot_rooms'][:3])}. The glazing of AMSC 12.01.01 is under review by the Engineer.
 - The reduced minimum of the 13 rooms is below the DD Booklet air change during occupied hours; their outdoor air is maintained by the intake reset. The Contractor shall set these VAV minimums to the values on page 4.
 - Working hours and office schedules are assumptions (the DD Booklet gives none).

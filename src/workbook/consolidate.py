@@ -252,6 +252,8 @@ def main(argv=None) -> int:
     print(f"room IDs (D-093): {len(ids['became'])} space(s) became DPA rooms, {len(ids['merged'])} merged into brief rooms, "
           f"{len(ids['removed'])} taken out (no brief room)", flush=True)
     print(f"capture: {len(cap['linked'])} room(s) linked to a unit by zoning, {len(cap['added'])} room(s) added from the drawing", flush=True)
+    from .marcus_20261127 import assign_units as d127                 # D-127: rooms assigned to a unit by the Engineer
+    print(f"units set (D-127): {d127(datasets)}", flush=True)
     rep = consolidate(datasets)
     rep["capture"] = cap
     rep["room_ids"] = ids
