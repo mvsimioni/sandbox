@@ -42,6 +42,50 @@ def relabel():
         w.writerows(rows)
 
 
+# D-125 (Marcus, 27 Nov 2026): the lift shafts are not part of the AGV lift lobbies. The shaft stacks (AL.04-06 in L06-R086, AL.07-09 in
+# L06-R188; shafts 2.11 x 1.76 m on a 2.94 m pitch, read on the 6th storey GA) are cut out of the lobby outlines, with the walls between them.
+SHAFT_CUT = {"L06": {"L06-R086": (92030, 112810, 94530, 121560), "L06-R188": (91710, 78110, 94220, 86930)}}
+
+
+def cut_shafts():
+    import numpy as np
+    from shapely import wkt
+    from shapely.geometry import box
+    out = []
+    for st, cuts in SHAFT_CUT.items():
+        p = REG / f"room_polygons_{st}.csv"
+        bak = WORK / f"{p.stem}_before_D125.csv"
+        if not bak.exists():
+            shutil.copy(p, bak)
+        with p.open(encoding="utf-8", newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        head = list(rows[0].keys())
+        A, B = [], []
+        for r in rows:
+            if r.get("polygon_pv_wkt") and r.get("polygon_building_mm_wkt"):
+                a, b = wkt.loads(r["polygon_building_mm_wkt"]).centroid, wkt.loads(r["polygon_pv_wkt"]).centroid
+                A.append([a.x, a.y, 1.0]); B.append([b.x, b.y])
+        M, *_ = np.linalg.lstsq(np.array(A), np.array(B), rcond=None)
+        for r in rows:
+            if r["room_id"] not in cuts:
+                continue
+            x0, y0, x1, y1 = cuts[r["room_id"]]
+            mm = box(x0, y0, x1, y1)
+            c = np.array([[x0, y0, 1], [x1, y0, 1], [x1, y1, 1], [x0, y1, 1]]) @ M
+            pv = box(c[:, 0].min(), c[:, 1].min(), c[:, 0].max(), c[:, 1].max())
+            for k, cut in (("polygon_building_mm_wkt", mm), ("zoning_building_mm_wkt", mm), ("polygon_pv_wkt", pv)):
+                if r.get(k):
+                    g = wkt.loads(r[k]).buffer(0)
+                    if g.intersects(cut):
+                        r[k] = g.difference(cut).buffer(0).wkt
+            out.append((r["room_id"], round(wkt.loads(r["polygon_building_mm_wkt"]).area / 1e6, 1)))
+        with p.open("w", encoding="utf-8", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=head)
+            w.writeheader()
+            w.writerows(rows)
+    return out
+
+
 def run():
     n = 0
     for st, ids in DROP.items():
@@ -66,3 +110,4 @@ def run():
 if __name__ == "__main__":
     print(run(), "rows removed")
     relabel()
+    print("lift shafts cut:", cut_shafts())

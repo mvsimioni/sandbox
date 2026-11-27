@@ -1,4 +1,4 @@
-"""Updated reply to AH-C2-RCC-RFI-ME-0274 (27 Nov 2026), from the workbook issue R20.
+"""Updated reply to AH-C2-RCC-RFI-ME-0274 (27 Nov 2026), from the workbook issue R21 (R20 + D-125).
 
 Base: the reply as re-issued on 25 Nov 2026 (6 pages: RFI form with the reply, AHU zoning, design basis, room airflows, two Equipment Schedule
 pages). Pages 1-2 are kept (the reply text box on page 1 is replaced); pages 3-6 are rebuilt from D47 R20 (outdoor air by D-110 / D-111,
@@ -10,7 +10,7 @@ import pymupdf
 
 BASE = ("data/uploads/rfi_me0274_20261127/unz/ME-0274 - Clarification on the AHU serving on L6 Surgery Admin Area/Reply/"
         "AH-C2-RCC-RFI-ME-0274_Beca Reply.pdf")
-WB = "out/issue/DRAFT_2026-11-27_R20/workbooks/AIGH_C2_D47_Admin_Workspace_Thermal_Load_Calc_RevA.xlsx"
+WB = "out/issue/DRAFT_2026-11-27_R21/workbooks/AIGH_C2_D47_Admin_Workspace_Thermal_Load_Calc_RevA.xlsx"
 EQS = "data/source/Basis/5. Equipment Schedules (Corr 5).pdf"
 OUT = "out/issue/RFI_ME-0274_reply_R20/AH-C2-RCC-RFI-ME-0274_Beca Reply.pdf"
 TAG = "AHU-B-06-06STAFF-01"
@@ -30,7 +30,7 @@ col = {str(ah.cell(5, c).value): c for c in range(1, ah.max_column + 1) if ah.ce
 row = next(r for r in range(7, 12) if ah.cell(r, 1).value == TAG)
 A = lambda k: ah.cell(row, col[k]).value
 psy = {str(ah.cell(22, c).value): ah.cell(24, c).value for c in range(1, ah.max_column + 1) if ah.cell(22, c).value}
-assert len(rooms) == A("Rooms on this unit") == 49 and round(tot(3)) == round(A("Room supply")) == 5980
+assert len(rooms) == A("Rooms on this unit") and round(tot(3)) == round(A("Room supply"))
 en = wb["Envelope"]
 nums = {x[0] for x in rooms}
 glass = sum(r_[6] for r_ in en.iter_rows(min_row=7, values_only=True) if r_[0] in nums and isinstance(r_[6], (int, float)))
@@ -134,9 +134,10 @@ D. NOTES
 4. The served area is shown on the attached AHU Zoning (page 2).
 5. Pages 5 and 6: Equipment Schedule (Corrigendum 5), Air Handling Unit Schedule Part A and
    Part B, with the corrected values of AHU-B-06-06STAFF-01 in red. Values not marked are unchanged.
-6. Changes from the reply of 25 Nov 2026: 49 rooms (44); outdoor air as the sum of the room
+6. Changes from the reply of 25 Nov 2026: {len(rooms)} rooms (44); outdoor air as the sum of the room
    outdoor air (was the highest room outdoor-air fraction x AHU supply, 2,225 L/s); exhaust of the
-   two Toilets added; safety factor 20 % (10 %); envelope measured on the elevations.
+   two Toilets added; safety factor 20 % (10 %); envelope measured on the elevations; lift shafts
+   excluded from the AGV Lift Lobbies and Multipurpose Room - Admin at its DPA area (8.85 m2).
 """
 
 PART_A = [("9000", f"{S_SUP}"), ("600", f"{S_COIL}"), ("600.0", f"{S_RH}"), ("307", f"{S_OA}")]
@@ -192,28 +193,26 @@ def schedule_page(d, src, pno, changes, title):
     box(q, pymupdf.Rect(40, 10, W - 40, 32), title, 9, "hebo")
 
 
+ZONING = "out/issue/DRAFT_2026-11-27_R21/zoning/AIGH_IP_AHU_Zoning_L06.pdf"
+
+
 def zoning_page(d, pno):
-    """AHU zoning: only the area served by this AHU (zone of AHU-B-06-06STAFF-01, GL 13~18 / K~S). The labels of the other units, the rest of the
-    storey sheet, its legend and its notes are removed (redacted); the served area is placed on a new page with a caption."""
-    tmp = pymupdf.open()
-    tmp.insert_pdf(d, from_page=pno, to_page=pno)
-    pg = tmp[0]
-    keep = pymupdf.Rect(1276, 504, 2252, 1678)          # display coordinates (pt) of the blue zone with a margin
-    for t in ("AHU-B-07-06ADMIT-02", "AHU-B-07-06SLEEP-01", "FCU-B-06-06COR-01A/B", "FCU duty/standby", "(tag to confirm)"):
-        for r in pg.search_for(t):
-            pg.add_redact_annot(r, fill=(1, 1, 1))
-    R, M = pg.rect, pg.derotation_matrix                # the sheet is rotated: these areas go in unrotated coordinates
-    for r in (pymupdf.Rect(0, 0, R.width, keep.y0), pymupdf.Rect(0, keep.y1, R.width, R.height),
-              pymupdf.Rect(0, keep.y0, keep.x0, keep.y1), pymupdf.Rect(keep.x1, keep.y0, R.width, keep.y1)):
-        pg.add_redact_annot((r * M).normalize(), fill=(1, 1, 1))
-    pg.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_REMOVE, graphics=pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED)
+    """AHU zoning page: the 6th storey AHU zoning sheet (R21) with only the layer of AHU-B-06-06STAFF-01 on (the zones, labels and legend of the
+    other units off), without the room notes, cropped to the served area (GL 13~18 / K~S) and placed as an image: nothing of the other areas
+    is in the file. Replaces page pno."""
+    z = pymupdf.open(ZONING)
+    ocg = z.get_ocgs()
+    on = [x for x, v in ocg.items() if v["name"] == TAG]
+    z.set_layer(-1, on=on, off=[x for x in ocg if x not in on])
+    pg = z[1]
+    keep = pymupdf.Rect(1276, 504, 2252, 1678)          # display coordinates (pt) of the served area with a margin
+    pix = pg.get_pixmap(dpi=200, clip=keep, annots=False)
     top = 50
     q = d.new_page(pno=pno + 1, width=keep.width, height=keep.height + top)
-    pg.set_cropbox((keep * M).normalize())
-    pix = pg.get_pixmap(dpi=200)                      # image of the cleaned area only: nothing of the other areas stays in the file
     q.insert_image(pymupdf.Rect(0, top, keep.width, keep.height + top), pixmap=pix)
     box(q, pymupdf.Rect(20, 12, keep.width - 20, 44),
-        "AHU zoning, 6th storey: area served by AHU-B-06-06STAFF-01 (shaded blue): Surgery Admin Area and rooms adjacent to the AGV Lift Lobbies", 11, "hebo")
+        "AHU zoning, 6th storey: area served by AHU-B-06-06STAFF-01 (shaded blue): Surgery Admin Area and rooms adjacent to the AGV Lift Lobbies "
+        "(lift shafts excluded)", 11, "hebo")
     d.delete_page(pno)
 
 

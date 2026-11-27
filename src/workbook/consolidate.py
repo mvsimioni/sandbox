@@ -266,6 +266,8 @@ def main(argv=None) -> int:
     _l43 = []
     d43_rooms(datasets, _l43)
     print(f"manual changes re-applied after consolidation (D-114): D43 {len(_l43)}", flush=True)
+    from .marcus_20261127 import apply as d125                        # D-125: DPA area for the L6 lift lobbies and multipurpose room
+    print(f"room areas set to DPA (D-125): {len(d125(datasets))}", flush=True)
     from .room_coverage import run as coverage
     cov = coverage(Path("."), datasets, write=True)
     rep["coverage_not_represented"] = [r for r in cov if not r["represented_by"]]

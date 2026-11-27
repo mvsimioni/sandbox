@@ -62,6 +62,13 @@ BUILTIN_SOURCES.append(
                      "(forensic envelope review D-120, register src/arch/envelope_overrides_d120.json)",
      "method": "Measured from the elevation vectors; corrections of the review applied", "confidence": "medium"})
 
+BUILTIN_SOURCES.append(
+    {"id": "ENG-20261127", "document": "Engineer's instruction of 27 Nov 2026 (Marcus Simioni), mark-up of the L6 AHU zoning of AHU-B-06-06STAFF-01",
+     "issue": "27 Nov 2026", "page": "mark-up", "location": "AGV lift lobbies LL ALLIP.06.01 / 06.02 and Multipurpose Room - Admin ANWSIP6 AM.06.03",
+     "text_as_read": "Omit lift shafts and correct multipurpose rooms area",
+     "method": "Rule set by the engineer: the room area is the DPA area (the measured outline took in the lift shafts, or is smaller than the room "
+               "drawn on part plan AR-IP-02-06-011 Rev A, 06.IP.ANWSIP6.001 AREA = 9)", "confidence": "high"})
+
 # name: (label, value, unit, code, source, remark)
 DEFAULTS: Dict[str, Tuple] = {
     "SafetyFactor": ("Safety factor on room loads", 0.10, "fraction", "S", "GEN-METHOD", "template convention"),
